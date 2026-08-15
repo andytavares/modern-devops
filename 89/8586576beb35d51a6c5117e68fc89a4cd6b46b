@@ -1,0 +1,24 @@
+deploy/platform/istio/peer-authentication.yaml
+  s_a10aebdc52be9f::t_c525aa3a888d4a 1-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "898586576beb35d51a6c5117e68fc89a4cd6b46b",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "unknown"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
