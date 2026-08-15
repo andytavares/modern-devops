@@ -1,0 +1,154 @@
+services/order-worker/main.go
+  h_16ba00fe96244d 1-240
+services/order-worker/main_test.go
+  h_16ba00fe96244d 1-33
+services/order-worker/Dockerfile
+  h_16ba00fe96244d 1-25
+wiki/tools/uv.md
+  s_9772e0855326d8::t_46401af64c887e 34-72
+  s_9772e0855326d8::t_c54e3335ca056c 78-79
+  s_9772e0855326d8::t_5e1c93b9fb41b7 1-33,73-77,80-82
+services/order-api/pyproject.toml
+  s_9772e0855326d8::t_d74e5ce21e881e 4
+  h_16ba00fe96244d 1-3,5-28
+services/order-api/tests/test_api.py
+  h_16ba00fe96244d 1-41
+services/order-api/Dockerfile
+  h_16ba00fe96244d 1-32
+wiki/log.md
+  s_9772e0855326d8::t_c54e3335ca056c 10-16
+  s_9772e0855326d8::t_806966e6ad2495 1-9
+services/order-api/app/main.py
+  h_16ba00fe96244d 1-135
+services/order-api/.python-version
+  s_9772e0855326d8::t_080f5663eff415 1
+modern-devops-tutorial.md
+  s_9772e0855326d8::t_18a6318dc70db1 242-558,1477,1485,2944
+  s_9772e0855326d8::t_2a6e5a14789710 1-241,559-1476,1478-1484,1486-2943,2945-4677
+services/order-api/app/settings.py
+  h_16ba00fe96244d 1-25
+wiki/tools/fastapi.md
+  s_9772e0855326d8::t_c54e3335ca056c 37-39
+  s_9772e0855326d8::t_b1846d3c27de09 1-36,40-48
+services/order-worker/atomic.go
+  h_16ba00fe96244d 1-8
+raw/README.md
+  s_9772e0855326d8::t_afd952193a5b8a 1-20
+services/order-api/uv.lock
+  s_9772e0855326d8::t_5336fc12b40e76 1-873
+wiki/concepts/dynamic-pipelines.md
+  s_9772e0855326d8::t_bca56d8e987217 1-56
+wiki/concepts/gitops.md
+  s_9772e0855326d8::t_a666fe795c883b 1-49
+wiki/concepts/immutable-image-tags.md
+  s_9772e0855326d8::t_4eadd3ade511ba 1-38
+wiki/concepts/kraft.md
+  s_9772e0855326d8::t_011bc295b4066e 1-39
+wiki/concepts/mtls.md
+  s_9772e0855326d8::t_de2f822d74d462 1-53
+wiki/concepts/observability.md
+  s_9772e0855326d8::t_ab5bd3cf2b80ea 1-57
+wiki/concepts/paved-paths.md
+  s_9772e0855326d8::t_0cbf3b2626d6e2 1-52
+wiki/concepts/reconciliation.md
+  s_9772e0855326d8::t_4c34c41006472c 1-55
+wiki/concepts/secrets-management.md
+  s_9772e0855326d8::t_cea782f4cf80fc 1-41
+wiki/concepts/service-mesh.md
+  s_9772e0855326d8::t_6227dd0634ff25 1-52
+wiki/concepts/supply-chain-choke-point.md
+  s_9772e0855326d8::t_0ac278682eb99d 1-56
+wiki/open-questions.md
+  s_9772e0855326d8::t_5f94e4ae32e908 1-46
+wiki/tools/apache-kafka.md
+  s_9772e0855326d8::t_2274ada512fadd 1-60
+wiki/tools/argo-cd.md
+  s_9772e0855326d8::t_c6e4af0defc25e 1-64
+wiki/tools/backstage.md
+  s_9772e0855326d8::t_b64e26f91a78e2 1-82
+wiki/tools/buildah.md
+  s_9772e0855326d8::t_7a6898a1be1921 1-60
+wiki/tools/buildkite.md
+  s_9772e0855326d8::t_4d1607fb569f7d 1-61
+wiki/tools/containerd.md
+  s_9772e0855326d8::t_b8596e44f7752e 1-49
+wiki/tools/docker.md
+  s_9772e0855326d8::t_cc7f8bdefe6fec 1-52
+wiki/tools/external-secrets-operator.md
+  s_9772e0855326d8::t_4aba3fc828abf8 1-64
+wiki/tools/floci.md
+  s_9772e0855326d8::t_514538e2028192 1-63
+wiki/tools/go.md
+  s_9772e0855326d8::t_fb235ba7660336 1-42
+wiki/tools/grafana.md
+  s_9772e0855326d8::t_f4268fb6dac094 1-43
+wiki/tools/helm.md
+  s_9772e0855326d8::t_9ec08de8b96f29 1-72
+wiki/tools/ingress-nginx.md
+  s_9772e0855326d8::t_231a2fd0dfde09 1-55
+wiki/tools/istio.md
+  s_9772e0855326d8::t_3f941d197d1385 1-105
+wiki/tools/kiali.md
+  s_9772e0855326d8::t_301d72a0bf8c9f 1-65
+wiki/tools/kind.md
+  s_9772e0855326d8::t_b68c0c057a7e00 1-63
+wiki/tools/kubernetes.md
+  s_9772e0855326d8::t_2ea8383d139400 1-70
+wiki/tools/openbao.md
+  s_9772e0855326d8::t_668f8cce6ea191 1-56
+wiki/tools/order-platform.md
+  s_9772e0855326d8::t_d8c2abb9b1e1cf 1-50
+wiki/tools/postgresql.md
+  s_9772e0855326d8::t_1673821b87914e 1-40
+wiki/tools/prometheus.md
+  s_9772e0855326d8::t_e684428a55581f 1-62
+wiki/tools/sonatype-nexus.md
+  s_9772e0855326d8::t_dffd9738417496 1-75
+wiki/tools/strimzi.md
+  s_9772e0855326d8::t_fa5af4d9f5e108 1-54
+.claude/skills/wiki-ask/SKILL.md
+  h_16ba00fe96244d 1-112
+.claude/skills/wiki-ingest/SKILL.md
+  h_16ba00fe96244d 1-103
+.claude/skills/wiki-lint/SKILL.md
+  h_16ba00fe96244d 1-117
+.gitignore
+  h_16ba00fe96244d 1-5
+CLAUDE.md
+  h_16ba00fe96244d 1-66
+services/order-worker/go.mod
+  h_16ba00fe96244d 1-38
+services/order-worker/go.sum
+  h_16ba00fe96244d 1-74
+wiki/.obsidian/app.json
+  h_16ba00fe96244d 1
+wiki/.obsidian/appearance.json
+  h_16ba00fe96244d 1
+wiki/.obsidian/core-plugins.json
+  h_16ba00fe96244d 1-33
+wiki/.obsidian/workspace.json
+  h_16ba00fe96244d 1-190
+wiki/index.md
+  h_16ba00fe96244d 1-90
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "cf4d506ca56fe8733e690b21525d1c8a91418966",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_9772e0855326d8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a4de7b58-90e0-4765-bc66-6cf005f5bf79",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
