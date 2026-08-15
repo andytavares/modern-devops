@@ -1,0 +1,14 @@
+deploy/platform/kafka.yaml
+  h_16ba00fe96244d 1-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "29d84d13ca1190e6c02c89474b8affef1df060e8",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
