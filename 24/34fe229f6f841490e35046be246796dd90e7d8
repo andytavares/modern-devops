@@ -1,0 +1,26 @@
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_746a25b9953768 1344-1348
+  s_a10aebdc52be9f::t_13c5f4e804ca01 2026
+  s_a10aebdc52be9f::t_ef78ce20f8f15d 4472
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "2434fe229f6f841490e35046be246796dd90e7d8",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
