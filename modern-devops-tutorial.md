@@ -1341,6 +1341,11 @@ spec:
     metadata:
       labels: { app.kubernetes.io/name: floci }
     spec:
+      # The `floci` Service is in this namespace, so kubelet would inject
+      # FLOCI_PORT=tcp://<clusterIP>:4566. Floci is a Quarkus app and SmallRye
+      # Config reads that as the `floci.port` property, which must be an integer.
+      # Startup then fails on the injected value. Turn the injection off.
+      enableServiceLinks: false
       containers:
         - name: floci
           image: floci/floci:1.5.11
@@ -2018,7 +2023,7 @@ Sidecars are injected at pod **creation**, so existing pods need a restart:
 
 ```bash
 kubectl -n floci rollout restart deployment/floci
-kubectl -n ingress-nginx rollout restart daemonset/ingress-nginx-controller
+kubectl -n ingress-nginx rollout restart deployment/ingress-nginx-controller
 
 # order-api / order-worker don't exist yet — they'll be born with sidecars in §11.
 kubectl -n floci get pods          # READY should be 2/2
@@ -4464,7 +4469,7 @@ kind delete cluster --name devops   # the cluster is disposable; recreate from �
 kubectl label namespace shop floci ingress-nginx istio-injection-
 kubectl -n shop rollout restart deploy         # pods keep their sidecars until recreated
 kubectl -n floci rollout restart deploy
-kubectl -n ingress-nginx rollout restart daemonset/ingress-nginx-controller
+kubectl -n ingress-nginx rollout restart deployment/ingress-nginx-controller
 
 helm uninstall kiali-server -n istio-system
 helm uninstall istiod -n istio-system
