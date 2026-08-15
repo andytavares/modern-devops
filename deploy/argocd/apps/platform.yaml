@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    targetRevision: main
+    path: deploy/platform
+    directory:
+      recurse: true
+      # Argo CD would otherwise try to own the Argo CD Ingress it is serving
+      # from. Excluding it avoids a self-referential sync.
+      exclude: "argocd-ingress.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated: { prune: false, selfHeal: true }
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
