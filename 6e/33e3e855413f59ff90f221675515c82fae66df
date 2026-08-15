@@ -1,0 +1,18 @@
+deploy/platform/floci-bootstrap.yaml
+  h_16ba00fe96244d 1-50
+deploy/platform/secret-store.yaml
+  h_16ba00fe96244d 1-24
+deploy/platform/external-secrets.yaml
+  h_16ba00fe96244d 1-48
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "6e33e3e855413f59ff90f221675515c82fae66df",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
