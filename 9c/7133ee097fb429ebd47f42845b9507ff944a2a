@@ -1,0 +1,20 @@
+deploy/argocd/apps/order-platform.yaml
+  h_16ba00fe96244d 1-29
+deploy/platform/argocd-ingress.yaml
+  h_16ba00fe96244d 1-21
+deploy/argocd/apps/platform.yaml
+  h_16ba00fe96244d 1-26
+deploy/argocd/root.yaml
+  h_16ba00fe96244d 1-23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "9c7133ee097fb429ebd47f42845b9507ff944a2a",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
