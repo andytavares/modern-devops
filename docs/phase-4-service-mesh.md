@@ -28,36 +28,43 @@ What Istio does secure and observe in *this* topology:
 
 | Path | Protocol | In the mesh? |
 |---|---|---|
-| ingress-nginx → `order-api` | HTTP | yes, once nginx is enrolled |
+| browser → nginx → `istio-ingressgateway` | HTTP | no — nginx is outside the mesh, the gateway is the boundary |
+| `istio-ingressgateway` → `order-api`, `frontend` | HTTP | yes |
 | `order-api` → Floci (S3, DynamoDB) | HTTP (AWS API) | yes |
 | `order-worker` → Floci | HTTP (AWS API) | yes |
 | `order-api` → Kafka | Kafka wire protocol over TCP | no — see below |
 | Prometheus → app `/metrics` | HTTP | no — and that's a problem we have to solve, §9.6 |
 
-So the honest pitch: the mesh gives you **identity-based mTLS on every HTTP hop we have, an authorization policy that survives a stolen pod IP, and L7 telemetry for calls whose code you don't control** (the AWS SDK's calls to Floci are the interesting case — you get per-route latency and error rates without touching either service).
+So the honest pitch: the mesh gives you **identity-based mTLS on every HTTP hop inside the boundary, an authorization policy that survives a stolen pod IP, and L7 telemetry for calls whose code you don't control** (the AWS SDK's calls to Floci are the interesting case — you get per-route latency and error rates without touching either service).
 
 > **Tradeoff — sidecar vs ambient.** We use sidecars: an Envoy injected into each pod. It is the mode with the deepest documentation, and `VirtualService`/`DestinationRule` work with no extra hop. The cost is real and you will feel it on a laptop: one extra container and roughly 50–100 MB per pod, plus a restart of every workload to enroll it. Istio's newer **ambient** mode replaces per-pod sidecars with one `ztunnel` per node and would cost a fraction of that RAM, at the price of needing an explicit waypoint proxy before any L7 policy works. If you are RAM-constrained, ambient is the better laptop choice; we take sidecars because the mental model matches the documentation you'll hit everywhere else.
 
-> **We keep ingress-nginx as the edge, and this is a deviation — read why before you copy it.**
-> Istio documents two supported ways to get traffic into the mesh: its own **Gateway** (which its
-> docs recommend, "to make use of the full feature set that Istio offers"), or a plain Kubernetes
-> `Ingress` with `ingressClassName: istio`. **Enrolling a third-party ingress controller into the
-> mesh is not one of them** — Istio's ingress documentation does not mention third-party
-> controllers at all, and the two nginx annotations this requires are documented by ingress-nginx
-> for unrelated purposes (`service-upstream` for zero-downtime deploys, `upstream-vhost` for
-> setting the `Host` header). Neither vendor documents the combination. It is a widely used
-> community pattern that lives in GitHub issues, not in anyone's docs.
+> **The edge: nginx owns the ports, the Istio gateway owns the mesh boundary.**
+> Istio documents two ways to get traffic into a mesh: its own **Gateway**, which its docs
+> recommend "to make use of the full feature set that Istio offers", or a plain Kubernetes `Ingress`
+> with `ingressClassName: istio`. Both put an Istio-managed proxy at the edge. Enrolling a
+> third-party ingress controller into the mesh is not one of them, and Istio's ingress documentation
+> does not mention third-party controllers at all.
 >
-> We do it here for one specific reason: nginx already owns `hostPort` 80/443 on the kind
-> control-plane node ([§4.3](phase-0-foundations.md#43-install-the-ingress-controller)), and it is
-> also the edge for Argo CD, Grafana, Kiali and Backstage — none of which are in the mesh. Moving
-> the two meshed hostnames to an Istio Gateway means something else has to own those ports.
+> So the chain here is **nginx (hostPort 80/443) → `istio-ingressgateway` → mesh workloads**. nginx
+> already owns 80/443 on the kind control-plane node
+> ([§4.3](phase-0-foundations.md#43-install-the-ingress-controller)) and keeps that job: it forwards
+> `*.localtest.me` to the gateway's Service as an ordinary backend and does nothing else with it —
+> no rewriting, no per-service annotations, no knowledge of what is behind it. That is the topology
+> Istio documents for production, with nginx standing in for the cloud load balancer. Each proxy
+> does only what its own docs describe, and neither is taught about the other.
 >
-> **At work, use the Istio Gateway.** The production shape is an external load balancer forwarding
-> to `istio-ingressgateway`, with `Gateway` + `VirtualService` doing the routing — which is exactly
-> what the `DestinationRule` and `VirtualService` in [§9.8](#98-canary-two-versions-of-pricing-behind-one-service)
-> already teach you to write. What you would delete is nginx's mesh enrolment and the two
-> annotations, not the Istio config.
+> mTLS therefore begins at the gateway, which is a meshed workload with a real identity
+> (`cluster.local/ns/istio-system/sa/istio-ingressgateway`) — that is the principal the
+> authorization policies in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist)
+> key on. Routing into the mesh is written as `Gateway` + `VirtualService`, the same objects and the
+> same language as the canary in [§9.8](#98-canary-two-versions-of-pricing-behind-one-service),
+> rather than split between an Ingress controller's annotations and Istio's config.
+>
+> Argo CD, Grafana, Kiali, Backstage and Nexus are not in the mesh and keep their own Ingresses.
+> nginx's Ingress to the gateway uses a **wildcard host**, and an exact host always wins over a
+> wildcard, so those UIs are never routed through the gateway even though their hostnames match the
+> wildcard.
 
 ### 9.2 Install the control plane
 
@@ -74,55 +81,72 @@ helm install istio-base istio/base \
 # The control plane itself.
 helm install istiod istio/istiod \
   --namespace istio-system --version 1.30.3 --wait
+
+# The edge proxy: a standalone Envoy, its Deployment, Service and ServiceAccount.
+helm install istio-ingressgateway istio/gateway \
+  --namespace istio-system --version 1.30.3 \
+  --set service.type=ClusterIP --wait
 ```
 
 Verify before you enroll anything — a half-installed control plane fails in ways that look like application bugs:
 
 ```bash
-kubectl -n istio-system get deploy istiod
+kubectl -n istio-system get deploy istiod istio-ingressgateway
+kubectl -n istio-system get svc istio-ingressgateway
 kubectl -n istio-system logs deploy/istiod --tail=20 | grep -i "ready\|error"
 istioctl version
 ```
 
-> **Two charts, not one, and no `istioctl install`.** `base` carries the CRDs and cluster-scoped RBAC; `istiod` carries the control plane. Splitting them is what makes upgrades controllable: CRDs move forward independently of the deployment that consumes them, and you can roll back one without the other. `istioctl install` is the friendlier command and hides that seam — fine for a demo, wrong for anything you intend to upgrade. We install with Helm because everything else in this cluster is installed with Helm, and one lifecycle tool beats two.
+> **`service.type=ClusterIP`, because nothing here hands out load balancers.** The chart's default is
+> `LoadBalancer`, which on kind stays `<pending>` forever. nginx is what reaches the gateway, and it
+> reaches it in-cluster by Service name, so a ClusterIP is all it needs. On a cloud provider you
+> would leave the default and delete the nginx hop entirely.
+>
+> **The gateway pod runs one Envoy, not two.** The chart ships its container as `image: auto` plus
+> the pod label `sidecar.istio.io/inject: "true"` and the annotation
+> `inject.istio.io/templates: gateway`, so istiod's webhook fills the image in and renders a
+> standalone proxy rather than adding a sidecar to something. The pod-level opt-in is why
+> `istio-system` itself stays un-enrolled ([§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones))
+> — Istio's injector matches a labelled *namespace* or an opted-in *pod*, and this is the second
+> case. The proxy still gets a certificate and a SPIFFE identity from istiod, which is what makes
+> `sa/istio-ingressgateway` usable as a principal in an authorization policy.
+
+> **Three charts, not one, and no `istioctl install`.** `base` carries the CRDs and cluster-scoped RBAC; `istiod` carries the control plane; `gateway` carries one edge proxy. Splitting them is what makes upgrades controllable: CRDs move forward independently of the deployment that consumes them, a gateway can be rolled without touching the control plane, and you can roll back one without the other. `istioctl install` is the friendlier command and hides those seams — fine for a demo, wrong for anything you intend to upgrade. We install with Helm because everything else in this cluster is installed with Helm, and one lifecycle tool beats two.
 
 ### 9.3 Enroll namespaces — and decide, deliberately, which ones
 
 Injection is per-namespace, and the interesting decisions are the exclusions.
 
 `shop` and `floci` are declared in *our* manifests ([§6.2](phase-1-the-application.md#62-deploy-floci-into-the-cluster), [§7.5](phase-1-the-application.md#75-install-external-secrets-operator)),
-so their labels belong in git and are already there. Only `ingress-nginx` — whose namespace comes from
-an upstream manifest we don't own — needs the imperative form:
+so their labels belong in git and are already there. Nothing has to be labelled by hand — check what
+you have:
 
 ```bash
-kubectl label namespace ingress-nginx istio-injection=enabled --overwrite
-
 kubectl get namespace -L istio-injection
 ```
 
 > **Put `istio-injection: enabled` in the namespace manifest in git, never on the command line.**
 > Once a namespace is under Argo CD, every field of it is — a hand-set label is dropped the next time
 > Argo CD recreates the namespace from `deploy/platform/`, and the pods that come back have no sidecar.
-> `ingress-nginx` is the exception above only because nothing in `deploy/` declares that namespace.
+> A namespace you cannot declare, because it comes from an upstream manifest you don't own, is a
+> namespace you should think twice about enrolling for exactly that reason.
 
 | Namespace | Enrolled | Why |
 |---|---|---|
 | `shop` | yes | The workloads whose traffic we actually want identity on. |
 | `floci` | yes | It's the callee on both interesting HTTP paths. A policy that says "only these two identities may call S3" is worth having. |
-| `ingress-nginx` | yes | So the edge can re-originate browser traffic as mTLS. Without this, STRICT mode in `shop` turns every page load into a connection reset. |
+| `ingress-nginx` | **no** | It is not the mesh boundary — `istio-ingressgateway` is ([§9.1](#91-what-a-mesh-actually-buys-you-here--and-what-it-doesnt)). nginx forwards a hostname to the gateway's Service and stops there, and it stays the plain edge for Argo CD, Grafana, Kiali, Backstage and Nexus, none of which are meshed. |
 | `kafka` | **no** | Strimzi brokers advertise listener addresses and do their own TLS and rebalancing; putting Envoy in that path is a well-known source of broker-discovery failures for no security gain — Strimzi already offers listener TLS and mTLS auth if you want it. |
 | `buildkite` | **no** | Build steps are Kubernetes **Jobs**. A classic sidecar keeps running after the build container exits, so the pod never reaches `Completed` and the job hangs forever. (Kubernetes ≥1.29 native sidecar containers fix this, and Istio can use them — verify it's enabled in your build before relying on it, rather than assuming.) |
-| `argocd`, `monitoring`, `istio-system` | **no** | Control-plane components. Injecting your delivery and observability tooling into the mesh means an Istio misconfiguration can take away the tools you'd use to diagnose it. |
+| `argocd`, `monitoring`, `istio-system` | **no** | Control-plane components. Injecting your delivery and observability tooling into the mesh means an Istio misconfiguration can take away the tools you'd use to diagnose it. The gateway pod in `istio-system` is the one exception and needs no namespace label: it opts itself in per-pod ([§9.2](#92-install-the-control-plane)). |
 
 Sidecars are injected at pod **creation**, so existing pods need a restart:
 
 ```bash
 kubectl -n floci rollout restart deployment/floci
-kubectl -n ingress-nginx rollout restart deployment/ingress-nginx-controller
 
 # order-api / order-worker don't exist yet — they'll be born with sidecars in §11.
 kubectl -n floci get pods          # READY should be 2/2
-kubectl -n ingress-nginx get pods  # READY should be 2/2
 ```
 
 `2/2` is the whole verification: your container plus `istio-proxy`.
@@ -166,43 +190,138 @@ spec:
     mode: STRICT
 ```
 
-Before you apply it, every `Ingress` in the chart needs two annotations. `ingress-nginx` is enrolled
-in the mesh and `shop` is about to become STRICT, so the edge has to address its backend in a way
-Envoy can identify as a service — by ClusterIP rather than raw pod IPs, and with the upstream `Host:`
-rewritten to the service FQDN, because Envoy routes HTTP by authority, not by address. This is the
-`order-api` Ingress from [§10.1](phase-1-the-application.md#101-one-chart-two-workloads), with the
-annotations in place (the chart file carries the same pair under a longer comment); `frontend` and
-every scaffolded service carry them too, with their own name substituted:
+Before you apply it, build the edge, because STRICT is what makes the edge's shape matter: once
+`shop` refuses plaintext, the last hop into a `shop` workload has to originate from inside the mesh.
+That is `istio-ingressgateway`, and it needs two objects — a `Gateway` declaring which ports and
+hostnames the proxy accepts, and a `VirtualService` per hostname declaring where it goes.
+
+**`deploy/platform/istio/edge-gateway.yaml`** (comments stripped here; the file carries them)
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*.localtest.me"
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: frontend
+  namespace: shop
+spec:
+  hosts:
+    - "app.localtest.me"
+  gateways:
+    - istio-system/edge
+  http:
+    - route:
+        - destination:
+            host: frontend.shop.svc.cluster.local
+            port:
+              number: 80
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: order-api
+  namespace: shop
+spec:
+  hosts:
+    - "shop.localtest.me"
+  gateways:
+    - istio-system/edge
+  http:
+    - route:
+        - destination:
+            host: order-api.shop.svc.cluster.local
+            port:
+              number: 80
+```
+
+The `selector` matches the pod labels the `istio/gateway` chart applies. `gateways` names the Gateway
+in `namespace/name` form because the Gateway lives in `istio-system` while these routes live in
+`shop` — a bare name would be resolved in the VirtualService's own namespace and match nothing, which
+presents as a 404 from a gateway that looks correctly configured.
+
+**The Gateway's hosts are a wildcard, and that is the property worth having.** A service the paved
+path adds ([§14.6](phase-5-developer-portal.md#146-paved-path-1--a-new-service)) becomes reachable by
+declaring a `VirtualService` and nothing else: no edit to this file, no edit to the Ingress below, no
+new object at the edge at all. A hostname with no VirtualService gets a 404 from the gateway, which
+is the correct answer for a route nobody declared.
+
+Then the hop in front of it. nginx owns `hostPort` 80/443 on the kind node and hands the meshed
+hostnames to the gateway's Service:
+
+**`deploy/platform/istio/edge-ingress.yaml`** (comments stripped here; the file carries them)
 
 ```yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: order-api
-  annotations:
-    # The edge is outside the mesh, the backend is inside it under STRICT mTLS:
-    # send to the ClusterIP, and rewrite the upstream Host to the service FQDN
-    # so Envoy can match the cluster and originate mTLS to it.
-    nginx.ingress.kubernetes.io/service-upstream: "true"
-    nginx.ingress.kubernetes.io/upstream-vhost: "order-api.{{ .Release.Namespace }}.svc.cluster.local"
+  name: mesh-edge
+  namespace: istio-system
 spec:
-  ingressClassName: {{ .Values.orderApi.ingress.className }}
+  ingressClassName: nginx
   rules:
-    - host: {{ .Values.orderApi.ingress.host }}
+    - host: "*.localtest.me"
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: order-api
-                port: { name: http }
+                name: istio-ingressgateway
+                port:
+                  number: 80
 ```
+
+No annotations, and none are needed. `istio-system` has no STRICT `PeerAuthentication`, so the
+gateway accepts this plaintext hop exactly as it would from a cloud load balancer, and mTLS begins at
+the gateway — which is in the mesh and calls `shop` workloads with a real workload identity. nginx is
+never told that the mesh exists.
+
+> **A wildcard host in nginx, and an exact host always wins.** Argo CD, Grafana, Kiali, Backstage and
+> Nexus all sit under `localtest.me` and all keep their own exact-host Ingresses, so nginx
+> routes them straight to their own Services and they never reach the gateway. That precedence is
+> what lets one wildcard Ingress serve the whole mesh without swallowing the platform's own UIs — and
+> it is also the rule to remember before you add an exact-host Ingress for a hostname you meant to
+> route into the mesh, because that one wins too.
 
 ```bash
 mkdir -p deploy/platform/istio
+kubectl apply -f deploy/platform/istio/edge-gateway.yaml
+kubectl apply -f deploy/platform/istio/edge-ingress.yaml
 kubectl apply -f deploy/platform/istio/peer-authentication.yaml
 ```
+
+The two `Ingress` resources written in [§10.1](phase-1-the-application.md#101-one-chart-two-workloads)
+are now dead, and they will fight this one: two Ingresses claiming the same host and path is a
+conflict the nginx admission webhook rejects outright. Delete them from the chart — the whole
+`{{- if .Values.orderApi.ingress.enabled }}` block at the end of `order-api.yaml`, and the matching
+block in `frontend.yaml` — along with the now-unused `ingress:` keys in `values.yaml`. Routing for
+these two services lives in the VirtualServices above from here on.
+
+```bash
+kubectl -n shop delete ingress order-api frontend --ignore-not-found
+```
+
+That is the trade the Gateway asks for, stated plainly: one more component to install, and routing
+that no longer lives in a second proxy's annotations.
+
+The two `VirtualService`s point at Services that do not exist yet — `frontend` and `order-api` arrive
+with the chart in [§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery). That is fine: a route to
+a missing destination is a 503 until the destination shows up, and nothing else in the mesh cares.
 
 Now prove it, because "I applied a YAML file" is not evidence. Talk to Floci from a pod with no sidecar:
 
@@ -226,7 +345,7 @@ mTLS answers *who is calling*. It does not answer *whether they should be*. Any 
 
 **Deny-by-default is a property of a namespace, not of the workloads you wrote a policy for.** Istio's rule: a workload that **no** `ALLOW` policy selects accepts traffic from anything in the mesh. So a file containing nothing but per-workload `ALLOW` policies is not default-deny — it is default-deny for the workloads you remembered, and wide open for the rest. The empty-spec `deny-all` per namespace is what makes the phrase true, and it has to exist in `shop` for the same reason it exists in `floci`.
 
-The file below is that pattern twice: a `deny-all` for `floci` and a `deny-all` for `shop`, then one `ALLOW` per real caller relationship. `frontend` is a browser-facing page, so its only caller is the ingress; `order-api` is reachable from the ingress too. `order-worker` gets no policy at all and that is the correct answer — it takes no inbound traffic, and Prometheus reaches the sidecar's merged endpoint ([§9.6](#96-the-metrics-problem-you-just-created)) rather than the application, so there is nothing left to allow.
+The file below is that pattern twice: a `deny-all` for `floci` and a `deny-all` for `shop`, then one `ALLOW` per real caller relationship. `frontend` is a browser-facing page, so its only caller is the edge gateway; `order-api` is reachable from the gateway and from `frontend`. `order-worker` gets no policy at all and that is the correct answer — it takes no inbound traffic, and Prometheus reaches the sidecar's merged endpoint ([§9.6](#96-the-metrics-problem-you-just-created)) rather than the application, so there is nothing left to allow.
 
 **`deploy/platform/istio/authorization-policy.yaml`**
 
@@ -277,7 +396,7 @@ spec:
     - from:
         - source:
             principals:
-              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+              - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
@@ -293,7 +412,7 @@ spec:
     - from:
         - source:
             principals:
-              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+              - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
 ```
 
 ```bash
@@ -302,7 +421,15 @@ kubectl apply -f deploy/platform/istio/authorization-policy.yaml
 
 > **`principals` is the point.** These rules key on the **SPIFFE identity in the peer's certificate**, not on IP addresses or namespace labels. An attacker who gets a shell in a pod in another namespace cannot reach Floci by spoofing an IP, because they cannot mint a certificate for `sa/order-api`. This is why "the mesh" and "network policy" are not competing answers to the same question: NetworkPolicy filters packets by address, Istio filters requests by cryptographic identity. Use both.
 
-> **The service-account names are load-bearing.** These principals must match the ServiceAccounts the Helm chart creates in [§10.1](phase-1-the-application.md#101-one-chart-two-workloads). If the chart names them differently, the policy silently denies everything, and you will debug it as "Floci is down". `istioctl analyze -n shop` catches the mismatch; `kubectl get pods` does not.
+> **The edge principal is the gateway, not whatever is in front of it.** Traffic arriving through
+> `istio-ingressgateway` is authenticated as
+> `cluster.local/ns/istio-system/sa/istio-ingressgateway`, because that is the workload that
+> originated the mTLS connection into `shop`. nginx sits one hop further out, is not in the mesh, and
+> has no identity the mesh can express — which is the whole reason the mesh boundary has to be a
+> meshed proxy. If nginx could reach `shop` workloads directly, no `principals` rule could describe
+> it.
+>
+> **The service-account names are load-bearing.** These principals must match the ServiceAccounts the Helm chart creates in [§10.1](phase-1-the-application.md#101-one-chart-two-workloads), and — for the gateway — the `istio/gateway` chart's ServiceAccount, which takes the Helm release name. Install that release under a different name and the policy denies the edge, which presents as `RBAC: access denied` on every page load. `istioctl analyze -n shop` catches the mismatch; `kubectl get pods` does not.
 
 ### 9.6 The metrics problem you just created
 
@@ -384,10 +511,11 @@ git add deploy/platform/istio deploy/platform/floci-bootstrap.yaml
 git commit -m "feat(platform): istio with strict mtls and default-deny authz"
 ```
 
-`order-api` and `order-worker` don't exist yet, so §9.4's proof covers Floci only. The rest of the mesh — the ingress path, the authorization policies keyed on those two service accounts — becomes verifiable in [§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery), when Argo CD deploys the chart into the now-enrolled `shop` namespace. If a page load returns `RBAC: access denied` at that point, the policy in §9.5 is what to read first, and `istioctl analyze -n shop` is what to run.
+`order-api` and `order-worker` don't exist yet, so §9.4's proof covers Floci only. The rest of the mesh — the edge path through the gateway, the authorization policies keyed on those two service accounts — becomes verifiable in [§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery), when Argo CD deploys the chart into the now-enrolled `shop` namespace. If a page load returns `RBAC: access denied` at that point, the policy in §9.5 is what to read first, and `istioctl analyze -n shop` is what to run.
 
 When it is running, do not accept a `200` from the browser as proof that the edge is meshed — a `200`
-only tells you bytes moved. Ask the destination sidecar which security policy it applied:
+only tells you bytes moved, and the first two hops are plaintext by design. Ask the destination
+sidecar which security policy it applied:
 
 ```bash
 kubectl -n shop exec deploy/order-api -c istio-proxy -- \
@@ -397,14 +525,25 @@ kubectl -n shop exec deploy/order-api -c istio-proxy -- \
 ```
 
 `mutual_tls`, with `source_principal` reading
-`spiffe://cluster.local/ns/ingress-nginx/sa/ingress-nginx`, is the evidence. `none` or `unknown` means
-a working website with no mTLS at the edge, which is what you get without the two Ingress annotations
-in §9.4.
+`spiffe://cluster.local/ns/istio-system/sa/istio-ingressgateway`, is the evidence: the last hop into
+the workload was authenticated, and it was authenticated as the gateway. `none` or `unknown` means a
+working website with no mTLS at the edge — which is what you get if something reaches the workload
+without passing through the gateway.
+
+The working state is `app.localtest.me` returning 200, `shop.localtest.me/healthz` returning 200, and
+the platform UIs still answering on their own exact hostnames — Argo CD 200, Grafana 302, Kiali 302,
+Backstage 200, none of them through the gateway.
 
 ### 9.8 Canary: two versions of `pricing` behind one Service
 
 Everything above secures traffic. This section *steers* it — and it is the half of a service mesh that
 most people install one for.
+
+The objects are the same two kinds you already wrote at the edge in §9.4. A `VirtualService` routes a
+hostname from the gateway to a Service; the one below routes a Service's internal callers across two
+subsets of it. North-south and east-west routing in one language, one API, one place to read the
+whole picture — which is the argument for terminating traffic on Istio's own Gateway rather than
+splitting the routing story across two proxies' configuration models.
 
 > **This section needs a service that does not exist yet.** Traffic shifting requires two versions of
 > something, and a synchronous call to shift. [Phase 7](phase-7-polyglot-monorepo.md) builds
@@ -747,6 +886,10 @@ kubectl delete -f deploy/platform/istio/pricing-fault-injection.yaml.disabled
 Every call between meshed workloads is mutually authenticated and encrypted with certificates you
 never issued by hand. `floci` refuses anything that is not `order-api` or `order-worker`, by
 identity — not by IP, which can be stolen. Kiali draws the graph, including the refusals.
+
+Browser traffic enters through `istio-ingressgateway`, so the mesh boundary is a workload with an
+identity of its own, and routing into the mesh is written in the same objects as routing inside it.
+nginx keeps ports 80/443 and the platform's own UIs, and knows nothing about any of this.
 
 Your monitoring survived, because you fixed it when it broke.
 

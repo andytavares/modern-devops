@@ -14,6 +14,9 @@ metadata:
     version: {{ $version }}
 spec:
   replicas: {{ $cfg.replicas }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: pricing
@@ -28,7 +31,11 @@ spec:
         # live on the pod template, not just the Deployment.
         version: {{ $version }}
       annotations:
-        checksum/config: {{ toJson $.Values | sha256sum }}
+        # Both versions read the same ConfigMap, so both hash the same file.
+        # Hashing the rendered ConfigMap rather than `.Values` keeps an image-tag
+        # rewrite for an unrelated service out of this Deployment's pod template.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-pricing.yaml") $ | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ $.Values.pricing.httpPort | quote }}
@@ -43,7 +50,7 @@ spec:
       enableServiceLinks: false
       serviceAccountName: pricing
       imagePullSecrets:
-        - name: {{ $.Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" $ }}
       securityContext:
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
@@ -54,16 +61,13 @@ spec:
           ports:
             - { name: grpc, containerPort: {{ $.Values.pricing.grpcPort }} }
             - { name: http-metrics, containerPort: {{ $.Values.pricing.httpPort }} }
+          envFrom:
+            - configMapRef: { name: pricing-config }
           env:
+            # The two values that differ between v1 and v2 stay inline: they are
+            # per-Deployment identity, not shared config.
             - name: PRICING_VERSION
               value: {{ $version | quote }}
-            - name: PRICING_GRPC_PORT
-              value: {{ $.Values.pricing.grpcPort | quote }}
-            - name: PRICING_HTTP_PORT
-              value: {{ $.Values.pricing.httpPort | quote }}
-            # PEX unpacks its dependency closure here; see the volumeMount note.
-            - name: PEX_ROOT
-              value: "/tmp/pex"
             - name: SERVICE_VERSION
               value: {{ $cfg.image.tag | quote }}
           # The kubelet speaks the gRPC health checking protocol itself, so the
@@ -101,6 +105,7 @@ spec:
             - { name: tmp, mountPath: /tmp }
       volumes:
         - { name: tmp, emptyDir: {} }
+{{- include "op.pdb" (dict "name" "pricing" "pdbName" (printf "pricing-%s" $version) "root" $ "replicas" $cfg.replicas "selector" (dict "app.kubernetes.io/name" "pricing" "version" $version)) }}
 ---
 {{- end }}
 apiVersion: v1

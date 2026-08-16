@@ -1,0 +1,11 @@
+{{- if .Values.orderWorker.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-worker-config
+  labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 4 }}
+data:
+  {{- include "op.commonConfig" . | nindent 2 }}
+  DDB_TABLE: {{ .Values.aws.ddbTable | quote }}
+  KAFKA_GROUP: {{ .Values.orderWorker.consumerGroup | quote }}
+{{- end }}

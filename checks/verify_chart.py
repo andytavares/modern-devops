@@ -13,7 +13,9 @@ you are trying to check.
         -f deploy/env/local/values.yaml -n shop | python3 checks/verify_chart.py -
 """
 
+import re
 import sys
+from pathlib import Path
 
 try:
     import yaml
@@ -38,7 +40,12 @@ def _probe_port_names(container):
 def check(docs):
     problems = []
     for doc in docs:
-        if not doc or doc.get("kind") not in {"Deployment", "StatefulSet", "DaemonSet", "Job"}:
+        if not doc or doc.get("kind") not in {
+            "Deployment",
+            "StatefulSet",
+            "DaemonSet",
+            "Job",
+        }:
             continue
         name = doc["metadata"]["name"]
         spec = doc["spec"]["template"]["spec"]
@@ -86,9 +93,53 @@ def check(docs):
     return problems
 
 
+def check_frontend_proxy_port(docs, repo):
+    """The frontend's nginx proxy_pass must target order-api's Service port.
+
+    These two facts live in different directories, in different languages, and
+    nothing connects them. When they disagreed, every order in the dashboard
+    read `HTTP 502` while curl against the same API returned `202` — the
+    frontend was proxying to 8000, order-api's *container* port, which nothing
+    serves on the ClusterIP.
+
+    Checked here, against the rendered chart, because the port is a template
+    expression in the source and reading it as text means reading `{{ }}`.
+    """
+    conf = Path(repo) / "frontend" / "nginx.conf"
+    if not conf.exists():
+        return []
+    m = re.search(
+        r"proxy_pass\s+http://order-api\.shop\.svc\.cluster\.local:(\d+)/",
+        conf.read_text(),
+    )
+    if not m:
+        return ["frontend/nginx.conf: no order-api proxy_pass found"]
+    proxied = int(m.group(1))
+
+    for doc in docs:
+        if not doc or doc.get("kind") != "Service":
+            continue
+        if doc["metadata"]["name"] != "order-api":
+            continue
+        for port in doc["spec"].get("ports", []):
+            if port.get("name") == "http":
+                if int(port["port"]) != proxied:
+                    return [
+                        f"frontend/nginx.conf proxies to order-api:{proxied}, but the "
+                        f"Service publishes {port['port']}. Every order returns HTTP 502 "
+                        f"while order-api itself answers normally."
+                    ]
+                return []
+    return ["no order-api Service with a named `http` port in the rendered chart"]
+
+
 def main():
-    source = sys.stdin if len(sys.argv) > 1 and sys.argv[1] == "-" else open(sys.argv[1])
-    problems = check(list(yaml.safe_load_all(source.read())))
+    source = (
+        sys.stdin if len(sys.argv) > 1 and sys.argv[1] == "-" else open(sys.argv[1])
+    )
+    docs = list(yaml.safe_load_all(source.read()))
+    repo = Path(__file__).parent.parent
+    problems = check(docs) + check_frontend_proxy_port(docs, repo)
     for p in problems:
         print("  " + p)
     print(f"chart port consistency: {len(problems)} problem(s)")

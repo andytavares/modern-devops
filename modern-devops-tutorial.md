@@ -375,6 +375,8 @@ Most people meet Nexus as "the place images go". That undersells it. An artifact
 
 We configure three repository types to make that concrete: a **Docker hosted** registry for our images, a **PyPI proxy**, and a **Go proxy**.
 
+> **A checksum is only worth the origin it comes from.** Some things cannot route through the choke point — a launcher binary published only on GitHub releases, for instance — and the usual answer is a vendor install script that downloads `${url}.sha256` next to the artifact and verifies one against the other. That detects a corrupted transfer. It cannot detect a compromised release: whoever can replace the artifact can replace the checksum beside it. The rule for anything that bypasses Nexus is therefore: **pin a version and a checksum that a human reviewed, in your own repo, and fetch neither at build time.** [§17.3](#173-pantstoml) applies exactly this to the one binary in this platform that GitHub is the only source for.
+
 > **Why Nexus, and why its free edition rather than Artifactory.** In an enterprise you will be handed Sonatype Nexus Repository Pro or JFrog Artifactory, and the choice between them was made by procurement, not by you. Neither is licensable for a tutorial: JFrog lists self-managed Artifactory from **$27,000/year**, and Nexus Pro is quote-only. So we run `sonatype/nexus3:3.95.0`, which is **Nexus Repository Community Edition** — not a lookalike, the same binary and the same UI as Pro under a usage cap of **40,000 total components or 100,000 requests per day**, after which it refuses new components until you drop below both ([Sonatype](https://help.sonatype.com/en/ce-onboarding.html), as of 2026-08). Everything §5 does — hosted vs proxy vs group, the Docker Bearer Token realm, a separate connector port because the registry API lives at `/v2/`, anonymous access scoped per repository, a private `GOPROXY` — is identical on Pro.
 >
 > It transfers to Artifactory as well, because the parts that matter are protocols, not products. A Docker registry is the OCI distribution API; a PyPI proxy is PEP 503's simple index; a Go proxy is the module proxy protocol. The client-side configuration in [§5.8](#58-trust-the-plain-http-registry-from-docker)–[§5.10](#510-teach-pods-about-nexus-coredns) — `insecure-registries`, containerd's `hosts.toml`, `PIP_INDEX_URL`, `GOPROXY` — is unchanged against Artifactory, and Artifactory's repository types are Nexus's under other names: **local** = hosted, **remote** = proxy, **virtual** = group.
@@ -396,9 +398,11 @@ If the name differs between them, your image reference (`nexus:8082/shop/order-a
 
 The fix is three-part, and we do each explicitly:
 
-1. Run Nexus as a Docker container **attached to the `kind` network** with the network alias `nexus`. That covers containerd on the nodes, which resolves via Docker's embedded DNS.
+1. Run Nexus as a Docker container **attached to the `kind` network**, with the network alias `nexus` and a **static IP**. That covers containerd on the nodes, which resolves via Docker's embedded DNS.
 2. Publish ports to the host and add `nexus` to your `/etc/hosts` pointing at `127.0.0.1`. That covers your shell.
-3. Add a `hosts` block to CoreDNS mapping `nexus` to the container's IP on the `kind` bridge. That covers pods.
+3. Add a `hosts` block to CoreDNS mapping `nexus` to that static IP. That covers pods.
+
+The static IP in step 1 is what makes step 3 permanent. CoreDNS resolves names, not Docker containers, so the entry has to name an address — and an address Docker chose is an address Docker is free to choose differently the next time the container starts.
 
 ### 5.3 Run Nexus
 
@@ -410,6 +414,7 @@ docker run -d \
   --name nexus \
   --network kind \
   --network-alias nexus \
+  --ip 172.18.255.10 \
   --restart unless-stopped \
   -p 8081:8081 \
   -p 8082:8082 \
@@ -419,6 +424,12 @@ docker run -d \
 ```
 
 > The `kind` Docker network is created by `kind create cluster`. If `--network kind` errors with "network not found", your cluster isn't up — go back to [§4.2](#42-create-the-cluster).
+
+**Why `--ip`, and why that address.** `docker run --ip` requests a fixed address on a user-defined network, and Docker honours it for the life of the container. Without it, Nexus gets whatever the IPAM driver hands out on each start, and the CoreDNS entry in [§5.10](#510-teach-pods-about-nexus-coredns) — which must name an address — goes stale the first time the container is recreated.
+
+The `kind` network is `172.18.0.0/16` with gateway `172.18.0.1`; confirm yours with `docker network inspect kind`. kind allocates node addresses from the low end of that range (`172.18.0.2`, `.3`, `.4`…), and every node you add takes the next one, so anything near the bottom is a collision waiting to happen. `172.18.255.10` is inside the subnet, outside the gateway, and far enough from the allocation front that kind will not reach it. Pick a different high address if you like; pick a low one and you will eventually hand Nexus an IP a control-plane node already holds.
+
+If Nexus is already running without `--ip`, `docker rm -f nexus` and re-run the command above. The `nexus-data` volume is separate from the container, so nothing configured in the sections below is lost.
 
 Nexus takes 2–4 minutes on first boot (it initialises an embedded database). Watch it:
 
@@ -594,23 +605,34 @@ docker exec devops-worker curl -s -o /dev/null -w '%{http_code}\n' http://nexus:
 ### 5.10 Teach pods about Nexus (CoreDNS)
 
 
-Pods resolve names through CoreDNS, which knows nothing about Docker networks. Get Nexus's IP on the `kind` bridge and add a static entry.
+Pods resolve names through CoreDNS, which knows nothing about Docker networks. Point it at the static IP [§5.3](#53-run-nexus) pinned.
 
 ```bash
-NEXUS_IP=$(docker inspect nexus \
-  -f '{{ (index .NetworkSettings.Networks "kind").IPAddress }}')
-echo "Nexus IP on kind network: $NEXUS_IP"
+NEXUS_IP=172.18.255.10
+
+# Confirm §5.3 took. If this prints anything else, --ip did not apply and the
+# entry below will be wrong.
+docker inspect nexus -f '{{ (index .NetworkSettings.Networks "kind").IPAddress }}'
 ```
 
-Patch the CoreDNS Corefile. This edits the ConfigMap in place, inserting a `hosts` block:
+CoreDNS's `hosts` plugin is the documented way to serve static A records from the Corefile, and `fallthrough` is what makes it additive: a name the block does not define falls through to the plugins after it, so cluster DNS is untouched.
+
+Patch the Corefile. This edits the ConfigMap in place:
 
 ```bash
 kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}' > /tmp/Corefile.orig
 
 python3 - "$NEXUS_IP" <<'PY'
-import subprocess, sys
+import re, sys
 ip = sys.argv[1]
 cm = open('/tmp/Corefile.orig').read()
+
+# Idempotent: drop any hosts block we already installed before adding one.
+# Appending blindly gives CoreDNS two hosts blocks for the same name, and the
+# second one is dead weight that outlives whatever it was meant to fix.
+HOSTS = re.compile(r"[ \t]*hosts \{\n(?:[^\n]*\n)*?[ \t]*\}\n")
+cm = HOSTS.sub(lambda m: "" if " nexus\n" in m.group(0) else m.group(0), cm)
+
 block = f"""    hosts {{
         {ip} nexus
         fallthrough
@@ -639,7 +661,7 @@ kubectl run dnstest --rm -it --restart=Never --image=curlimages/curl:8.11.1 -- \
 # 401
 ```
 
-> **Tradeoff — CoreDNS hosts entry vs. `hostAliases` vs. an in-cluster Nexus.** A CoreDNS entry is cluster-wide and invisible to workload manifests, which is exactly right for infrastructure DNS — but it breaks if the Nexus container is recreated and lands on a different IP (re-run this section if so). `hostAliases` on each pod is per-workload and pollutes every manifest. Running Nexus *inside* the cluster is tempting but makes bootstrap circular: the cluster needs the registry to start workloads, and the registry is a workload. Running the registry outside the cluster it serves is the correct production topology too, for exactly that reason.
+> **Tradeoff — CoreDNS hosts entry vs. `hostAliases` vs. an in-cluster Nexus.** A CoreDNS entry is cluster-wide and invisible to workload manifests, which is exactly right for infrastructure DNS. It names an address rather than a container, which would be fragile if the address were Docker's to choose — [§5.3](#53-run-nexus) pins it precisely so this entry survives the container being recreated. `hostAliases` on each pod is per-workload and pollutes every manifest. Running Nexus *inside* the cluster is tempting but makes bootstrap circular: the cluster needs the registry to start workloads, and the registry is a workload. Running the registry outside the cluster it serves is the correct production topology too, for exactly that reason.
 
 ### 5.11 Push a first image to prove the whole path
 
@@ -1953,6 +1975,8 @@ You should see `openbao-0` Running.
 
 Everything below runs the `bao` CLI inside the pod, so nothing is installed on your laptop.
 
+This is bootstrap, and it runs as root because enabling a secrets engine is a mount operation on `sys/mounts` that no scoped policy grants. [§7.5a](#75a-give-humans-an-auth-method-too) builds the non-root path that everything after §7 uses.
+
 ```bash
 BAO="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
 
@@ -1991,7 +2015,7 @@ kubectl create clusterrolebinding openbao-token-review \
   --serviceaccount=openbao:openbao
 ```
 
-Now enable and configure the auth method. Note what is **not** in this command:
+Now enable and configure the auth method. This is bootstrap again — `auth enable` and `auth/kubernetes/config` are `sys/auth` and `auth/*` writes, which the operator policy in [§7.5a](#75a-give-humans-an-auth-method-too) deliberately does not grant. Note what is **not** in this command:
 
 ```bash
 kubectl -n openbao exec -i openbao-0 -- sh -c '
@@ -2021,7 +2045,7 @@ denied`, the `ClusterSecretStore` flips to `Invalid`, and every `ExternalSecret`
 stops refreshing — long after the setup you verified as green. The same argument applies to
 `kubernetes_ca_cert`, which breaks on CA rotation instead of token rotation.
 
-Write a policy granting read-only access to the `shop` mount, and a role binding it to the ESO ServiceAccount:
+Write a policy granting read-only access to the `shop` mount, and a role binding it to the ESO ServiceAccount. Still bootstrap: writing a policy is `sys/policies/acl/*`, and an identity that can write policies can grant itself anything, which is why nothing but root gets it here.
 
 ```bash
 kubectl -n openbao exec -i openbao-0 -- sh -c '
@@ -2115,6 +2139,180 @@ kubectl get clustersecretstore openbao -o jsonpath='{.status.conditions[0]}' && 
 If it says `Invalid`, check `kubectl -n external-secrets logs deploy/external-secrets` — 99% of the time it's the `system:auth-delegator` binding or a typo in the role name.
 
 > **`ClusterSecretStore` vs `SecretStore`.** A `SecretStore` is namespaced: teams configure their own vault connection and can't reach each other's. A `ClusterSecretStore` is one shared definition — less duplication, but any namespace can reference it, so your isolation now depends entirely on the OpenBao policy rather than on Kubernetes RBAC. We use `ClusterSecretStore` because we have one team; use namespaced stores the moment you have two.
+
+### 7.5a Give humans an auth method too
+
+The machine path is finished and it is genuinely least-privilege: ESO presents a ServiceAccount JWT, gets a token carrying `shop-read`, and that token can read the `shop` mount and do nothing else. The human path has been the root token the entire time. Every `$BAO` command above ran as root.
+
+OpenBao documents the `root` policy as being for initial setup and emergencies, to be revoked once a real auth method exists ([tokens](https://openbao.org/docs/concepts/tokens/)). Bootstrapping that first non-root path is itself a root operation — there is no way around it, and it is the last thing root should be used for.
+
+Enable `userpass`, write a policy scoped to the `shop` mount, and bind a user to it:
+
+```bash
+kubectl -n openbao exec -i openbao-0 -- sh -c '
+set -eu
+export BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200   # bootstrap, and the last of it
+
+bao auth enable userpass 2>/dev/null || true
+
+# Least privilege for an operator of THIS platform: write the secrets the
+# platform consumes, and see what is there. Not the root policy under another
+# name — no sys/*, no auth/*, no mount management, no delete or destroy, and no
+# ability to widen its own grant.
+bao policy write shop-admin - <<EOF
+path "shop/data/*" {
+  capabilities = ["create", "update", "read"]
+}
+path "shop/metadata/*" {
+  capabilities = ["read", "list"]
+}
+EOF
+
+bao write auth/userpass/users/operator \
+  password="change-me" \
+  token_policies=shop-admin \
+  token_ttl=1h \
+  token_max_ttl=8h
+'
+```
+
+Now log in as a human and keep the token it hands back:
+
+```bash
+kubectl -n openbao exec -it openbao-0 -- env BAO_ADDR=http://127.0.0.1:8200 \
+  bao login -method=userpass username=operator
+# prompts for the password, then prints the token, its 1h duration,
+# and its policies: default and shop-admin
+
+BAO_OP="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=<the token above> BAO_ADDR=http://127.0.0.1:8200 bao"
+```
+
+Prove the grant in both directions. It is not a real boundary until you have seen it refuse something:
+
+```bash
+# Allowed: writing a secret the platform consumes.
+$BAO_OP kv put shop/order-api signing_key="$(openssl rand -hex 32)"
+
+# Refused: everything else.
+$BAO_OP auth list
+```
+
+```
+Error listing enabled authentications: Error making API request.
+URL: GET http://127.0.0.1:8200/v1/sys/auth
+Code: 403. Errors:
+* 1 error occurred:
+	* permission denied
+```
+
+That 403 is the point of the section. The operator can rotate every credential on this platform and cannot enable an auth method, mount an engine, read a policy, or grant itself anything.
+
+> **`bao kv patch` needs a separate `patch` capability, and it is deliberately not granted.** Every `kv put` in this tutorial is a full overwrite of the version: `kv put shop/backstage github_token=...` on a path that also holds `postgres_password` destroys the other keys. Write every key of a path in one command, and read the path first if you are unsure what is on it.
+
+The same three steps are packaged as a re-runnable Job, because dev-mode OpenBao loses everything on restart and you will need them again:
+
+**`deploy/platform/openbao-operator-auth.yaml`**
+
+```yaml
+# The human path into OpenBao.
+#
+# The machine path already exists: ESO authenticates with its ServiceAccount
+# through the kubernetes auth method and gets the read-only `shop-read` policy.
+# Humans have had nothing, so every operator write has been made with the root
+# token. The root policy is meant for initial setup and emergencies only and
+# should be revoked once a real auth method exists
+# (https://openbao.org/docs/concepts/tokens). This Job builds that auth method:
+# `userpass`, a scoped `shop-admin` policy, and an `operator` user bound to it.
+#
+# Bootstrapping an auth method is itself a root operation — there is no way to
+# create the first non-root path without a root token. That token is supplied at
+# run time out of a Secret rather than committed here:
+#
+#   kubectl -n openbao create secret generic openbao-bootstrap \
+#     --from-literal=root-token=root \
+#     --from-literal=operator-password=<choose one> \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# A Job's pod template is immutable once created, so re-running this is
+# `kubectl delete -f` then `kubectl apply -f`. The script itself is idempotent:
+# enabling an already-enabled auth method and rewriting an existing policy or
+# user are all no-ops.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-operator-auth
+  namespace: openbao
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      annotations:
+        # An injected sidecar keeps the pod alive after the job finishes, so it
+        # never completes.
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bao
+          image: quay.io/openbao/openbao:2.6.1
+          env:
+            - { name: BAO_ADDR, value: "http://openbao.openbao.svc.cluster.local:8200" }
+            - name: BAO_TOKEN
+              valueFrom:
+                secretKeyRef: { name: openbao-bootstrap, key: root-token }
+            - name: OPERATOR_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: openbao-bootstrap, key: operator-password }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+
+              echo "waiting for openbao..."
+              until bao status >/dev/null 2>&1; do sleep 2; done
+
+              echo "enabling userpass (idempotent)"
+              bao auth enable userpass 2>/dev/null || true
+
+              # Least privilege for an operator of THIS platform: write the
+              # secrets the platform consumes, and see what is there. Not the
+              # root policy with a different name — no sys/*, no auth/*, no
+              # mount management, no ability to widen its own grant, and no
+              # delete or destroy on secret data.
+              echo "writing shop-admin policy"
+              bao policy write shop-admin - <<'POLICY'
+              path "shop/data/*" {
+                capabilities = ["create", "update", "read"]
+              }
+              path "shop/metadata/*" {
+                capabilities = ["read", "list"]
+              }
+              POLICY
+
+              echo "binding operator user to shop-admin"
+              bao write auth/userpass/users/operator \
+                password="$OPERATOR_PASSWORD" \
+                token_policies=shop-admin \
+                token_ttl=1h \
+                token_max_ttl=8h
+
+              echo "--- result ---"
+              bao auth list
+              bao policy read shop-admin
+```
+
+```bash
+kubectl -n openbao create secret generic openbao-bootstrap \
+  --from-literal=root-token=root \
+  --from-literal=operator-password=change-me \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl apply -f deploy/platform/openbao-operator-auth.yaml
+kubectl -n openbao logs job/openbao-operator-auth -f
+```
+
+> **The root token is not revoked here, and cannot be.** This cluster runs OpenBao in dev mode, where the root token is a fixed value passed at startup and recreated every time the pod restarts — revoking it accomplishes nothing. In a real cluster the last step of this section is `bao token revoke <root-token>`, after which a new root token exists only if you run `bao operator generate-root` with a quorum of unseal-key holders. That quorum requirement is the whole design: root is an event several people have to agree to, not a string in someone's shell history.
 
 ### 7.6 Let Kubernetes pull from Nexus
 
@@ -4144,7 +4342,13 @@ The trade that remains, stated plainly: **SYS_ADMIN is potent.** It covers `moun
 
 **Quoted heredocs are load-bearing.** `<<'YAML'` passes text through untouched; `<<YAML` lets the generator substitute `$SHA`, `$SVC` and `$REGISTRY`. Get the quoting backwards on the first block and `$$`-style text meets `sh`, where `$$` is the process ID — you would emit an image name like `/shop/order-api:8412REGISTRY` and spend an afternoon on it. The rule: quote the heredoc unless that block needs a value from the generator, and never emit a literal `$` — resolve it while writing the YAML instead.
 
-> **The obvious next step, and why it isn't here.** A generator can also decide *what changed* — `git diff --name-only` against the merge base, then emit build steps only for the services it touched. We don't, because `deploy/env/local/values.yaml` carries both tags at once: skip the `order-worker` build and the deploy step still stamps this SHA on both images, so Kubernetes pulls an `order-worker` tag that was never pushed and you get `ImagePullBackOff`. Per-service builds need per-service tags in the overlay first. Fix the contract, then optimise the pipeline — never the other way round.
+> **The obvious next step, and why it isn't here.** A generator can also decide *what changed* — `git diff --name-only` against the merge base, then scope the pipeline to the services it touched. Every CI tool sells some version of this, and Pants sells `--changed-since` ([§19.5](#195-one-ci-step-instead-of-two)). It does not fit this pipeline, for two separate reasons.
+>
+> **Scoping the builds breaks the deploy contract.** `deploy/env/local/values.yaml` carries every tag at once, and the deploy step rewrites all of them to this SHA. Skip the `order-worker` build and the deploy step still stamps this SHA on `order-worker`, so Kubernetes pulls a tag that was never pushed and you get `ImagePullBackOff`. Per-service builds need per-service tags in the overlay first.
+>
+> **Scoping the tests is worse, because it is silent.** Services are discovered from the filesystem, not from the diff, so every service gets an image on every build whatever the tests did. Pair a diff-scoped test run with an unconditional image build and you ship an image whose code was never tested on the commit that produced it — the one outcome a pipeline exists to prevent. It fails no step. It just goes green.
+>
+> Diff-scoping is a matched pair or it is a hazard: tests and packaging must be scoped by the same diff, and the deploy contract has to carry per-service tags underneath both. Fix the contract, then optimise the pipeline — never the other way round. The speedup is also smaller than it looks once a build system caches at the level of the individual process, which is where this pipeline ends up in [§19.5](#195-one-ci-step-instead-of-two): an unchanged test does not re-run even when the target set names it.
 
 ### 12.6 Run it
 
@@ -4206,36 +4410,43 @@ What Istio does secure and observe in *this* topology:
 
 | Path | Protocol | In the mesh? |
 |---|---|---|
-| ingress-nginx → `order-api` | HTTP | yes, once nginx is enrolled |
+| browser → nginx → `istio-ingressgateway` | HTTP | no — nginx is outside the mesh, the gateway is the boundary |
+| `istio-ingressgateway` → `order-api`, `frontend` | HTTP | yes |
 | `order-api` → Floci (S3, DynamoDB) | HTTP (AWS API) | yes |
 | `order-worker` → Floci | HTTP (AWS API) | yes |
 | `order-api` → Kafka | Kafka wire protocol over TCP | no — see below |
 | Prometheus → app `/metrics` | HTTP | no — and that's a problem we have to solve, §9.6 |
 
-So the honest pitch: the mesh gives you **identity-based mTLS on every HTTP hop we have, an authorization policy that survives a stolen pod IP, and L7 telemetry for calls whose code you don't control** (the AWS SDK's calls to Floci are the interesting case — you get per-route latency and error rates without touching either service).
+So the honest pitch: the mesh gives you **identity-based mTLS on every HTTP hop inside the boundary, an authorization policy that survives a stolen pod IP, and L7 telemetry for calls whose code you don't control** (the AWS SDK's calls to Floci are the interesting case — you get per-route latency and error rates without touching either service).
 
 > **Tradeoff — sidecar vs ambient.** We use sidecars: an Envoy injected into each pod. It is the mode with the deepest documentation, and `VirtualService`/`DestinationRule` work with no extra hop. The cost is real and you will feel it on a laptop: one extra container and roughly 50–100 MB per pod, plus a restart of every workload to enroll it. Istio's newer **ambient** mode replaces per-pod sidecars with one `ztunnel` per node and would cost a fraction of that RAM, at the price of needing an explicit waypoint proxy before any L7 policy works. If you are RAM-constrained, ambient is the better laptop choice; we take sidecars because the mental model matches the documentation you'll hit everywhere else.
 
-> **We keep ingress-nginx as the edge, and this is a deviation — read why before you copy it.**
-> Istio documents two supported ways to get traffic into the mesh: its own **Gateway** (which its
-> docs recommend, "to make use of the full feature set that Istio offers"), or a plain Kubernetes
-> `Ingress` with `ingressClassName: istio`. **Enrolling a third-party ingress controller into the
-> mesh is not one of them** — Istio's ingress documentation does not mention third-party
-> controllers at all, and the two nginx annotations this requires are documented by ingress-nginx
-> for unrelated purposes (`service-upstream` for zero-downtime deploys, `upstream-vhost` for
-> setting the `Host` header). Neither vendor documents the combination. It is a widely used
-> community pattern that lives in GitHub issues, not in anyone's docs.
+> **The edge: nginx owns the ports, the Istio gateway owns the mesh boundary.**
+> Istio documents two ways to get traffic into a mesh: its own **Gateway**, which its docs
+> recommend "to make use of the full feature set that Istio offers", or a plain Kubernetes `Ingress`
+> with `ingressClassName: istio`. Both put an Istio-managed proxy at the edge. Enrolling a
+> third-party ingress controller into the mesh is not one of them, and Istio's ingress documentation
+> does not mention third-party controllers at all.
 >
-> We do it here for one specific reason: nginx already owns `hostPort` 80/443 on the kind
-> control-plane node ([§4.3](#43-install-the-ingress-controller)), and it is
-> also the edge for Argo CD, Grafana, Kiali and Backstage — none of which are in the mesh. Moving
-> the two meshed hostnames to an Istio Gateway means something else has to own those ports.
+> So the chain here is **nginx (hostPort 80/443) → `istio-ingressgateway` → mesh workloads**. nginx
+> already owns 80/443 on the kind control-plane node
+> ([§4.3](#43-install-the-ingress-controller)) and keeps that job: it forwards
+> `*.localtest.me` to the gateway's Service as an ordinary backend and does nothing else with it —
+> no rewriting, no per-service annotations, no knowledge of what is behind it. That is the topology
+> Istio documents for production, with nginx standing in for the cloud load balancer. Each proxy
+> does only what its own docs describe, and neither is taught about the other.
 >
-> **At work, use the Istio Gateway.** The production shape is an external load balancer forwarding
-> to `istio-ingressgateway`, with `Gateway` + `VirtualService` doing the routing — which is exactly
-> what the `DestinationRule` and `VirtualService` in [§9.8](#98-canary-two-versions-of-pricing-behind-one-service)
-> already teach you to write. What you would delete is nginx's mesh enrolment and the two
-> annotations, not the Istio config.
+> mTLS therefore begins at the gateway, which is a meshed workload with a real identity
+> (`cluster.local/ns/istio-system/sa/istio-ingressgateway`) — that is the principal the
+> authorization policies in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist)
+> key on. Routing into the mesh is written as `Gateway` + `VirtualService`, the same objects and the
+> same language as the canary in [§9.8](#98-canary-two-versions-of-pricing-behind-one-service),
+> rather than split between an Ingress controller's annotations and Istio's config.
+>
+> Argo CD, Grafana, Kiali, Backstage and Nexus are not in the mesh and keep their own Ingresses.
+> nginx's Ingress to the gateway uses a **wildcard host**, and an exact host always wins over a
+> wildcard, so those UIs are never routed through the gateway even though their hostnames match the
+> wildcard.
 
 ### 9.2 Install the control plane
 
@@ -4253,17 +4464,37 @@ helm install istio-base istio/base \
 # The control plane itself.
 helm install istiod istio/istiod \
   --namespace istio-system --version 1.30.3 --wait
+
+# The edge proxy: a standalone Envoy, its Deployment, Service and ServiceAccount.
+helm install istio-ingressgateway istio/gateway \
+  --namespace istio-system --version 1.30.3 \
+  --set service.type=ClusterIP --wait
 ```
 
 Verify before you enroll anything — a half-installed control plane fails in ways that look like application bugs:
 
 ```bash
-kubectl -n istio-system get deploy istiod
+kubectl -n istio-system get deploy istiod istio-ingressgateway
+kubectl -n istio-system get svc istio-ingressgateway
 kubectl -n istio-system logs deploy/istiod --tail=20 | grep -i "ready\|error"
 istioctl version
 ```
 
-> **Two charts, not one, and no `istioctl install`.** `base` carries the CRDs and cluster-scoped RBAC; `istiod` carries the control plane. Splitting them is what makes upgrades controllable: CRDs move forward independently of the deployment that consumes them, and you can roll back one without the other. `istioctl install` is the friendlier command and hides that seam — fine for a demo, wrong for anything you intend to upgrade. We install with Helm because everything else in this cluster is installed with Helm, and one lifecycle tool beats two.
+> **`service.type=ClusterIP`, because nothing here hands out load balancers.** The chart's default is
+> `LoadBalancer`, which on kind stays `<pending>` forever. nginx is what reaches the gateway, and it
+> reaches it in-cluster by Service name, so a ClusterIP is all it needs. On a cloud provider you
+> would leave the default and delete the nginx hop entirely.
+>
+> **The gateway pod runs one Envoy, not two.** The chart ships its container as `image: auto` plus
+> the pod label `sidecar.istio.io/inject: "true"` and the annotation
+> `inject.istio.io/templates: gateway`, so istiod's webhook fills the image in and renders a
+> standalone proxy rather than adding a sidecar to something. The pod-level opt-in is why
+> `istio-system` itself stays un-enrolled ([§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones))
+> — Istio's injector matches a labelled *namespace* or an opted-in *pod*, and this is the second
+> case. The proxy still gets a certificate and a SPIFFE identity from istiod, which is what makes
+> `sa/istio-ingressgateway` usable as a principal in an authorization policy.
+
+> **Three charts, not one, and no `istioctl install`.** `base` carries the CRDs and cluster-scoped RBAC; `istiod` carries the control plane; `gateway` carries one edge proxy. Splitting them is what makes upgrades controllable: CRDs move forward independently of the deployment that consumes them, a gateway can be rolled without touching the control plane, and you can roll back one without the other. `istioctl install` is the friendlier command and hides those seams — fine for a demo, wrong for anything you intend to upgrade. We install with Helm because everything else in this cluster is installed with Helm, and one lifecycle tool beats two.
 
 ### 9.3 Enroll namespaces — and decide, deliberately, which ones
 
@@ -4271,38 +4502,35 @@ istioctl version
 Injection is per-namespace, and the interesting decisions are the exclusions.
 
 `shop` and `floci` are declared in *our* manifests ([§6.2](#62-deploy-floci-into-the-cluster), [§7.5](#75-install-external-secrets-operator)),
-so their labels belong in git and are already there. Only `ingress-nginx` — whose namespace comes from
-an upstream manifest we don't own — needs the imperative form:
+so their labels belong in git and are already there. Nothing has to be labelled by hand — check what
+you have:
 
 ```bash
-kubectl label namespace ingress-nginx istio-injection=enabled --overwrite
-
 kubectl get namespace -L istio-injection
 ```
 
 > **Put `istio-injection: enabled` in the namespace manifest in git, never on the command line.**
 > Once a namespace is under Argo CD, every field of it is — a hand-set label is dropped the next time
 > Argo CD recreates the namespace from `deploy/platform/`, and the pods that come back have no sidecar.
-> `ingress-nginx` is the exception above only because nothing in `deploy/` declares that namespace.
+> A namespace you cannot declare, because it comes from an upstream manifest you don't own, is a
+> namespace you should think twice about enrolling for exactly that reason.
 
 | Namespace | Enrolled | Why |
 |---|---|---|
 | `shop` | yes | The workloads whose traffic we actually want identity on. |
 | `floci` | yes | It's the callee on both interesting HTTP paths. A policy that says "only these two identities may call S3" is worth having. |
-| `ingress-nginx` | yes | So the edge can re-originate browser traffic as mTLS. Without this, STRICT mode in `shop` turns every page load into a connection reset. |
+| `ingress-nginx` | **no** | It is not the mesh boundary — `istio-ingressgateway` is ([§9.1](#91-what-a-mesh-actually-buys-you-here--and-what-it-doesnt)). nginx forwards a hostname to the gateway's Service and stops there, and it stays the plain edge for Argo CD, Grafana, Kiali, Backstage and Nexus, none of which are meshed. |
 | `kafka` | **no** | Strimzi brokers advertise listener addresses and do their own TLS and rebalancing; putting Envoy in that path is a well-known source of broker-discovery failures for no security gain — Strimzi already offers listener TLS and mTLS auth if you want it. |
 | `buildkite` | **no** | Build steps are Kubernetes **Jobs**. A classic sidecar keeps running after the build container exits, so the pod never reaches `Completed` and the job hangs forever. (Kubernetes ≥1.29 native sidecar containers fix this, and Istio can use them — verify it's enabled in your build before relying on it, rather than assuming.) |
-| `argocd`, `monitoring`, `istio-system` | **no** | Control-plane components. Injecting your delivery and observability tooling into the mesh means an Istio misconfiguration can take away the tools you'd use to diagnose it. |
+| `argocd`, `monitoring`, `istio-system` | **no** | Control-plane components. Injecting your delivery and observability tooling into the mesh means an Istio misconfiguration can take away the tools you'd use to diagnose it. The gateway pod in `istio-system` is the one exception and needs no namespace label: it opts itself in per-pod ([§9.2](#92-install-the-control-plane)). |
 
 Sidecars are injected at pod **creation**, so existing pods need a restart:
 
 ```bash
 kubectl -n floci rollout restart deployment/floci
-kubectl -n ingress-nginx rollout restart deployment/ingress-nginx-controller
 
 # order-api / order-worker don't exist yet — they'll be born with sidecars in §11.
 kubectl -n floci get pods          # READY should be 2/2
-kubectl -n ingress-nginx get pods  # READY should be 2/2
 ```
 
 `2/2` is the whole verification: your container plus `istio-proxy`.
@@ -4347,43 +4575,138 @@ spec:
     mode: STRICT
 ```
 
-Before you apply it, every `Ingress` in the chart needs two annotations. `ingress-nginx` is enrolled
-in the mesh and `shop` is about to become STRICT, so the edge has to address its backend in a way
-Envoy can identify as a service — by ClusterIP rather than raw pod IPs, and with the upstream `Host:`
-rewritten to the service FQDN, because Envoy routes HTTP by authority, not by address. This is the
-`order-api` Ingress from [§10.1](#101-one-chart-two-workloads), with the
-annotations in place (the chart file carries the same pair under a longer comment); `frontend` and
-every scaffolded service carry them too, with their own name substituted:
+Before you apply it, build the edge, because STRICT is what makes the edge's shape matter: once
+`shop` refuses plaintext, the last hop into a `shop` workload has to originate from inside the mesh.
+That is `istio-ingressgateway`, and it needs two objects — a `Gateway` declaring which ports and
+hostnames the proxy accepts, and a `VirtualService` per hostname declaring where it goes.
+
+**`deploy/platform/istio/edge-gateway.yaml`** (comments stripped here; the file carries them)
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*.localtest.me"
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: frontend
+  namespace: shop
+spec:
+  hosts:
+    - "app.localtest.me"
+  gateways:
+    - istio-system/edge
+  http:
+    - route:
+        - destination:
+            host: frontend.shop.svc.cluster.local
+            port:
+              number: 80
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: order-api
+  namespace: shop
+spec:
+  hosts:
+    - "shop.localtest.me"
+  gateways:
+    - istio-system/edge
+  http:
+    - route:
+        - destination:
+            host: order-api.shop.svc.cluster.local
+            port:
+              number: 80
+```
+
+The `selector` matches the pod labels the `istio/gateway` chart applies. `gateways` names the Gateway
+in `namespace/name` form because the Gateway lives in `istio-system` while these routes live in
+`shop` — a bare name would be resolved in the VirtualService's own namespace and match nothing, which
+presents as a 404 from a gateway that looks correctly configured.
+
+**The Gateway's hosts are a wildcard, and that is the property worth having.** A service the paved
+path adds ([§14.6](#146-paved-path-1--a-new-service)) becomes reachable by
+declaring a `VirtualService` and nothing else: no edit to this file, no edit to the Ingress below, no
+new object at the edge at all. A hostname with no VirtualService gets a 404 from the gateway, which
+is the correct answer for a route nobody declared.
+
+Then the hop in front of it. nginx owns `hostPort` 80/443 on the kind node and hands the meshed
+hostnames to the gateway's Service:
+
+**`deploy/platform/istio/edge-ingress.yaml`** (comments stripped here; the file carries them)
 
 ```yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: order-api
-  annotations:
-    # The edge is outside the mesh, the backend is inside it under STRICT mTLS:
-    # send to the ClusterIP, and rewrite the upstream Host to the service FQDN
-    # so Envoy can match the cluster and originate mTLS to it.
-    nginx.ingress.kubernetes.io/service-upstream: "true"
-    nginx.ingress.kubernetes.io/upstream-vhost: "order-api.{{ .Release.Namespace }}.svc.cluster.local"
+  name: mesh-edge
+  namespace: istio-system
 spec:
-  ingressClassName: {{ .Values.orderApi.ingress.className }}
+  ingressClassName: nginx
   rules:
-    - host: {{ .Values.orderApi.ingress.host }}
+    - host: "*.localtest.me"
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: order-api
-                port: { name: http }
+                name: istio-ingressgateway
+                port:
+                  number: 80
 ```
+
+No annotations, and none are needed. `istio-system` has no STRICT `PeerAuthentication`, so the
+gateway accepts this plaintext hop exactly as it would from a cloud load balancer, and mTLS begins at
+the gateway — which is in the mesh and calls `shop` workloads with a real workload identity. nginx is
+never told that the mesh exists.
+
+> **A wildcard host in nginx, and an exact host always wins.** Argo CD, Grafana, Kiali, Backstage and
+> Nexus all sit under `localtest.me` and all keep their own exact-host Ingresses, so nginx
+> routes them straight to their own Services and they never reach the gateway. That precedence is
+> what lets one wildcard Ingress serve the whole mesh without swallowing the platform's own UIs — and
+> it is also the rule to remember before you add an exact-host Ingress for a hostname you meant to
+> route into the mesh, because that one wins too.
 
 ```bash
 mkdir -p deploy/platform/istio
+kubectl apply -f deploy/platform/istio/edge-gateway.yaml
+kubectl apply -f deploy/platform/istio/edge-ingress.yaml
 kubectl apply -f deploy/platform/istio/peer-authentication.yaml
 ```
+
+The two `Ingress` resources written in [§10.1](#101-one-chart-two-workloads)
+are now dead, and they will fight this one: two Ingresses claiming the same host and path is a
+conflict the nginx admission webhook rejects outright. Delete them from the chart — the whole
+`{{- if .Values.orderApi.ingress.enabled }}` block at the end of `order-api.yaml`, and the matching
+block in `frontend.yaml` — along with the now-unused `ingress:` keys in `values.yaml`. Routing for
+these two services lives in the VirtualServices above from here on.
+
+```bash
+kubectl -n shop delete ingress order-api frontend --ignore-not-found
+```
+
+That is the trade the Gateway asks for, stated plainly: one more component to install, and routing
+that no longer lives in a second proxy's annotations.
+
+The two `VirtualService`s point at Services that do not exist yet — `frontend` and `order-api` arrive
+with the chart in [§11](#11-argo-cd-pull-based-delivery). That is fine: a route to
+a missing destination is a 503 until the destination shows up, and nothing else in the mesh cares.
 
 Now prove it, because "I applied a YAML file" is not evidence. Talk to Floci from a pod with no sidecar:
 
@@ -4408,7 +4731,7 @@ mTLS answers *who is calling*. It does not answer *whether they should be*. Any 
 
 **Deny-by-default is a property of a namespace, not of the workloads you wrote a policy for.** Istio's rule: a workload that **no** `ALLOW` policy selects accepts traffic from anything in the mesh. So a file containing nothing but per-workload `ALLOW` policies is not default-deny — it is default-deny for the workloads you remembered, and wide open for the rest. The empty-spec `deny-all` per namespace is what makes the phrase true, and it has to exist in `shop` for the same reason it exists in `floci`.
 
-The file below is that pattern twice: a `deny-all` for `floci` and a `deny-all` for `shop`, then one `ALLOW` per real caller relationship. `frontend` is a browser-facing page, so its only caller is the ingress; `order-api` is reachable from the ingress too. `order-worker` gets no policy at all and that is the correct answer — it takes no inbound traffic, and Prometheus reaches the sidecar's merged endpoint ([§9.6](#96-the-metrics-problem-you-just-created)) rather than the application, so there is nothing left to allow.
+The file below is that pattern twice: a `deny-all` for `floci` and a `deny-all` for `shop`, then one `ALLOW` per real caller relationship. `frontend` is a browser-facing page, so its only caller is the edge gateway; `order-api` is reachable from the gateway and from `frontend`. `order-worker` gets no policy at all and that is the correct answer — it takes no inbound traffic, and Prometheus reaches the sidecar's merged endpoint ([§9.6](#96-the-metrics-problem-you-just-created)) rather than the application, so there is nothing left to allow.
 
 **`deploy/platform/istio/authorization-policy.yaml`**
 
@@ -4459,7 +4782,7 @@ spec:
     - from:
         - source:
             principals:
-              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+              - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
@@ -4475,7 +4798,7 @@ spec:
     - from:
         - source:
             principals:
-              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+              - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
 ```
 
 ```bash
@@ -4484,7 +4807,15 @@ kubectl apply -f deploy/platform/istio/authorization-policy.yaml
 
 > **`principals` is the point.** These rules key on the **SPIFFE identity in the peer's certificate**, not on IP addresses or namespace labels. An attacker who gets a shell in a pod in another namespace cannot reach Floci by spoofing an IP, because they cannot mint a certificate for `sa/order-api`. This is why "the mesh" and "network policy" are not competing answers to the same question: NetworkPolicy filters packets by address, Istio filters requests by cryptographic identity. Use both.
 
-> **The service-account names are load-bearing.** These principals must match the ServiceAccounts the Helm chart creates in [§10.1](#101-one-chart-two-workloads). If the chart names them differently, the policy silently denies everything, and you will debug it as "Floci is down". `istioctl analyze -n shop` catches the mismatch; `kubectl get pods` does not.
+> **The edge principal is the gateway, not whatever is in front of it.** Traffic arriving through
+> `istio-ingressgateway` is authenticated as
+> `cluster.local/ns/istio-system/sa/istio-ingressgateway`, because that is the workload that
+> originated the mTLS connection into `shop`. nginx sits one hop further out, is not in the mesh, and
+> has no identity the mesh can express — which is the whole reason the mesh boundary has to be a
+> meshed proxy. If nginx could reach `shop` workloads directly, no `principals` rule could describe
+> it.
+>
+> **The service-account names are load-bearing.** These principals must match the ServiceAccounts the Helm chart creates in [§10.1](#101-one-chart-two-workloads), and — for the gateway — the `istio/gateway` chart's ServiceAccount, which takes the Helm release name. Install that release under a different name and the policy denies the edge, which presents as `RBAC: access denied` on every page load. `istioctl analyze -n shop` catches the mismatch; `kubectl get pods` does not.
 
 ### 9.6 The metrics problem you just created
 
@@ -4568,10 +4899,11 @@ git add deploy/platform/istio deploy/platform/floci-bootstrap.yaml
 git commit -m "feat(platform): istio with strict mtls and default-deny authz"
 ```
 
-`order-api` and `order-worker` don't exist yet, so §9.4's proof covers Floci only. The rest of the mesh — the ingress path, the authorization policies keyed on those two service accounts — becomes verifiable in [§11](#11-argo-cd-pull-based-delivery), when Argo CD deploys the chart into the now-enrolled `shop` namespace. If a page load returns `RBAC: access denied` at that point, the policy in §9.5 is what to read first, and `istioctl analyze -n shop` is what to run.
+`order-api` and `order-worker` don't exist yet, so §9.4's proof covers Floci only. The rest of the mesh — the edge path through the gateway, the authorization policies keyed on those two service accounts — becomes verifiable in [§11](#11-argo-cd-pull-based-delivery), when Argo CD deploys the chart into the now-enrolled `shop` namespace. If a page load returns `RBAC: access denied` at that point, the policy in §9.5 is what to read first, and `istioctl analyze -n shop` is what to run.
 
 When it is running, do not accept a `200` from the browser as proof that the edge is meshed — a `200`
-only tells you bytes moved. Ask the destination sidecar which security policy it applied:
+only tells you bytes moved, and the first two hops are plaintext by design. Ask the destination
+sidecar which security policy it applied:
 
 ```bash
 kubectl -n shop exec deploy/order-api -c istio-proxy -- \
@@ -4581,15 +4913,26 @@ kubectl -n shop exec deploy/order-api -c istio-proxy -- \
 ```
 
 `mutual_tls`, with `source_principal` reading
-`spiffe://cluster.local/ns/ingress-nginx/sa/ingress-nginx`, is the evidence. `none` or `unknown` means
-a working website with no mTLS at the edge, which is what you get without the two Ingress annotations
-in §9.4.
+`spiffe://cluster.local/ns/istio-system/sa/istio-ingressgateway`, is the evidence: the last hop into
+the workload was authenticated, and it was authenticated as the gateway. `none` or `unknown` means a
+working website with no mTLS at the edge — which is what you get if something reaches the workload
+without passing through the gateway.
+
+The working state is `app.localtest.me` returning 200, `shop.localtest.me/healthz` returning 200, and
+the platform UIs still answering on their own exact hostnames — Argo CD 200, Grafana 302, Kiali 302,
+Backstage 200, none of them through the gateway.
 
 ### 9.8 Canary: two versions of `pricing` behind one Service
 
 
 Everything above secures traffic. This section *steers* it — and it is the half of a service mesh that
 most people install one for.
+
+The objects are the same two kinds you already wrote at the edge in §9.4. A `VirtualService` routes a
+hostname from the gateway to a Service; the one below routes a Service's internal callers across two
+subsets of it. North-south and east-west routing in one language, one API, one place to read the
+whole picture — which is the argument for terminating traffic on Istio's own Gateway rather than
+splitting the routing story across two proxies' configuration models.
 
 > **This section needs a service that does not exist yet.** Traffic shifting requires two versions of
 > something, and a synchronous call to shift. [Phase 7](#) builds
@@ -4933,6 +5276,10 @@ kubectl delete -f deploy/platform/istio/pricing-fault-injection.yaml.disabled
 Every call between meshed workloads is mutually authenticated and encrypted with certificates you
 never issued by hand. `floci` refuses anything that is not `order-api` or `order-worker`, by
 identity — not by IP, which can be stolen. Kiali draws the graph, including the refusals.
+
+Browser traffic enters through `istio-ingressgateway`, so the mesh boundary is a workload with an
+identity of its own, and routing into the mesh is written in the same objects as routing inside it.
+nginx keeps ports 80/443 and the platform's own UIs, and knows nothing about any of this.
 
 Your monitoring survived, because you fixed it when it broke.
 
@@ -5518,31 +5865,25 @@ spec:
     - { name: http, port: 80, targetPort: http }
 {{- if $svc.ingress.enabled }}
 ---
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: networking.istio.io/v1
+kind: VirtualService
 metadata:
   name: {{ $svc.name }}
-  annotations:
-    # Same pair as order-api and frontend, and for the same reason: the edge is
-    # outside the mesh, the backend is inside it under STRICT mTLS. Without
-    # these, every scaffolded service comes up healthy and answers the browser
-    # with "upstream connect error ... connection termination" — which is the
-    # worst possible first experience of a paved path (§14.6), because the
-    # service is fine and the template is what's broken.
-    nginx.ingress.kubernetes.io/service-upstream: "true"
-    nginx.ingress.kubernetes.io/upstream-vhost: "{{ $svc.name }}.{{ $.Release.Namespace }}.svc.cluster.local"
+  labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 4 }}
 spec:
-  ingressClassName: nginx
-  rules:
-    - host: {{ $svc.ingress.host }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ $svc.name }}
-                port: { name: http }
+  hosts:
+    - {{ $svc.ingress.host | quote }}
+  # The shared edge Gateway in istio-system accepts *.localtest.me, so a
+  # scaffolded service becomes reachable by declaring this route and nothing
+  # else. No Ingress, and no annotations teaching one proxy about another.
+  gateways:
+    - istio-system/edge
+  http:
+    - route:
+        - destination:
+            host: {{ $svc.name }}.{{ $.Release.Namespace }}.svc.cluster.local
+            port:
+              number: 80
 {{- end }}
 {{- end }}
 ```
@@ -5887,13 +6228,22 @@ Create a **fine-grained** personal access token at <https://github.com/settings/
 
 Nothing else. Generate it and copy the `github_pat_…` value — GitHub shows it once.
 
-The token comes into the cluster from OpenBao through ESO, exactly like every other secret ([§7.6](#76-let-kubernetes-pull-from-nexus)). Store it at `shop/backstage` under the key `github_token`, which is what the `ExternalSecret` below reads:
+The token comes into the cluster from OpenBao through ESO, exactly like every other secret ([§7.6](#76-let-kubernetes-pull-from-nexus)). Backstage's database password goes the same way — a password in a values file is a password in git, and this database is where the PAT ends up — so `shop/backstage` holds three keys, and this is the write that most deserves a non-root identity.
+
+Log in as the operator from [§7.5a](#75a-give-humans-an-auth-method-too) and write all three in one command. `kv put` replaces the version wholesale, so a second `put` naming only `github_token` would destroy the two passwords:
 
 ```bash
 kubectl create namespace backstage
 
-kubectl -n openbao exec -it openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 \
-  bao kv put shop/backstage github_token='github_pat_...'
+kubectl -n openbao exec -it openbao-0 -- env BAO_ADDR=http://127.0.0.1:8200 \
+  bao login -method=userpass username=operator
+
+BAO_OP="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=<the token> BAO_ADDR=http://127.0.0.1:8200 bao"
+
+$BAO_OP kv put shop/backstage \
+  github_token='github_pat_...' \
+  postgres_password="$(openssl rand -hex 16)" \
+  postgres_admin_password="$(openssl rand -hex 16)"
 ```
 
 **`deploy/platform/backstage-secrets.yaml`**
@@ -5915,6 +6265,47 @@ spec:
   data:
     - secretKey: GITHUB_TOKEN
       remoteRef: { key: backstage, property: github_token }
+---
+# Backstage's own database credential goes through OpenBao like every other
+# credential on this platform — a password in a values file is a password in
+# git, and this database is where the GitHub PAT ends up.
+#
+# The Bitnami PostgreSQL subchart stops generating its own Secret the moment
+# `postgresql.auth.existingSecret` is set, and then reads fixed key names out of
+# the Secret named there. The key names are NOT the ones in the Secret the chart
+# generates for itself: that Secret has `password` and `postgres-password`, but
+# those literals are hardcoded in the no-existingSecret branch of the subchart's
+# helpers. With existingSecret set, the names come from
+# `postgresql.auth.secretKeys.*`, and the Backstage chart overrides the Bitnami
+# defaults there to `user-password` and `admin-password`. Copying the key names
+# off the generated Secret fails the render with
+# `PASSWORDS ERROR: The secret ... does not contain the key "user-password"`.
+#
+# Both keys are required. The admin key is not optional — `auth.enablePostgresUser`
+# defaults to true. `replication-password` is read only when
+# `architecture: replication`, which this is not.
+#
+# The Backstage backend reads its POSTGRES_PASSWORD from the same Secret and the
+# same `user-password` key, so one Secret serves both.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: backstage-postgresql-auth
+  namespace: backstage
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: backstage-postgresql-auth
+    creationPolicy: Owner
+  data:
+    - secretKey: user-password
+      remoteRef: { key: backstage, property: postgres_password }
+    - secretKey: admin-password
+      remoteRef: { key: backstage, property: postgres_admin_password }
+
 ---
 # The portal is pulled from Nexus like everything else, so the `backstage`
 # namespace needs its own pull secret. Secrets do not cross namespaces — §7's
@@ -5994,8 +6385,22 @@ postgresql:
   enabled: true
   auth:
     username: bn_backstage
-    password: backstage-change-me
+    # The password lives in OpenBao and reaches the cluster as the
+    # `backstage-postgresql-auth` Secret (deploy/platform/backstage-secrets.yaml).
+    # Setting existingSecret stops the subchart generating a Secret of its own,
+    # so the ExternalSecret must exist before this chart is installed.
+    #
+    # The data directory is initialised once, on first boot, with whatever
+    # password it saw then. Changing the value in OpenBao afterwards changes only
+    # what the clients present, not what the server accepts — the two drift apart
+    # and Backstage is locked out of its own database. Rotating means rotating in
+    # Postgres too, not in OpenBao alone.
+    existingSecret: backstage-postgresql-auth
 ```
+
+> **The Secret's key names are not the Bitnami defaults, and getting them wrong fails the install outright.** The generated Secret the subchart makes for itself holds `password` and `postgres-password`, but those literals only exist in the no-`existingSecret` branch of its helpers. Once `postgresql.auth.existingSecret` is set, the names come from `postgresql.auth.secretKeys.*` — and the Backstage chart overrides the Bitnami defaults there to **`user-password`** and **`admin-password`**. Copy the names off the generated Secret and `helm upgrade` dies with `PASSWORDS ERROR: The secret "backstage-postgresql-auth" does not contain the key "user-password"`. Both keys are required, because `auth.enablePostgresUser` defaults to true; `replication-password` is not, because it is read only under `architecture: replication`, and this is standalone.
+
+> **Apply the `ExternalSecret` before `helm upgrade --install`, not after.** With `existingSecret` set the subchart no longer creates the Secret, and it does not wait for one either — it reads the keys at render time and fails if the object is absent. The install order below is a dependency, not a preference.
 
 > **Do not add `POSTGRES_*` to `extraEnvVars`.** With `postgresql.enabled: true` the chart already
 > emits those four variables, and a second copy makes the install fail outright — server-side apply
@@ -6026,6 +6431,8 @@ helm upgrade --install backstage backstage/backstage \
   --namespace backstage --version 2.10.0 \
   --values infra/backstage-values.yaml --wait
 ```
+
+> **Rotating this password is not a vault-only operation.** Postgres initialises its data directory once, on first boot, with the password it saw then. Changing `postgres_password` in OpenBao changes only what Backstage presents, not what the server accepts, and the two drift apart into `password authentication failed for user "bn_backstage"`. Rotating means `ALTER ROLE` inside Postgres as well — see [§15.4](#154-break-it-on-purpose).
 
 ESO refreshes on its own schedule, so restart the portal once to be certain it is running with the token you just stored:
 
@@ -6256,7 +6663,12 @@ With `replicas: 3` and `min.insync.replicas: 2`, writes continue. Strimzi recrea
 **⑤ Secret rotation.**
 
 ```bash
-BAO="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
+# The operator login from §7.5a, not the root token — rotation is exactly the
+# job shop-admin exists for.
+kubectl -n openbao exec -it openbao-0 -- env BAO_ADDR=http://127.0.0.1:8200 \
+  bao login -method=userpass username=operator
+
+BAO="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=<the token> BAO_ADDR=http://127.0.0.1:8200 bao"
 $BAO kv put shop/order-api signing_key="$(openssl rand -hex 32)"
 
 # ESO refreshes within 1m (§7.6)
@@ -6268,6 +6680,16 @@ kubectl -n shop rollout restart deployment/order-api
 ```
 
 That gap between "the Secret changed" and "the pod uses it" is the thing people get wrong in production. Measure your real rotation window, don't assume it.
+
+> **This loop does not work for every secret, and the exception will lock you out.** It works here because OpenBao is the only authority on the value: order-api accepts whatever key it is handed. Backstage's Postgres password has a second authority — the database itself, which was initialised with that password on first boot and does not learn a new one from a Secret. Rotate `shop/backstage`'s `postgres_password` in OpenBao alone and the ESO-managed Secret updates, Backstage restarts with the new value, Postgres rejects it, and the portal is locked out of its own database. Rotating a credential means rotating it at both ends — `ALTER ROLE` in Postgres, then the OpenBao write, then the restart:
+>
+> ```bash
+> kubectl -n backstage exec -it statefulset/backstage-postgresql -- \
+>   sh -c 'PGPASSWORD=$POSTGRES_POSTGRES_PASSWORD psql -U postgres'
+> # ALTER ROLE bn_backstage PASSWORD '<new>';
+> ```
+>
+> Before you automate rotation for anything, ask which side owns the value.
 
 **⑥ Break the mesh policy.** Add an identity that isn't allowed and watch it get refused at the proxy rather than in your code:
 
@@ -6468,7 +6890,8 @@ pants_ignore.add = [
   "/portal",
   "/wiki",
   "/raw",
-  "/docs",
+  "/frontend/node_modules",
+  "/frontend/dist",
 ]
 
 [source]
@@ -6492,8 +6915,7 @@ indexes = ["http://nexus:8081/repository/pypi-proxy/simple"]
 cgo_enabled = false
 subprocess_env_vars = [
   "GOPROXY=http://nexus:8081/repository/go-proxy",
-  "GOSUMDB=off",
-  "GOFLAGS=-mod=mod",
+  "GOFLAGS=-mod=readonly",
   "HOME",
   "PATH",
 ]
@@ -6521,13 +6943,22 @@ The non-obvious lines:
   `BUILD` file contains nunjucks placeholders and is not valid Python until Backstage renders it;
   Backstage's own Yarn workspace is not ours to build
   ([§14.8](#148-build-and-deploy-the-portal)).
+- **`/frontend/node_modules` and `/frontend/dist` are listed because Pants reads only the root
+  `.gitignore`.** `--pants-ignore-use-gitignore` does not descend into nested ignore files, so
+  `frontend/.gitignore` never reaches Pants and `pants tailor` walks into installed packages and
+  build output. `/docs` is deliberately *not* ignored: `checks/` reads the phase files to assemble the
+  single-file edition, so Pants has to be able to see them.
 - **`[python-bootstrap] search_path` names the Homebrew path explicitly.** `brew install python@3.13`
   puts the unversioned `python` in `libexec/bin`, which is deliberately off `PATH`, and Pants' default
   search will not find it. `<PYENV>` and `<PATH>` are the defaults and must be repeated, not replaced.
 - **`[python-repos]` and `[golang]` both point at Nexus**, for the same reason `uv` did
-  ([§5.1](#51-what-nexus-is-actually-for)). `GOSUMDB=off`
-  because the public checksum database is unreachable through a private proxy — the same trade, and
-  the same caveat, as [§12.5](#125-the-pipeline).
+  ([§5.1](#51-what-nexus-is-actually-for)). Nothing else is overridden, and that
+  is the point: checksum verification stays on, because `go.sum` records a hash for every module in
+  the build list and the `go` command verifies against it locally
+  ([§5.1](#51-what-nexus-is-actually-for) is blunt about why `GOSUMDB=off`
+  behind a private proxy is the wrong reflex). `-mod=readonly` is already Go's default and is stated
+  because it is load-bearing: under `-mod=mod` a build may rewrite `go.mod` and succeed against a
+  dependency set nobody committed.
 - **`[golang] cgo_enabled = false` is mandatory.** Pants defaults it to *true*, which links
   `order-worker` dynamically against libc. `gcr.io/distroless/static-debian12` has neither libc nor a
   dynamic loader, so the pod dies with `exec /order-worker: no such file or directory` on a file that
@@ -7452,13 +7883,11 @@ your code. None of your logging configuration has run at that point, so `kubectl
 at all.
 
 Give it a writable `/tmp` and point `PEX_ROOT` at it explicitly, keeping the root filesystem
-read-only. From `deploy/charts/order-platform/templates/pricing.yaml`:
+read-only. The volume half, from `deploy/charts/order-platform/templates/pricing.yaml`:
 
 ```yaml
-          env:
-            # ... the service's own config ...
-            - name: PEX_ROOT
-              value: "/tmp/pex"
+          envFrom:
+            - configMapRef: { name: pricing-config }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -7469,10 +7898,35 @@ read-only. From `deploy/charts/order-platform/templates/pricing.yaml`:
         - { name: tmp, emptyDir: {} }
 ```
 
+The variable half lives in `configmap-pricing.yaml`, the file that Deployment's `checksum/config`
+annotation hashes:
+
+```yaml
+data:
+  PRICING_GRPC_PORT: {{ .Values.pricing.grpcPort | quote }}
+  PRICING_HTTP_PORT: {{ .Values.pricing.httpPort | quote }}
+  PEX_ROOT: "/tmp/pex"
+```
+
+A ConfigMap rather than inline `env`, because that is what makes the restart annotation on the
+Deployment mean something:
+
+```yaml
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-pricing.yaml") $ | sha256sum }}
+```
+
+That is Helm's documented form, and the file it names is this service's ConfigMap and nothing else.
+Hash `.Values` instead and every deploy restarts every pod in the namespace, because CI rewrites the
+image tags in the env overlay on every build. v1 and v2 share the ConfigMap because they share the
+config; what differs between them — `PRICING_VERSION` and the image tag — stays inline on each
+Deployment, where it belongs to the pod template rather than to the config.
+
 Set `PEX_ROOT` rather than relying on `/tmp` being writable by default — the fallback order is an
 implementation detail, and an explicit path is a thing a reader can find. **Every service packaged as
-a PEX needs both halves** — `order-api.yaml`, `pricing.yaml` and `scaffolded.yaml` all carry them, so
-a service that arrives through the paved path gets them without anyone remembering to ask.
+a PEX needs both halves.** `order-api` and `pricing` take `PEX_ROOT` from their ConfigMaps; a
+scaffolded service takes it from an `ENV` in the skeleton's Dockerfile. All three Deployments carry
+the `/tmp` emptyDir, so a service that arrives through the paved path gets them without anyone
+remembering to ask.
 
 **The probes are gRPC, not HTTP.** The kubelet speaks the health checking protocol itself, so the app
 needs no HTTP endpoint for probes and the image needs no `grpc_health_probe` binary:
@@ -7497,6 +7951,13 @@ One more line in that file is not cosmetic: the metrics port is named **`http-me
 `metrics`. Istio reads the protocol off the port name (`protocol[-suffix]`) or off `appProtocol`. A
 port named `metrics` matches no protocol, Istio falls back to plain TCP, and `istioctl analyze`
 reports `IST0118`.
+
+Both Deployments come out of one `range` over `v1` and `v2`, and both are offered a
+PodDisruptionBudget — but only `pricing-v1` gets one. The `op.pdb` helper renders nothing below two
+replicas, because `minAvailable: 1` against a single replica permits zero voluntary evictions and
+blocks a node drain forever. `pricing-v2` runs one replica, so draining its node is allowed to take
+it out; that is the correct answer for a canary at one replica, and the reason the helper takes the
+replica count rather than assuming it.
 
 It is the same class of problem as `nginx-unprivileged` needing writable `/tmp`, `/var/cache/nginx`
 and `/var/run`: both render perfectly under `helm template`, pass `kubectl apply --dry-run=server`,
@@ -7549,7 +8010,25 @@ file(name="index_html", source="index.html")
 file(name="nginx_conf", source="nginx.conf")
 ```
 
-**Every dependency there is listed by hand, and that is the rule for non-Python targets.** Pants
+**`frontend/src/BUILD`**
+
+```python
+typescript_sources()
+
+resource(name="style_css", source="style.css")
+
+typescript_tests(
+    name="tests",
+)
+```
+
+`typescript_sources()` with no arguments takes the directory's `.ts` files, but a test file is a
+different target type: `tally.test.ts` swept into `typescript_sources` is a file Pants owns and never
+runs. `typescript_tests` is what makes `pants test ::` run it, and it is what `pants tailor` asks for:
+`tailor --check` fails on a source file that has no target, or the wrong one. `style.css` is a
+`resource`, not a source: nothing imports it in a way inference can follow.
+
+**Every dependency in `frontend/BUILD` is listed by hand, and that is the rule for non-Python targets.** Pants
 infers dependencies from *imports*, and a build script's inputs are not imports: `tsconfig.json`,
 `vite.config.ts`, `index.html` and `src/style.css` are invisible to inference. Omitting a config file
 fails loudly. Omitting an asset does not fail at all — Vite builds successfully in a sandbox that
@@ -7594,22 +8073,36 @@ The Python step and the Go step are gone. In their place, one step in `.buildkit
 
                     git config --global --add safe.directory "$PWD"
 
-                    pants lint check test ::
+                    pants update-build-files --check lint check test ::
 
                     python3 checks/verify_doc_listings.py .
+
+                    helm lint --strict deploy/charts/order-platform \
+                      -f deploy/env/local/values.yaml
+                    helm template order-platform deploy/charts/order-platform \
+                      -f deploy/env/local/values.yaml -n shop \
+                      | python3 checks/verify_chart.py -
 
                     pants --tag=deployable package ::
 
                     ls -la dist/
 ```
 
-Six things about this are load-bearing:
+Eight things about this are load-bearing:
 
 **The step runs a prebuilt Pants image out of Nexus**, `.buildkite/pants-ci.Dockerfile`, rather than
 installing Pants per build. It carries the checksum-verified `scie-pants` launcher from
 [§17.3](#173-pantstoml), a Go toolchain matching `services/order-worker/go.mod` (Pants *searches* for
-`go`, it does not download one), and `unzip`/`zip`/`xz`, which Pants needs to unpack the tools it does
-download — protoc, ruff, the Go SDK.
+`go`, it does not download one), `unzip`/`zip`/`xz`, which Pants needs to unpack the tools it does
+download — protoc, ruff, the Go SDK — and the two things the non-Pants checks below need: a
+checksum-verified `helm` binary and `pyyaml`, the latter from the Nexus PyPI proxy like everything
+else.
+
+**`update-build-files --check` runs in the same invocation as `lint check test`.** It reformats every
+`BUILD` file in memory and fails when the result differs from what is committed, which is Pants'
+documented CI check for BUILD-file drift: a hand-edited `BUILD` file cannot quietly diverge from the
+formatting the rest of the repo has. One invocation rather than four, because the goals share a
+target-set argument and Pants runs what it can in parallel.
 
 **`--tag=deployable` is how the package set is selected.** `::` is every target in the repo; the tag
 narrows it to the ones that ship an artifact, and tags are Pants' documented mechanism for exactly
@@ -7623,6 +8116,11 @@ service that CI packages without CI knowing it exists.
 **`checks/verify_doc_listings.py` runs here rather than as a Pants test.** It reads the whole checkout;
 a Pants sandbox holds only declared dependencies, so every file listing in `docs/` would read as
 missing inside one.
+
+**The chart is rendered here, and it is the only place the build renders it at all.** `helm lint
+--strict` validates structure and `helm template` produces the manifests; `checks/verify_chart.py`
+([§19.6](#196-two-checks-nothing-else-would-catch)) then reads them for the defects neither command
+can see. Both run against the local env overlay, so the values CI rewrites are the values checked.
 
 **`pants package` runs here, not in the image build.** The Buildah pods below it contain Buildah and
 nothing else — no Python, no Go, no Node, no compiler. They `buildkite-agent artifact download` the
@@ -7726,34 +8224,59 @@ says `proxy_pass http://order-api.shop.svc.cluster.local:80/orders`; the chart s
 `- { name: http, port: 80, targetPort: http }`. Point nginx at 8000 — order-api's *container* port,
 which nothing serves on the ClusterIP — and every order in the dashboard reads `HTTP 502` while a
 direct `curl` at order-api returns 202, sending you to look at the wrong service entirely. The chart
-is valid, the nginx config is valid, both images build, every pod is Ready. So `checks/` at the repo
-root asserts the two agree:
+is valid, the nginx config is valid, both images build, every pod is Ready. `checks/verify_chart.py`
+asserts the two agree.
+
+**Check the rendered chart, never the template.** A template read as text is
+`targetPort: {{ .Values.orderApi.port }}` — a text check either hard-codes the answer it is supposed
+to discover or reimplements Helm's evaluation. `helm template` first, parse the manifests, then read
+the port the cluster actually gets. That is the flow Helm documents for debugging a chart and it is
+the one the check uses:
+
+```bash
+helm template order-platform deploy/charts/order-platform \
+  -f deploy/env/local/values.yaml -n shop | python3 checks/verify_chart.py -
+```
+
+Two more assertions of the same shape ride along in that script, because rendering the chart is the
+expensive part and both need the same manifests: a probe whose `httpGet`/`tcpSocket` names a port the
+container does not declare, and a Service whose `targetPort` names a port no selected pod declares.
+Each half is valid YAML on its own, so both render clean, lint clean, and fail only when the kubelet
+tries to resolve the name.
+
+`verify_chart.py` runs as a plain script rather than through Pants, for the same reason
+`verify_doc_listings.py` does: it reads files a hermetic sandbox would not contain. That has two
+consequences in the repo. It still needs an owning target, or `pants tailor --check` reports the file
+as unowned — hence the glob in **`checks/BUILD`** (comments stripped):
 
 ```python
+python_sources(
+    name="lib",
+    sources=["*.py", "!test_*.py"],
+)
+
 python_tests(
     name="tests",
     sources=["test_*.py"],
-    # Config files from two other directories, read as plain text. Nothing
-    # infers these — there is no import to follow, which is exactly why the two
-    # were free to drift apart in the first place.
     dependencies=[
-        "frontend:nginx_conf",
-        "deploy/charts/order-platform:order-api-template",
+        ":lib",
+        "docs:docs",
+        "//:single-edition",
     ],
 )
 ```
 
-**`deploy/charts/order-platform/BUILD`**, and note where it is *not*:
+And its one third-party import, `yaml`, is installed in the CI image rather than in the Python
+resolve, so mypy has nothing to load. That is a per-module exception in `mypy.ini` with the reason
+stated, not a global `ignore_missing_imports`:
 
-```python
-# Deliberately NOT in templates/. Helm renders every file under templates/ as a
-# manifest, so a BUILD file there fails the whole chart with
-# `YAML parse error on order-platform/templates/BUILD`.
-file(name="order-api-template", source="templates/order-api.yaml")
+```ini
+[mypy-yaml]
+ignore_missing_imports = true
 ```
 
 That is the pattern worth taking away: **when a fact is duplicated across a language boundary, the
-monorepo lets you assert it in a unit test.** It is the same argument as
+monorepo lets you assert it in a check that runs on every build.** It is the same argument as
 [§18.2](#182-generate-and-look-at-what-came-out), applied to config instead of to a `.proto`.
 
 ### 19.7 Commit
@@ -7774,7 +8297,7 @@ pants lint check test ::
 pants package services/order-api:bin services/order-worker:bin services/pricing:bin
 ls -la dist/
 
-git add pants.toml 3rdparty locks protos services frontend checks .buildkite deploy
+git add pants.toml mypy.ini 3rdparty locks protos services frontend checks .buildkite deploy
 git commit -m "build: pants as the monorepo build system, one proto for two languages"
 git push
 ```
@@ -7813,7 +8336,7 @@ Verified 2026-08-16 against a running cluster — every version below was read b
 | ingress-nginx | controller-v1.13.0 | [releases](https://github.com/kubernetes/ingress-nginx/releases) — **note:** v1.13.0's kind manifest dropped the `ingress-ready` nodeSelector; [§4.3](#43-install-the-ingress-controller) patches it back |
 | Sonatype Nexus | `sonatype/nexus3:3.95.0` | [Docker Hub tags](https://hub.docker.com/r/sonatype/nexus3/tags) |
 | Floci | `floci/floci:1.5.11` | [github.com/floci-io/floci](https://github.com/floci-io/floci) |
-| OpenBao Helm chart | 0.29.1 (OpenBao 2.5.0) | `helm search repo openbao/openbao --versions` |
+| OpenBao Helm chart | 0.29.1 (OpenBao 2.6.1) | `helm search repo openbao/openbao --versions` |
 | External Secrets Operator | chart 2.6.0 | `helm search repo external-secrets/external-secrets --versions` |
 | Strimzi | 0.50.1 (Kafka 4.1.0) | `helm search repo strimzi/strimzi-kafka-operator --versions` |
 | Argo CD | v3.4.7 | [releases](https://github.com/argoproj/argo-cd/releases) |
@@ -7845,7 +8368,7 @@ Two version rules worth internalising:
 | `ImagePullBackOff` on `nexus:8082/...` | containerd can't reach or auth to Nexus | `docker exec devops-worker curl -s -o /dev/null -w '%{http_code}' http://nexus:8082/v2/` — expect `401`. Not `401`? Re-run [§5.9](#59-teach-containerd-on-the-kind-nodes-about-nexus). `401` but still failing? The pod is missing `imagePullSecrets` or the ExternalSecret hasn't synced. |
 | `curl http://localhost` returns **`000`** | Ingress controller scheduled on a node with no port mappings | `000` = nothing listening, not a 404. `kubectl -n ingress-nginx get pods -o wide` — if `NODE` isn't `devops-control-plane`, apply the `ingress-ready` nodeSelector patch in [§4.3](#43-install-the-ingress-controller). Upstream dropped that selector in controller-v1.13.0. |
 | Ingress Service stuck `EXTERNAL-IP <pending>` | `type: LoadBalancer` with no cloud provider | Harmless on kind — traffic arrives via `hostPort`, not the Service. Don't install MetalLB to "fix" it. |
-| Pods can't resolve `nexus` | Nexus container got a new IP | Re-run [§5.10](#510-teach-pods-about-nexus-coredns) with the current `docker inspect nexus` IP. |
+| Pods can't resolve `nexus` | The CoreDNS `hosts` entry and the container disagree | The container is pinned to `172.18.255.10` by `--ip` in [§5.3](#53-run-nexus). Confirm with `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nexus`; if it differs, the container was recreated without `--ip`. Re-run [§5.10](#510-teach-pods-about-nexus-coredns), which replaces the block rather than appending. |
 | `docker push` → `http: server gave HTTP response to HTTPS client` | `insecure-registries` not applied | [§5.8](#58-trust-the-plain-http-registry-from-docker), then **restart Docker**. |
 | `docker login nexus:8082` → 401 with correct password | Docker Bearer Token Realm not active | Nexus → ⚙ → Security → Realms → activate it ([§5.4](#54-create-the-docker-hosted-registry)). |
 | CI: `go: ... 401 Unauthorized` from `nexus:8081`, or `uv sync` hangs | Anonymous access disabled in Nexus | Builds pass no credentials to the proxies. Enable global anonymous access ([§5.3](#53-run-nexus)); Docker pull stays authenticated via the per-repository switch. Check with `curl -o /dev/null -w '%{http_code}' http://nexus:8081/repository/pypi-proxy/simple/` — expect `200`. |
@@ -7873,14 +8396,17 @@ Two version rules worth internalising:
 | Backstage template fails at the last step, `action not found` | Scaffolder GitHub module not registered | `backend.add(import('@backstage/plugin-scaffolder-backend-module-github'))` in `packages/backend/src/index.ts`, then rebuild the image ([§14.3](#143-scaffold-the-portal)). |
 | Scaffolder PR fails with 403 | Fine-grained PAT missing `Pull requests: RW` | Contents alone is not enough to open a PR. Re-scope the token, update the value in OpenBao, wait for ESO to resync, restart the pod. |
 | Scaffolded service builds but never deploys | Chart file missing or malformed | `helm template deploy/charts/order-platform` and look for it. The chart reads `services/*.yaml` — a file that isn't valid YAML renders as nothing, with no error ([§14.6](#146-paved-path-1--a-new-service)). |
-| Every page returns `upstream connect error ... reset reason: connection termination` | Ingress backend is in the mesh under STRICT mTLS | Not a dead backend — a refused plaintext connection. NGINX proxies to pod IPs (which name no service for Istio to originate mTLS to) and preserves the browser's `Host:` (which Envoy routes on, and which matches no mesh service). Both annotations are required and are already in the chart: `nginx.ingress.kubernetes.io/service-upstream: "true"` and `nginx.ingress.kubernetes.io/upstream-vhost: "<svc>.<ns>.svc.cluster.local"`. Confirm with the source sidecar's stats — `destination_service_name.PassthroughCluster` means the mesh could not identify the destination. |
+| A page served through the mesh returns `upstream connect error ... reset reason: connection termination` | Something is sending plaintext to a STRICT mTLS port | Not a dead backend — a refused unauthenticated connection. Traffic reaches mesh workloads through `istio-ingressgateway` ([§9.4](#)), which is in the mesh and holds a workload identity; anything else talking straight to a `shop` pod is refused by design. Check the source sidecar's stats — `destination_service_name.PassthroughCluster` means the mesh could not identify the destination, which is what a caller outside the mesh looks like. |
 | A `200` at the edge, but is mTLS actually on? | Source-side stats report `unknown` even when it is | Read the **destination** reporter: `kubectl -n shop exec deploy/order-api -c istio-proxy -- pilot-agent request GET 'stats?filter=istio_requests_total' \| grep reporter.destination`. Look for `connection_security_policy.mutual_tls` and a real `source_principal`. A `200` alone proves only that bytes moved — plaintext through `PassthroughCluster` returns `200` too. |
 | A credential you just wrote to OpenBao is still rejected | ESO polls on `refreshInterval`; the Secret still holds the old value | The `ExternalSecret` reports `Ready=True` the whole time, truthfully — it is synced, to the previous value. Restarting the consumer does not help. Force it: `kubectl -n <ns> annotate externalsecret <name> force-sync="$(date +%s)" --overwrite`, then restart. Diagnose without printing the secret: compare decoded **length** (`... \| base64 -d \| wc -c`) and `bao kv metadata get <path>`'s newest `created_time` against `.status.refreshTime`. |
 | Argo reports `Synced` but the live resource is on an old image | Stale cache in the application controller | `kubectl -n argocd annotate app <name> argocd.argoproj.io/refresh=hard --overwrite`. Suspect this when `Synced` and `Degraded` appear together and the rendered manifest in git plainly differs from the live object. |
 | `exec /order-worker: no such file or directory` on a file that exists and is executable | The binary is dynamically linked; `distroless/static` has no loader | It is the *loader* that is missing, not the binary. Pants defaults `[golang] cgo_enabled` to true — `pants.toml` sets it to `false` ([§17.2](#)). Check with `readelf -l <binary> \| grep interpreter`: a static binary has no `PT_INTERP`. |
 | Every order in the dashboard reads `HTTP 502`, but `curl` against the API returns `202` | The frontend proxies to a port the Service does not publish | Two different paths; only the browser's is broken. `frontend/nginx.conf` must target the **Service** port (`80`), not the container port (`8000`). `checks/` contains a test that fails when the two disagree. |
 | Backstage loads a white screen over `http://` | `crypto.randomUUID` is unavailable in an insecure context | Use the `https://` URL. This is a browser restriction, not a Backstage bug. |
-| Pods cannot resolve `nexus` after a Docker restart | The Nexus container came back on a different bridge IP | The CoreDNS `hosts` entry pins an IP. Re-run [§5.10](#510-teach-pods-about-nexus-coredns) with the current `docker inspect nexus` address. |
+| Pods cannot resolve `nexus` after a Docker restart | The container was recreated without `--ip` | A container started with `--ip 172.18.255.10` ([§5.3](#53-run-nexus)) keeps that address across restarts, so the CoreDNS entry survives. One started without it takes whatever Docker hands out. Recreate it with the flag — the `nexus-data` volume is separate, so nothing is lost. |
+| Backstage dies at startup with `Failed to instantiate service 'core.auth'` | Backstage does not retry plugin initialisation after the database goes away | Anything that restarts Postgres — a node reboot, a `helm upgrade` that rolls the StatefulSet — leaves the backend permanently broken with an error naming neither Postgres nor the restart. `kubectl -n backstage rollout restart deploy/backstage`. |
+| `helm upgrade` → `PASSWORDS ERROR: The secret "backstage-postgresql-auth" does not contain the key "user-password"` | Bitnami's `password` / `postgres-password` key names do not apply once `existingSecret` is set | With `postgresql.auth.existingSecret` set the names come from `postgresql.auth.secretKeys.*`, which the Backstage chart overrides to `user-password` and `admin-password`. Both are required ([§14.8](#148-build-and-deploy-the-portal)). The `ExternalSecret` must also exist **before** the install — the subchart no longer creates the Secret and the render fails without it. |
+| Backstage: `password authentication failed for user "bn_backstage"` after a password rotation | The password was rotated in OpenBao only | Postgres was initialised with the old password and does not learn a new one from a Secret, so the two ends drift and the portal is locked out of its own database. Rotate at both ends — `ALTER ROLE` in Postgres, then OpenBao, then restart ([§15.4](#154-break-it-on-purpose)). The rotate-and-wait-for-ESO loop applies only to secrets OpenBao alone owns. |
 
 Generally useful:
 
@@ -7928,11 +8454,17 @@ docker start nexus
 docker exec nexus cat /nexus-data/admin.password
 docker login nexus:8082 -u ci
 
-# OpenBao
-BAO="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
+# OpenBao — day-to-day, as the operator user (§7.5a)
+kubectl -n openbao exec -it openbao-0 -- env BAO_ADDR=http://127.0.0.1:8200 \
+  bao login -method=userpass username=operator
+BAO="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=<the token> BAO_ADDR=http://127.0.0.1:8200 bao"
 $BAO kv get shop/order-api
-$BAO kv put shop/order-api signing_key=...
-$BAO policy read shop-read
+$BAO kv put shop/order-api signing_key=...        # a full overwrite of the path
+
+# OpenBao — bootstrap only, as root. `policy read` is sys/policies/acl/* and 403s
+# under shop-admin; so do secrets enable, auth enable and policy write.
+BAO_ROOT="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
+$BAO_ROOT policy read shop-read
 
 # External Secrets
 kubectl get clustersecretstore

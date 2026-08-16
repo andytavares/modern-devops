@@ -37,8 +37,11 @@ metadata:
 spec:
   {}
 ---
-# 4. The frontend is a browser-facing page. It is reachable from the edge and
-# from nowhere else -- it has no callers inside the mesh.
+# 4. The frontend is a browser-facing page. It is reachable from the mesh's
+# ingress gateway and from nowhere else -- it has no callers inside the mesh.
+# The principal is the gateway's own workload identity: traffic entering
+# through it is authenticated as istio-ingressgateway, not as whatever sits in
+# front of it.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -53,7 +56,7 @@ spec:
     - from:
         - source:
             principals:
-              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+              - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
 ---
 # 5. order-worker takes no inbound traffic at all. It consumes from Kafka and
 # writes to Floci; nothing calls it. The one exception is Prometheus scraping
@@ -77,7 +80,7 @@ spec:
     - from:
         - source:
             principals:
-              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+              - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
     - from:
         - source:
             principals:

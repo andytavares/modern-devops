@@ -34,6 +34,12 @@ pants_ignore.add = [
   "/portal",          # Backstage owns its own Yarn workspace; not ours to build
   "/wiki",
   "/raw",
+  # Pants honours only the root .gitignore — `--pants-ignore-use-gitignore`
+  # "does not yet support reading nested gitignore files" — so frontend/.gitignore
+  # does not reach it and `pants tailor` walks into installed packages and build
+  # output.
+  "/frontend/node_modules",
+  "/frontend/dist",
 ]
 # `/docs` is deliberately NOT ignored: `checks/` reads the phase files to
 # assemble the single-file edition and to verify every listing still matches

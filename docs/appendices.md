@@ -19,7 +19,7 @@ Verified 2026-08-16 against a running cluster — every version below was read b
 | ingress-nginx | controller-v1.13.0 | [releases](https://github.com/kubernetes/ingress-nginx/releases) — **note:** v1.13.0's kind manifest dropped the `ingress-ready` nodeSelector; [§4.3](phase-0-foundations.md#43-install-the-ingress-controller) patches it back |
 | Sonatype Nexus | `sonatype/nexus3:3.95.0` | [Docker Hub tags](https://hub.docker.com/r/sonatype/nexus3/tags) |
 | Floci | `floci/floci:1.5.11` | [github.com/floci-io/floci](https://github.com/floci-io/floci) |
-| OpenBao Helm chart | 0.29.1 (OpenBao 2.5.0) | `helm search repo openbao/openbao --versions` |
+| OpenBao Helm chart | 0.29.1 (OpenBao 2.6.1) | `helm search repo openbao/openbao --versions` |
 | External Secrets Operator | chart 2.6.0 | `helm search repo external-secrets/external-secrets --versions` |
 | Strimzi | 0.50.1 (Kafka 4.1.0) | `helm search repo strimzi/strimzi-kafka-operator --versions` |
 | Argo CD | v3.4.7 | [releases](https://github.com/argoproj/argo-cd/releases) |
@@ -51,7 +51,7 @@ Two version rules worth internalising:
 | `ImagePullBackOff` on `nexus:8082/...` | containerd can't reach or auth to Nexus | `docker exec devops-worker curl -s -o /dev/null -w '%{http_code}' http://nexus:8082/v2/` — expect `401`. Not `401`? Re-run [§5.9](phase-0-foundations.md#59-teach-containerd-on-the-kind-nodes-about-nexus). `401` but still failing? The pod is missing `imagePullSecrets` or the ExternalSecret hasn't synced. |
 | `curl http://localhost` returns **`000`** | Ingress controller scheduled on a node with no port mappings | `000` = nothing listening, not a 404. `kubectl -n ingress-nginx get pods -o wide` — if `NODE` isn't `devops-control-plane`, apply the `ingress-ready` nodeSelector patch in [§4.3](phase-0-foundations.md#43-install-the-ingress-controller). Upstream dropped that selector in controller-v1.13.0. |
 | Ingress Service stuck `EXTERNAL-IP <pending>` | `type: LoadBalancer` with no cloud provider | Harmless on kind — traffic arrives via `hostPort`, not the Service. Don't install MetalLB to "fix" it. |
-| Pods can't resolve `nexus` | Nexus container got a new IP | Re-run [§5.10](phase-0-foundations.md#510-teach-pods-about-nexus-coredns) with the current `docker inspect nexus` IP. |
+| Pods can't resolve `nexus` | The CoreDNS `hosts` entry and the container disagree | The container is pinned to `172.18.255.10` by `--ip` in [§5.3](phase-0-foundations.md#53-run-nexus). Confirm with `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nexus`; if it differs, the container was recreated without `--ip`. Re-run [§5.10](phase-0-foundations.md#510-teach-pods-about-nexus-coredns), which replaces the block rather than appending. |
 | `docker push` → `http: server gave HTTP response to HTTPS client` | `insecure-registries` not applied | [§5.8](phase-0-foundations.md#58-trust-the-plain-http-registry-from-docker), then **restart Docker**. |
 | `docker login nexus:8082` → 401 with correct password | Docker Bearer Token Realm not active | Nexus → ⚙ → Security → Realms → activate it ([§5.4](phase-0-foundations.md#54-create-the-docker-hosted-registry)). |
 | CI: `go: ... 401 Unauthorized` from `nexus:8081`, or `uv sync` hangs | Anonymous access disabled in Nexus | Builds pass no credentials to the proxies. Enable global anonymous access ([§5.3](phase-0-foundations.md#53-run-nexus)); Docker pull stays authenticated via the per-repository switch. Check with `curl -o /dev/null -w '%{http_code}' http://nexus:8081/repository/pypi-proxy/simple/` — expect `200`. |
@@ -79,14 +79,17 @@ Two version rules worth internalising:
 | Backstage template fails at the last step, `action not found` | Scaffolder GitHub module not registered | `backend.add(import('@backstage/plugin-scaffolder-backend-module-github'))` in `packages/backend/src/index.ts`, then rebuild the image ([§14.3](phase-5-developer-portal.md#143-scaffold-the-portal)). |
 | Scaffolder PR fails with 403 | Fine-grained PAT missing `Pull requests: RW` | Contents alone is not enough to open a PR. Re-scope the token, update the value in OpenBao, wait for ESO to resync, restart the pod. |
 | Scaffolded service builds but never deploys | Chart file missing or malformed | `helm template deploy/charts/order-platform` and look for it. The chart reads `services/*.yaml` — a file that isn't valid YAML renders as nothing, with no error ([§14.6](phase-5-developer-portal.md#146-paved-path-1--a-new-service)). |
-| Every page returns `upstream connect error ... reset reason: connection termination` | Ingress backend is in the mesh under STRICT mTLS | Not a dead backend — a refused plaintext connection. NGINX proxies to pod IPs (which name no service for Istio to originate mTLS to) and preserves the browser's `Host:` (which Envoy routes on, and which matches no mesh service). Both annotations are required and are already in the chart: `nginx.ingress.kubernetes.io/service-upstream: "true"` and `nginx.ingress.kubernetes.io/upstream-vhost: "<svc>.<ns>.svc.cluster.local"`. Confirm with the source sidecar's stats — `destination_service_name.PassthroughCluster` means the mesh could not identify the destination. |
+| A page served through the mesh returns `upstream connect error ... reset reason: connection termination` | Something is sending plaintext to a STRICT mTLS port | Not a dead backend — a refused unauthenticated connection. Traffic reaches mesh workloads through `istio-ingressgateway` ([§9.4](phase-4-service-mesh.md)), which is in the mesh and holds a workload identity; anything else talking straight to a `shop` pod is refused by design. Check the source sidecar's stats — `destination_service_name.PassthroughCluster` means the mesh could not identify the destination, which is what a caller outside the mesh looks like. |
 | A `200` at the edge, but is mTLS actually on? | Source-side stats report `unknown` even when it is | Read the **destination** reporter: `kubectl -n shop exec deploy/order-api -c istio-proxy -- pilot-agent request GET 'stats?filter=istio_requests_total' \| grep reporter.destination`. Look for `connection_security_policy.mutual_tls` and a real `source_principal`. A `200` alone proves only that bytes moved — plaintext through `PassthroughCluster` returns `200` too. |
 | A credential you just wrote to OpenBao is still rejected | ESO polls on `refreshInterval`; the Secret still holds the old value | The `ExternalSecret` reports `Ready=True` the whole time, truthfully — it is synced, to the previous value. Restarting the consumer does not help. Force it: `kubectl -n <ns> annotate externalsecret <name> force-sync="$(date +%s)" --overwrite`, then restart. Diagnose without printing the secret: compare decoded **length** (`... \| base64 -d \| wc -c`) and `bao kv metadata get <path>`'s newest `created_time` against `.status.refreshTime`. |
 | Argo reports `Synced` but the live resource is on an old image | Stale cache in the application controller | `kubectl -n argocd annotate app <name> argocd.argoproj.io/refresh=hard --overwrite`. Suspect this when `Synced` and `Degraded` appear together and the rendered manifest in git plainly differs from the live object. |
 | `exec /order-worker: no such file or directory` on a file that exists and is executable | The binary is dynamically linked; `distroless/static` has no loader | It is the *loader* that is missing, not the binary. Pants defaults `[golang] cgo_enabled` to true — `pants.toml` sets it to `false` ([§17.2](phase-7-polyglot-monorepo.md)). Check with `readelf -l <binary> \| grep interpreter`: a static binary has no `PT_INTERP`. |
 | Every order in the dashboard reads `HTTP 502`, but `curl` against the API returns `202` | The frontend proxies to a port the Service does not publish | Two different paths; only the browser's is broken. `frontend/nginx.conf` must target the **Service** port (`80`), not the container port (`8000`). `checks/` contains a test that fails when the two disagree. |
 | Backstage loads a white screen over `http://` | `crypto.randomUUID` is unavailable in an insecure context | Use the `https://` URL. This is a browser restriction, not a Backstage bug. |
-| Pods cannot resolve `nexus` after a Docker restart | The Nexus container came back on a different bridge IP | The CoreDNS `hosts` entry pins an IP. Re-run [§5.10](phase-0-foundations.md#510-teach-pods-about-nexus-coredns) with the current `docker inspect nexus` address. |
+| Pods cannot resolve `nexus` after a Docker restart | The container was recreated without `--ip` | A container started with `--ip 172.18.255.10` ([§5.3](phase-0-foundations.md#53-run-nexus)) keeps that address across restarts, so the CoreDNS entry survives. One started without it takes whatever Docker hands out. Recreate it with the flag — the `nexus-data` volume is separate, so nothing is lost. |
+| Backstage dies at startup with `Failed to instantiate service 'core.auth'` | Backstage does not retry plugin initialisation after the database goes away | Anything that restarts Postgres — a node reboot, a `helm upgrade` that rolls the StatefulSet — leaves the backend permanently broken with an error naming neither Postgres nor the restart. `kubectl -n backstage rollout restart deploy/backstage`. |
+| `helm upgrade` → `PASSWORDS ERROR: The secret "backstage-postgresql-auth" does not contain the key "user-password"` | Bitnami's `password` / `postgres-password` key names do not apply once `existingSecret` is set | With `postgresql.auth.existingSecret` set the names come from `postgresql.auth.secretKeys.*`, which the Backstage chart overrides to `user-password` and `admin-password`. Both are required ([§14.8](phase-5-developer-portal.md#148-build-and-deploy-the-portal)). The `ExternalSecret` must also exist **before** the install — the subchart no longer creates the Secret and the render fails without it. |
+| Backstage: `password authentication failed for user "bn_backstage"` after a password rotation | The password was rotated in OpenBao only | Postgres was initialised with the old password and does not learn a new one from a Secret, so the two ends drift and the portal is locked out of its own database. Rotate at both ends — `ALTER ROLE` in Postgres, then OpenBao, then restart ([§15.4](phase-6-operating.md#154-break-it-on-purpose)). The rotate-and-wait-for-ESO loop applies only to secrets OpenBao alone owns. |
 
 Generally useful:
 
@@ -134,11 +137,17 @@ docker start nexus
 docker exec nexus cat /nexus-data/admin.password
 docker login nexus:8082 -u ci
 
-# OpenBao
-BAO="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
+# OpenBao — day-to-day, as the operator user (§7.5a)
+kubectl -n openbao exec -it openbao-0 -- env BAO_ADDR=http://127.0.0.1:8200 \
+  bao login -method=userpass username=operator
+BAO="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=<the token> BAO_ADDR=http://127.0.0.1:8200 bao"
 $BAO kv get shop/order-api
-$BAO kv put shop/order-api signing_key=...
-$BAO policy read shop-read
+$BAO kv put shop/order-api signing_key=...        # a full overwrite of the path
+
+# OpenBao — bootstrap only, as root. `policy read` is sys/policies/acl/* and 403s
+# under shop-admin; so do secrets enable, auth enable and policy write.
+BAO_ROOT="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
+$BAO_ROOT policy read shop-read
 
 # External Secrets
 kubectl get clustersecretstore

@@ -1,0 +1,47 @@
+# CI-only Pants configuration. Layered on top of pants.toml, not a replacement
+# for it: the pipeline sets
+#
+#   PANTS_CONFIG_FILES=pants.ci.toml
+#
+# which is the mechanism the "Using Pants in CI" guide documents for exactly
+# this — https://www.pantsbuild.org/stable/docs/using-pants/using-pants-in-ci
+#
+# Everything here is a setting that is right in a pod and wrong on a laptop.
+# Nothing that affects what gets built or how it is built belongs in this file;
+# a CI-only build setting is a CI-only bug waiting to happen.
+
+[GLOBAL]
+# Colors often work in CI, but the shell is usually not a TTY so Pants
+# doesn't attempt to use them by default. Buildkite renders ANSI colour in the
+# log, so turning them back on is free readability.
+colors = true
+
+[stats]
+# Logs cache hit/miss counts and timings at the end of the run. This is the
+# only visibility anyone gets into whether the Pants cache is doing anything in
+# CI — without it, a run that recompiles the world looks identical to one that
+# hits cache on everything, except slower.
+log = true
+
+[test]
+use_coverage = true
+
+[coverage-py]
+# XML because it is the format every coverage service and Buildkite annotation
+# plugin reads. It lands in dist/coverage/python/coverage.xml.
+#
+# Note that the verify step's `artifact_paths: "dist/*"` does NOT pick it up —
+# that glob matches one level and coverage.xml is two deep. Deliberate for now:
+# widening the glob would also change what the Buildah steps download into the
+# image build context. Widen it the day something actually consumes the report.
+report = ["xml"]
+# Report over every file Pants knows about, not just the ones the tests that
+# ran happened to import. Without this a module with no tests at all is simply
+# absent from the report rather than showing as 0%.
+global_report = true
+
+[pytest]
+# -vv names each test in the log, which is what you want when the only record
+# of a failed CI run is its log. --no-header drops the platform/rootdir banner
+# that Buildkite already shows.
+args = ["-vv", "--no-header"]

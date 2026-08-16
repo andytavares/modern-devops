@@ -1264,6 +1264,8 @@ You should see `openbao-0` Running.
 
 Everything below runs the `bao` CLI inside the pod, so nothing is installed on your laptop.
 
+This is bootstrap, and it runs as root because enabling a secrets engine is a mount operation on `sys/mounts` that no scoped policy grants. [§7.5a](#75a-give-humans-an-auth-method-too) builds the non-root path that everything after §7 uses.
+
 ```bash
 BAO="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
 
@@ -1301,7 +1303,7 @@ kubectl create clusterrolebinding openbao-token-review \
   --serviceaccount=openbao:openbao
 ```
 
-Now enable and configure the auth method. Note what is **not** in this command:
+Now enable and configure the auth method. This is bootstrap again — `auth enable` and `auth/kubernetes/config` are `sys/auth` and `auth/*` writes, which the operator policy in [§7.5a](#75a-give-humans-an-auth-method-too) deliberately does not grant. Note what is **not** in this command:
 
 ```bash
 kubectl -n openbao exec -i openbao-0 -- sh -c '
@@ -1331,7 +1333,7 @@ denied`, the `ClusterSecretStore` flips to `Invalid`, and every `ExternalSecret`
 stops refreshing — long after the setup you verified as green. The same argument applies to
 `kubernetes_ca_cert`, which breaks on CA rotation instead of token rotation.
 
-Write a policy granting read-only access to the `shop` mount, and a role binding it to the ESO ServiceAccount:
+Write a policy granting read-only access to the `shop` mount, and a role binding it to the ESO ServiceAccount. Still bootstrap: writing a policy is `sys/policies/acl/*`, and an identity that can write policies can grant itself anything, which is why nothing but root gets it here.
 
 ```bash
 kubectl -n openbao exec -i openbao-0 -- sh -c '
@@ -1424,6 +1426,180 @@ kubectl get clustersecretstore openbao -o jsonpath='{.status.conditions[0]}' && 
 If it says `Invalid`, check `kubectl -n external-secrets logs deploy/external-secrets` — 99% of the time it's the `system:auth-delegator` binding or a typo in the role name.
 
 > **`ClusterSecretStore` vs `SecretStore`.** A `SecretStore` is namespaced: teams configure their own vault connection and can't reach each other's. A `ClusterSecretStore` is one shared definition — less duplication, but any namespace can reference it, so your isolation now depends entirely on the OpenBao policy rather than on Kubernetes RBAC. We use `ClusterSecretStore` because we have one team; use namespaced stores the moment you have two.
+
+### 7.5a Give humans an auth method too
+
+The machine path is finished and it is genuinely least-privilege: ESO presents a ServiceAccount JWT, gets a token carrying `shop-read`, and that token can read the `shop` mount and do nothing else. The human path has been the root token the entire time. Every `$BAO` command above ran as root.
+
+OpenBao documents the `root` policy as being for initial setup and emergencies, to be revoked once a real auth method exists ([tokens](https://openbao.org/docs/concepts/tokens/)). Bootstrapping that first non-root path is itself a root operation — there is no way around it, and it is the last thing root should be used for.
+
+Enable `userpass`, write a policy scoped to the `shop` mount, and bind a user to it:
+
+```bash
+kubectl -n openbao exec -i openbao-0 -- sh -c '
+set -eu
+export BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200   # bootstrap, and the last of it
+
+bao auth enable userpass 2>/dev/null || true
+
+# Least privilege for an operator of THIS platform: write the secrets the
+# platform consumes, and see what is there. Not the root policy under another
+# name — no sys/*, no auth/*, no mount management, no delete or destroy, and no
+# ability to widen its own grant.
+bao policy write shop-admin - <<EOF
+path "shop/data/*" {
+  capabilities = ["create", "update", "read"]
+}
+path "shop/metadata/*" {
+  capabilities = ["read", "list"]
+}
+EOF
+
+bao write auth/userpass/users/operator \
+  password="change-me" \
+  token_policies=shop-admin \
+  token_ttl=1h \
+  token_max_ttl=8h
+'
+```
+
+Now log in as a human and keep the token it hands back:
+
+```bash
+kubectl -n openbao exec -it openbao-0 -- env BAO_ADDR=http://127.0.0.1:8200 \
+  bao login -method=userpass username=operator
+# prompts for the password, then prints the token, its 1h duration,
+# and its policies: default and shop-admin
+
+BAO_OP="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=<the token above> BAO_ADDR=http://127.0.0.1:8200 bao"
+```
+
+Prove the grant in both directions. It is not a real boundary until you have seen it refuse something:
+
+```bash
+# Allowed: writing a secret the platform consumes.
+$BAO_OP kv put shop/order-api signing_key="$(openssl rand -hex 32)"
+
+# Refused: everything else.
+$BAO_OP auth list
+```
+
+```
+Error listing enabled authentications: Error making API request.
+URL: GET http://127.0.0.1:8200/v1/sys/auth
+Code: 403. Errors:
+* 1 error occurred:
+	* permission denied
+```
+
+That 403 is the point of the section. The operator can rotate every credential on this platform and cannot enable an auth method, mount an engine, read a policy, or grant itself anything.
+
+> **`bao kv patch` needs a separate `patch` capability, and it is deliberately not granted.** Every `kv put` in this tutorial is a full overwrite of the version: `kv put shop/backstage github_token=...` on a path that also holds `postgres_password` destroys the other keys. Write every key of a path in one command, and read the path first if you are unsure what is on it.
+
+The same three steps are packaged as a re-runnable Job, because dev-mode OpenBao loses everything on restart and you will need them again:
+
+**`deploy/platform/openbao-operator-auth.yaml`**
+
+```yaml
+# The human path into OpenBao.
+#
+# The machine path already exists: ESO authenticates with its ServiceAccount
+# through the kubernetes auth method and gets the read-only `shop-read` policy.
+# Humans have had nothing, so every operator write has been made with the root
+# token. The root policy is meant for initial setup and emergencies only and
+# should be revoked once a real auth method exists
+# (https://openbao.org/docs/concepts/tokens). This Job builds that auth method:
+# `userpass`, a scoped `shop-admin` policy, and an `operator` user bound to it.
+#
+# Bootstrapping an auth method is itself a root operation — there is no way to
+# create the first non-root path without a root token. That token is supplied at
+# run time out of a Secret rather than committed here:
+#
+#   kubectl -n openbao create secret generic openbao-bootstrap \
+#     --from-literal=root-token=root \
+#     --from-literal=operator-password=<choose one> \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# A Job's pod template is immutable once created, so re-running this is
+# `kubectl delete -f` then `kubectl apply -f`. The script itself is idempotent:
+# enabling an already-enabled auth method and rewriting an existing policy or
+# user are all no-ops.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-operator-auth
+  namespace: openbao
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      annotations:
+        # An injected sidecar keeps the pod alive after the job finishes, so it
+        # never completes.
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bao
+          image: quay.io/openbao/openbao:2.6.1
+          env:
+            - { name: BAO_ADDR, value: "http://openbao.openbao.svc.cluster.local:8200" }
+            - name: BAO_TOKEN
+              valueFrom:
+                secretKeyRef: { name: openbao-bootstrap, key: root-token }
+            - name: OPERATOR_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: openbao-bootstrap, key: operator-password }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+
+              echo "waiting for openbao..."
+              until bao status >/dev/null 2>&1; do sleep 2; done
+
+              echo "enabling userpass (idempotent)"
+              bao auth enable userpass 2>/dev/null || true
+
+              # Least privilege for an operator of THIS platform: write the
+              # secrets the platform consumes, and see what is there. Not the
+              # root policy with a different name — no sys/*, no auth/*, no
+              # mount management, no ability to widen its own grant, and no
+              # delete or destroy on secret data.
+              echo "writing shop-admin policy"
+              bao policy write shop-admin - <<'POLICY'
+              path "shop/data/*" {
+                capabilities = ["create", "update", "read"]
+              }
+              path "shop/metadata/*" {
+                capabilities = ["read", "list"]
+              }
+              POLICY
+
+              echo "binding operator user to shop-admin"
+              bao write auth/userpass/users/operator \
+                password="$OPERATOR_PASSWORD" \
+                token_policies=shop-admin \
+                token_ttl=1h \
+                token_max_ttl=8h
+
+              echo "--- result ---"
+              bao auth list
+              bao policy read shop-admin
+```
+
+```bash
+kubectl -n openbao create secret generic openbao-bootstrap \
+  --from-literal=root-token=root \
+  --from-literal=operator-password=change-me \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl apply -f deploy/platform/openbao-operator-auth.yaml
+kubectl -n openbao logs job/openbao-operator-auth -f
+```
+
+> **The root token is not revoked here, and cannot be.** This cluster runs OpenBao in dev mode, where the root token is a fixed value passed at startup and recreated every time the pod restarts — revoking it accomplishes nothing. In a real cluster the last step of this section is `bao token revoke <root-token>`, after which a new root token exists only if you run `bao operator generate-root` with a quorum of unseal-key holders. That quorum requirement is the whole design: root is an event several people have to agree to, not a string in someone's shell history.
 
 ### 7.6 Let Kubernetes pull from Nexus
 

@@ -72,6 +72,14 @@ env:
   # it would only disarm verification for the next dependency added.
   GOFLAGS: "-mod=readonly"
 
+  # Layers pants.ci.toml on top of pants.toml. This is the mechanism the
+  # "Using Pants in CI" guide documents, and it is why nothing in the verify
+  # step needs a wall of `--flag` arguments: colours, run stats and coverage
+  # are CI-only settings, so they live in a CI-only config file rather than in
+  # the command line or, worse, in pants.toml where they would also apply to
+  # every laptop. Harmless in the Buildah steps, which never invoke Pants.
+  PANTS_CONFIG_FILES: "pants.ci.toml"
+
 steps:
   # ── 1. One step, every language ──────────────────────────────────────────
   # One invocation covers every language, and it discovers what changed and
@@ -80,6 +88,28 @@ steps:
   # `pants package` runs here too, rather than in the image build, because the
   # build steps below are daemonless Buildah pods with no toolchain: no Python,
   # no Go, no Node. They receive artifacts, they do not produce them.
+  #
+  # Deliberately NOT `--changed-since=origin/main`, which the Pants CI guide
+  # offers as the faster alternative. It does not fit this pipeline:
+  #
+  #   1. The build steps below are unconditional. Services are discovered from
+  #      the filesystem, not from the diff, so every service gets an image on
+  #      every build. Pairing that with a diff-scoped test run means shipping an
+  #      image whose code was never tested on this commit — the one outcome a
+  #      pipeline exists to prevent.
+  #   2. The deploy step rewrites every tag in values.yaml to this SHA. So even
+  #      an untouched service is redeployed from a build that may not have
+  #      tested it.
+  #   3. The guide names its own caveat: `--changed-since` "will not handle all
+  #      cases, like hooking up a new linter." A change to pants.toml or a tool
+  #      lockfile alters how everything is checked while changing almost nothing
+  #      in the diff.
+  #
+  # The speedup it buys is already bought elsewhere: Pants caches at the level
+  # of the individual process, so an unchanged test does not re-run even when
+  # `::` names it. `--changed-since` earns its keep when the *bootstrap* cost
+  # dominates, and it belongs with a build matrix that scopes packaging to the
+  # same diff. That is a different pipeline than this one.
   - label: ":hammer: lint · typecheck · test · package"
     key: verify
     agents: { queue: kubernetes }
@@ -108,7 +138,20 @@ steps:
                     # git metadata: Pants uses it to decide what changed.
                     git config --global --add safe.directory "$PWD"
 
-                    pants lint check test ::
+                    # `update-build-files --check` is the guide's recommended
+                    # CI check for BUILD-file drift: it reformats every BUILD
+                    # file in memory and fails if the result differs from what
+                    # is committed, so a hand-edited BUILD file cannot quietly
+                    # diverge from the formatting everything else has.
+                    #
+                    # `tailor --check` is its sibling: it fails when a source
+                    # file belongs to no target, which is how a new file gets
+                    # silently excluded from lint, typecheck and test while
+                    # everything stays green.
+                    #
+                    # One invocation, not four: the goals share a single
+                    # target-set argument and Pants runs what it can in parallel.
+                    pants tailor --check update-build-files --check lint check test ::
 
                     # Runs here rather than as a Pants test because it reads
                     # the whole checkout: every file listing in docs/ must

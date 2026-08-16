@@ -254,6 +254,8 @@ Most people meet Nexus as "the place images go". That undersells it. An artifact
 
 We configure three repository types to make that concrete: a **Docker hosted** registry for our images, a **PyPI proxy**, and a **Go proxy**.
 
+> **A checksum is only worth the origin it comes from.** Some things cannot route through the choke point — a launcher binary published only on GitHub releases, for instance — and the usual answer is a vendor install script that downloads `${url}.sha256` next to the artifact and verifies one against the other. That detects a corrupted transfer. It cannot detect a compromised release: whoever can replace the artifact can replace the checksum beside it. The rule for anything that bypasses Nexus is therefore: **pin a version and a checksum that a human reviewed, in your own repo, and fetch neither at build time.** [§17.3](phase-7-polyglot-monorepo.md#173-pantstoml) applies exactly this to the one binary in this platform that GitHub is the only source for.
+
 > **Why Nexus, and why its free edition rather than Artifactory.** In an enterprise you will be handed Sonatype Nexus Repository Pro or JFrog Artifactory, and the choice between them was made by procurement, not by you. Neither is licensable for a tutorial: JFrog lists self-managed Artifactory from **$27,000/year**, and Nexus Pro is quote-only. So we run `sonatype/nexus3:3.95.0`, which is **Nexus Repository Community Edition** — not a lookalike, the same binary and the same UI as Pro under a usage cap of **40,000 total components or 100,000 requests per day**, after which it refuses new components until you drop below both ([Sonatype](https://help.sonatype.com/en/ce-onboarding.html), as of 2026-08). Everything §5 does — hosted vs proxy vs group, the Docker Bearer Token realm, a separate connector port because the registry API lives at `/v2/`, anonymous access scoped per repository, a private `GOPROXY` — is identical on Pro.
 >
 > It transfers to Artifactory as well, because the parts that matter are protocols, not products. A Docker registry is the OCI distribution API; a PyPI proxy is PEP 503's simple index; a Go proxy is the module proxy protocol. The client-side configuration in [§5.8](#58-trust-the-plain-http-registry-from-docker)–[§5.10](#510-teach-pods-about-nexus-coredns) — `insecure-registries`, containerd's `hosts.toml`, `PIP_INDEX_URL`, `GOPROXY` — is unchanged against Artifactory, and Artifactory's repository types are Nexus's under other names: **local** = hosted, **remote** = proxy, **virtual** = group.
@@ -274,9 +276,11 @@ If the name differs between them, your image reference (`nexus:8082/shop/order-a
 
 The fix is three-part, and we do each explicitly:
 
-1. Run Nexus as a Docker container **attached to the `kind` network** with the network alias `nexus`. That covers containerd on the nodes, which resolves via Docker's embedded DNS.
+1. Run Nexus as a Docker container **attached to the `kind` network**, with the network alias `nexus` and a **static IP**. That covers containerd on the nodes, which resolves via Docker's embedded DNS.
 2. Publish ports to the host and add `nexus` to your `/etc/hosts` pointing at `127.0.0.1`. That covers your shell.
-3. Add a `hosts` block to CoreDNS mapping `nexus` to the container's IP on the `kind` bridge. That covers pods.
+3. Add a `hosts` block to CoreDNS mapping `nexus` to that static IP. That covers pods.
+
+The static IP in step 1 is what makes step 3 permanent. CoreDNS resolves names, not Docker containers, so the entry has to name an address — and an address Docker chose is an address Docker is free to choose differently the next time the container starts.
 
 ### 5.3 Run Nexus
 
@@ -287,6 +291,7 @@ docker run -d \
   --name nexus \
   --network kind \
   --network-alias nexus \
+  --ip 172.18.255.10 \
   --restart unless-stopped \
   -p 8081:8081 \
   -p 8082:8082 \
@@ -296,6 +301,12 @@ docker run -d \
 ```
 
 > The `kind` Docker network is created by `kind create cluster`. If `--network kind` errors with "network not found", your cluster isn't up — go back to [§4.2](#42-create-the-cluster).
+
+**Why `--ip`, and why that address.** `docker run --ip` requests a fixed address on a user-defined network, and Docker honours it for the life of the container. Without it, Nexus gets whatever the IPAM driver hands out on each start, and the CoreDNS entry in [§5.10](#510-teach-pods-about-nexus-coredns) — which must name an address — goes stale the first time the container is recreated.
+
+The `kind` network is `172.18.0.0/16` with gateway `172.18.0.1`; confirm yours with `docker network inspect kind`. kind allocates node addresses from the low end of that range (`172.18.0.2`, `.3`, `.4`…), and every node you add takes the next one, so anything near the bottom is a collision waiting to happen. `172.18.255.10` is inside the subnet, outside the gateway, and far enough from the allocation front that kind will not reach it. Pick a different high address if you like; pick a low one and you will eventually hand Nexus an IP a control-plane node already holds.
+
+If Nexus is already running without `--ip`, `docker rm -f nexus` and re-run the command above. The `nexus-data` volume is separate from the container, so nothing configured in the sections below is lost.
 
 Nexus takes 2–4 minutes on first boot (it initialises an embedded database). Watch it:
 
@@ -464,23 +475,34 @@ docker exec devops-worker curl -s -o /dev/null -w '%{http_code}\n' http://nexus:
 
 ### 5.10 Teach pods about Nexus (CoreDNS)
 
-Pods resolve names through CoreDNS, which knows nothing about Docker networks. Get Nexus's IP on the `kind` bridge and add a static entry.
+Pods resolve names through CoreDNS, which knows nothing about Docker networks. Point it at the static IP [§5.3](#53-run-nexus) pinned.
 
 ```bash
-NEXUS_IP=$(docker inspect nexus \
-  -f '{{ (index .NetworkSettings.Networks "kind").IPAddress }}')
-echo "Nexus IP on kind network: $NEXUS_IP"
+NEXUS_IP=172.18.255.10
+
+# Confirm §5.3 took. If this prints anything else, --ip did not apply and the
+# entry below will be wrong.
+docker inspect nexus -f '{{ (index .NetworkSettings.Networks "kind").IPAddress }}'
 ```
 
-Patch the CoreDNS Corefile. This edits the ConfigMap in place, inserting a `hosts` block:
+CoreDNS's `hosts` plugin is the documented way to serve static A records from the Corefile, and `fallthrough` is what makes it additive: a name the block does not define falls through to the plugins after it, so cluster DNS is untouched.
+
+Patch the Corefile. This edits the ConfigMap in place:
 
 ```bash
 kubectl -n kube-system get configmap coredns -o jsonpath='{.data.Corefile}' > /tmp/Corefile.orig
 
 python3 - "$NEXUS_IP" <<'PY'
-import subprocess, sys
+import re, sys
 ip = sys.argv[1]
 cm = open('/tmp/Corefile.orig').read()
+
+# Idempotent: drop any hosts block we already installed before adding one.
+# Appending blindly gives CoreDNS two hosts blocks for the same name, and the
+# second one is dead weight that outlives whatever it was meant to fix.
+HOSTS = re.compile(r"[ \t]*hosts \{\n(?:[^\n]*\n)*?[ \t]*\}\n")
+cm = HOSTS.sub(lambda m: "" if " nexus\n" in m.group(0) else m.group(0), cm)
+
 block = f"""    hosts {{
         {ip} nexus
         fallthrough
@@ -509,7 +531,7 @@ kubectl run dnstest --rm -it --restart=Never --image=curlimages/curl:8.11.1 -- \
 # 401
 ```
 
-> **Tradeoff — CoreDNS hosts entry vs. `hostAliases` vs. an in-cluster Nexus.** A CoreDNS entry is cluster-wide and invisible to workload manifests, which is exactly right for infrastructure DNS — but it breaks if the Nexus container is recreated and lands on a different IP (re-run this section if so). `hostAliases` on each pod is per-workload and pollutes every manifest. Running Nexus *inside* the cluster is tempting but makes bootstrap circular: the cluster needs the registry to start workloads, and the registry is a workload. Running the registry outside the cluster it serves is the correct production topology too, for exactly that reason.
+> **Tradeoff — CoreDNS hosts entry vs. `hostAliases` vs. an in-cluster Nexus.** A CoreDNS entry is cluster-wide and invisible to workload manifests, which is exactly right for infrastructure DNS. It names an address rather than a container, which would be fragile if the address were Docker's to choose — [§5.3](#53-run-nexus) pins it precisely so this entry survives the container being recreated. `hostAliases` on each pod is per-workload and pollutes every manifest. Running Nexus *inside* the cluster is tempting but makes bootstrap circular: the cluster needs the registry to start workloads, and the registry is a workload. Running the registry outside the cluster it serves is the correct production topology too, for exactly that reason.
 
 ### 5.11 Push a first image to prove the whole path
 

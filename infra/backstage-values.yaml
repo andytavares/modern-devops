@@ -35,4 +35,14 @@ postgresql:
   enabled: true
   auth:
     username: bn_backstage
-    password: backstage-change-me
+    # The password lives in OpenBao and reaches the cluster as the
+    # `backstage-postgresql-auth` Secret (deploy/platform/backstage-secrets.yaml).
+    # Setting existingSecret stops the subchart generating a Secret of its own,
+    # so the ExternalSecret must exist before this chart is installed.
+    #
+    # The data directory is initialised once, on first boot, with whatever
+    # password it saw then. Changing the value in OpenBao afterwards changes only
+    # what the clients present, not what the server accepts — the two drift apart
+    # and Backstage is locked out of its own database. Rotating means rotating in
+    # Postgres too, not in OpenBao alone.
+    existingSecret: backstage-postgresql-auth

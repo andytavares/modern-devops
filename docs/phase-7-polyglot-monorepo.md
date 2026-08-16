@@ -125,7 +125,8 @@ pants_ignore.add = [
   "/portal",
   "/wiki",
   "/raw",
-  "/docs",
+  "/frontend/node_modules",
+  "/frontend/dist",
 ]
 
 [source]
@@ -149,8 +150,7 @@ indexes = ["http://nexus:8081/repository/pypi-proxy/simple"]
 cgo_enabled = false
 subprocess_env_vars = [
   "GOPROXY=http://nexus:8081/repository/go-proxy",
-  "GOSUMDB=off",
-  "GOFLAGS=-mod=mod",
+  "GOFLAGS=-mod=readonly",
   "HOME",
   "PATH",
 ]
@@ -178,13 +178,22 @@ The non-obvious lines:
   `BUILD` file contains nunjucks placeholders and is not valid Python until Backstage renders it;
   Backstage's own Yarn workspace is not ours to build
   ([§14.8](phase-5-developer-portal.md#148-build-and-deploy-the-portal)).
+- **`/frontend/node_modules` and `/frontend/dist` are listed because Pants reads only the root
+  `.gitignore`.** `--pants-ignore-use-gitignore` does not descend into nested ignore files, so
+  `frontend/.gitignore` never reaches Pants and `pants tailor` walks into installed packages and
+  build output. `/docs` is deliberately *not* ignored: `checks/` reads the phase files to assemble the
+  single-file edition, so Pants has to be able to see them.
 - **`[python-bootstrap] search_path` names the Homebrew path explicitly.** `brew install python@3.13`
   puts the unversioned `python` in `libexec/bin`, which is deliberately off `PATH`, and Pants' default
   search will not find it. `<PYENV>` and `<PATH>` are the defaults and must be repeated, not replaced.
 - **`[python-repos]` and `[golang]` both point at Nexus**, for the same reason `uv` did
-  ([§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for)). `GOSUMDB=off`
-  because the public checksum database is unreachable through a private proxy — the same trade, and
-  the same caveat, as [§12.5](phase-3-delivery.md#125-the-pipeline).
+  ([§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for)). Nothing else is overridden, and that
+  is the point: checksum verification stays on, because `go.sum` records a hash for every module in
+  the build list and the `go` command verifies against it locally
+  ([§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for) is blunt about why `GOSUMDB=off`
+  behind a private proxy is the wrong reflex). `-mod=readonly` is already Go's default and is stated
+  because it is load-bearing: under `-mod=mod` a build may rewrite `go.mod` and succeed against a
+  dependency set nobody committed.
 - **`[golang] cgo_enabled = false` is mandatory.** Pants defaults it to *true*, which links
   `order-worker` dynamically against libc. `gcr.io/distroless/static-debian12` has neither libc nor a
   dynamic loader, so the pod dies with `exec /order-worker: no such file or directory` on a file that
@@ -1099,13 +1108,11 @@ your code. None of your logging configuration has run at that point, so `kubectl
 at all.
 
 Give it a writable `/tmp` and point `PEX_ROOT` at it explicitly, keeping the root filesystem
-read-only. From `deploy/charts/order-platform/templates/pricing.yaml`:
+read-only. The volume half, from `deploy/charts/order-platform/templates/pricing.yaml`:
 
 ```yaml
-          env:
-            # ... the service's own config ...
-            - name: PEX_ROOT
-              value: "/tmp/pex"
+          envFrom:
+            - configMapRef: { name: pricing-config }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -1116,10 +1123,35 @@ read-only. From `deploy/charts/order-platform/templates/pricing.yaml`:
         - { name: tmp, emptyDir: {} }
 ```
 
+The variable half lives in `configmap-pricing.yaml`, the file that Deployment's `checksum/config`
+annotation hashes:
+
+```yaml
+data:
+  PRICING_GRPC_PORT: {{ .Values.pricing.grpcPort | quote }}
+  PRICING_HTTP_PORT: {{ .Values.pricing.httpPort | quote }}
+  PEX_ROOT: "/tmp/pex"
+```
+
+A ConfigMap rather than inline `env`, because that is what makes the restart annotation on the
+Deployment mean something:
+
+```yaml
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-pricing.yaml") $ | sha256sum }}
+```
+
+That is Helm's documented form, and the file it names is this service's ConfigMap and nothing else.
+Hash `.Values` instead and every deploy restarts every pod in the namespace, because CI rewrites the
+image tags in the env overlay on every build. v1 and v2 share the ConfigMap because they share the
+config; what differs between them — `PRICING_VERSION` and the image tag — stays inline on each
+Deployment, where it belongs to the pod template rather than to the config.
+
 Set `PEX_ROOT` rather than relying on `/tmp` being writable by default — the fallback order is an
 implementation detail, and an explicit path is a thing a reader can find. **Every service packaged as
-a PEX needs both halves** — `order-api.yaml`, `pricing.yaml` and `scaffolded.yaml` all carry them, so
-a service that arrives through the paved path gets them without anyone remembering to ask.
+a PEX needs both halves.** `order-api` and `pricing` take `PEX_ROOT` from their ConfigMaps; a
+scaffolded service takes it from an `ENV` in the skeleton's Dockerfile. All three Deployments carry
+the `/tmp` emptyDir, so a service that arrives through the paved path gets them without anyone
+remembering to ask.
 
 **The probes are gRPC, not HTTP.** The kubelet speaks the health checking protocol itself, so the app
 needs no HTTP endpoint for probes and the image needs no `grpc_health_probe` binary:
@@ -1144,6 +1176,13 @@ One more line in that file is not cosmetic: the metrics port is named **`http-me
 `metrics`. Istio reads the protocol off the port name (`protocol[-suffix]`) or off `appProtocol`. A
 port named `metrics` matches no protocol, Istio falls back to plain TCP, and `istioctl analyze`
 reports `IST0118`.
+
+Both Deployments come out of one `range` over `v1` and `v2`, and both are offered a
+PodDisruptionBudget — but only `pricing-v1` gets one. The `op.pdb` helper renders nothing below two
+replicas, because `minAvailable: 1` against a single replica permits zero voluntary evictions and
+blocks a node drain forever. `pricing-v2` runs one replica, so draining its node is allowed to take
+it out; that is the correct answer for a canary at one replica, and the reason the helper takes the
+replica count rather than assuming it.
 
 It is the same class of problem as `nginx-unprivileged` needing writable `/tmp`, `/var/cache/nginx`
 and `/var/run`: both render perfectly under `helm template`, pass `kubectl apply --dry-run=server`,
@@ -1195,7 +1234,25 @@ file(name="index_html", source="index.html")
 file(name="nginx_conf", source="nginx.conf")
 ```
 
-**Every dependency there is listed by hand, and that is the rule for non-Python targets.** Pants
+**`frontend/src/BUILD`**
+
+```python
+typescript_sources()
+
+resource(name="style_css", source="style.css")
+
+typescript_tests(
+    name="tests",
+)
+```
+
+`typescript_sources()` with no arguments takes the directory's `.ts` files, but a test file is a
+different target type: `tally.test.ts` swept into `typescript_sources` is a file Pants owns and never
+runs. `typescript_tests` is what makes `pants test ::` run it, and it is what `pants tailor` asks for:
+`tailor --check` fails on a source file that has no target, or the wrong one. `style.css` is a
+`resource`, not a source: nothing imports it in a way inference can follow.
+
+**Every dependency in `frontend/BUILD` is listed by hand, and that is the rule for non-Python targets.** Pants
 infers dependencies from *imports*, and a build script's inputs are not imports: `tsconfig.json`,
 `vite.config.ts`, `index.html` and `src/style.css` are invisible to inference. Omitting a config file
 fails loudly. Omitting an asset does not fail at all — Vite builds successfully in a sandbox that
@@ -1239,22 +1296,36 @@ The Python step and the Go step are gone. In their place, one step in `.buildkit
 
                     git config --global --add safe.directory "$PWD"
 
-                    pants lint check test ::
+                    pants update-build-files --check lint check test ::
 
                     python3 checks/verify_doc_listings.py .
+
+                    helm lint --strict deploy/charts/order-platform \
+                      -f deploy/env/local/values.yaml
+                    helm template order-platform deploy/charts/order-platform \
+                      -f deploy/env/local/values.yaml -n shop \
+                      | python3 checks/verify_chart.py -
 
                     pants --tag=deployable package ::
 
                     ls -la dist/
 ```
 
-Six things about this are load-bearing:
+Eight things about this are load-bearing:
 
 **The step runs a prebuilt Pants image out of Nexus**, `.buildkite/pants-ci.Dockerfile`, rather than
 installing Pants per build. It carries the checksum-verified `scie-pants` launcher from
 [§17.3](#173-pantstoml), a Go toolchain matching `services/order-worker/go.mod` (Pants *searches* for
-`go`, it does not download one), and `unzip`/`zip`/`xz`, which Pants needs to unpack the tools it does
-download — protoc, ruff, the Go SDK.
+`go`, it does not download one), `unzip`/`zip`/`xz`, which Pants needs to unpack the tools it does
+download — protoc, ruff, the Go SDK — and the two things the non-Pants checks below need: a
+checksum-verified `helm` binary and `pyyaml`, the latter from the Nexus PyPI proxy like everything
+else.
+
+**`update-build-files --check` runs in the same invocation as `lint check test`.** It reformats every
+`BUILD` file in memory and fails when the result differs from what is committed, which is Pants'
+documented CI check for BUILD-file drift: a hand-edited `BUILD` file cannot quietly diverge from the
+formatting the rest of the repo has. One invocation rather than four, because the goals share a
+target-set argument and Pants runs what it can in parallel.
 
 **`--tag=deployable` is how the package set is selected.** `::` is every target in the repo; the tag
 narrows it to the ones that ship an artifact, and tags are Pants' documented mechanism for exactly
@@ -1268,6 +1339,11 @@ service that CI packages without CI knowing it exists.
 **`checks/verify_doc_listings.py` runs here rather than as a Pants test.** It reads the whole checkout;
 a Pants sandbox holds only declared dependencies, so every file listing in `docs/` would read as
 missing inside one.
+
+**The chart is rendered here, and it is the only place the build renders it at all.** `helm lint
+--strict` validates structure and `helm template` produces the manifests; `checks/verify_chart.py`
+([§19.6](#196-two-checks-nothing-else-would-catch)) then reads them for the defects neither command
+can see. Both run against the local env overlay, so the values CI rewrites are the values checked.
 
 **`pants package` runs here, not in the image build.** The Buildah pods below it contain Buildah and
 nothing else — no Python, no Go, no Node, no compiler. They `buildkite-agent artifact download` the
@@ -1370,34 +1446,59 @@ says `proxy_pass http://order-api.shop.svc.cluster.local:80/orders`; the chart s
 `- { name: http, port: 80, targetPort: http }`. Point nginx at 8000 — order-api's *container* port,
 which nothing serves on the ClusterIP — and every order in the dashboard reads `HTTP 502` while a
 direct `curl` at order-api returns 202, sending you to look at the wrong service entirely. The chart
-is valid, the nginx config is valid, both images build, every pod is Ready. So `checks/` at the repo
-root asserts the two agree:
+is valid, the nginx config is valid, both images build, every pod is Ready. `checks/verify_chart.py`
+asserts the two agree.
+
+**Check the rendered chart, never the template.** A template read as text is
+`targetPort: {{ .Values.orderApi.port }}` — a text check either hard-codes the answer it is supposed
+to discover or reimplements Helm's evaluation. `helm template` first, parse the manifests, then read
+the port the cluster actually gets. That is the flow Helm documents for debugging a chart and it is
+the one the check uses:
+
+```bash
+helm template order-platform deploy/charts/order-platform \
+  -f deploy/env/local/values.yaml -n shop | python3 checks/verify_chart.py -
+```
+
+Two more assertions of the same shape ride along in that script, because rendering the chart is the
+expensive part and both need the same manifests: a probe whose `httpGet`/`tcpSocket` names a port the
+container does not declare, and a Service whose `targetPort` names a port no selected pod declares.
+Each half is valid YAML on its own, so both render clean, lint clean, and fail only when the kubelet
+tries to resolve the name.
+
+`verify_chart.py` runs as a plain script rather than through Pants, for the same reason
+`verify_doc_listings.py` does: it reads files a hermetic sandbox would not contain. That has two
+consequences in the repo. It still needs an owning target, or `pants tailor --check` reports the file
+as unowned — hence the glob in **`checks/BUILD`** (comments stripped):
 
 ```python
+python_sources(
+    name="lib",
+    sources=["*.py", "!test_*.py"],
+)
+
 python_tests(
     name="tests",
     sources=["test_*.py"],
-    # Config files from two other directories, read as plain text. Nothing
-    # infers these — there is no import to follow, which is exactly why the two
-    # were free to drift apart in the first place.
     dependencies=[
-        "frontend:nginx_conf",
-        "deploy/charts/order-platform:order-api-template",
+        ":lib",
+        "docs:docs",
+        "//:single-edition",
     ],
 )
 ```
 
-**`deploy/charts/order-platform/BUILD`**, and note where it is *not*:
+And its one third-party import, `yaml`, is installed in the CI image rather than in the Python
+resolve, so mypy has nothing to load. That is a per-module exception in `mypy.ini` with the reason
+stated, not a global `ignore_missing_imports`:
 
-```python
-# Deliberately NOT in templates/. Helm renders every file under templates/ as a
-# manifest, so a BUILD file there fails the whole chart with
-# `YAML parse error on order-platform/templates/BUILD`.
-file(name="order-api-template", source="templates/order-api.yaml")
+```ini
+[mypy-yaml]
+ignore_missing_imports = true
 ```
 
 That is the pattern worth taking away: **when a fact is duplicated across a language boundary, the
-monorepo lets you assert it in a unit test.** It is the same argument as
+monorepo lets you assert it in a check that runs on every build.** It is the same argument as
 [§18.2](#182-generate-and-look-at-what-came-out), applied to config instead of to a `.proto`.
 
 ### 19.7 Commit
@@ -1417,7 +1518,7 @@ pants lint check test ::
 pants package services/order-api:bin services/order-worker:bin services/pricing:bin
 ls -la dist/
 
-git add pants.toml 3rdparty locks protos services frontend checks .buildkite deploy
+git add pants.toml mypy.ini 3rdparty locks protos services frontend checks .buildkite deploy
 git commit -m "build: pants as the monorepo build system, one proto for two languages"
 git push
 ```

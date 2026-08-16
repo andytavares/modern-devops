@@ -12,6 +12,9 @@ metadata:
   labels: {{- include "op.labels" (dict "name" "order-api" "root" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.orderApi.replicas }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: order-api
@@ -22,9 +25,15 @@ spec:
     metadata:
       labels: {{- include "op.labels" (dict "name" "order-api" "root" $) | nindent 8 }}
       annotations:
-        # Roll the pods whenever the rendered config changes. Without this,
-        # `helm upgrade` with only a value change leaves old pods running.
-        checksum/config: {{ toJson .Values | sha256sum }}
+        # Roll the pods whenever this service's rendered config changes. Config
+        # reaches the container through envFrom, so the pod template itself does
+        # not change when the ConfigMap does and nothing would otherwise restart.
+        # Hashing the rendered ConfigMap — not `.Values` — is what scopes the
+        # restart to services whose config actually changed; CI rewrites image
+        # tags in the env overlay on every build, and a hash over the whole
+        # values tree turns each of those into a namespace-wide restart.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-order-api.yaml") . | sha256sum }}
         # Istio's agent reads these three, scrapes the app over loopback inside
         # the pod, and re-publishes the result merged with Envoy's own metrics
         # on port 15020. That merged endpoint is what Prometheus scrapes — see
@@ -43,7 +52,11 @@ spec:
       enableServiceLinks: false
       serviceAccountName: order-api
       imagePullSecrets:
-        - name: {{ .Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" . }}
+      # A shutting-down replica may be holding an in-flight Kafka `send_and_wait`
+      # and an S3 PUT; both have to complete or the request is lost with the pod.
+      # Matches order-worker so the whole platform has one shutdown budget.
+      terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
@@ -53,17 +66,18 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: {{ .Values.orderApi.port }} }
+          envFrom:
+            - configMapRef: { name: order-api-config }
           env:
-            {{- include "op.commonEnv" . | nindent 12 }}
-            - name: S3_BUCKET
-              value: {{ .Values.aws.s3Bucket | quote }}
-            - { name: PEX_ROOT, value: "/tmp/pex" }
+            {{- include "op.awsCredentialEnv" . | nindent 12 }}
+            # Image identity, not configuration: it tracks the tag, so it belongs
+            # in the pod template rather than in the ConfigMap.
             - name: SERVICE_VERSION
               value: {{ .Values.orderApi.image.tag | quote }}
             - name: ORDER_SIGNING_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.orderApi.secretName }}
+                  name: {{ required "orderApi.secretName is required: the Secret the ExternalSecret in §7.6 writes ORDER_SIGNING_KEY into" .Values.orderApi.secretName }}
                   key: ORDER_SIGNING_KEY
           startupProbe:
             # Gives a slow start up to 60s without loosening the liveness probe,
@@ -105,48 +119,5 @@ spec:
     app.kubernetes.io/name: order-api
   ports:
     - { name: http, port: 80, targetPort: http }
-{{- if .Values.orderApi.ingress.enabled }}
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: order-api
-  annotations:
-    # Both annotations exist for one reason: this Ingress terminates outside the
-    # mesh and its backend is inside it, with PeerAuthentication STRICT (§9.4).
-    #
-    # `service-upstream` stops NGINX load-balancing across raw pod IPs and sends
-    # everything to the Service ClusterIP instead. Istio cannot identify a
-    # service from a bare endpoint IP, so without this the sidecar has nothing
-    # to originate mTLS *to*.
-    #
-    # `upstream-vhost` is the half that actually fixes it. NGINX preserves the
-    # browser's `Host:` — `{{ .Values.orderApi.ingress.host }}` — and Envoy routes HTTP by authority, not by
-    # address. That hostname matches no service in the mesh, so the request
-    # falls through to PassthroughCluster and leaves as plaintext, which the
-    # destination sidecar resets. What you see at the edge is:
-    #
-    #   upstream connect error or disconnect/reset before headers.
-    #   reset reason: connection termination
-    #
-    # …which reads like the backend is down. It is not; it is refusing an
-    # unauthenticated connection, exactly as instructed. Rewriting the upstream
-    # Host to the service FQDN lets Envoy match the real cluster and issue a
-    # proper mTLS connection. Confirmed by
-    # `connection_security_policy.mutual_tls` at the destination reporter.
-    nginx.ingress.kubernetes.io/service-upstream: "true"
-    nginx.ingress.kubernetes.io/upstream-vhost: "order-api.{{ .Release.Namespace }}.svc.cluster.local"
-spec:
-  ingressClassName: {{ .Values.orderApi.ingress.className }}
-  rules:
-    - host: {{ .Values.orderApi.ingress.host }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: order-api
-                port: { name: http }
-{{- end }}
+{{- include "op.pdb" (dict "name" "order-api" "root" $ "replicas" .Values.orderApi.replicas "selector" (dict "app.kubernetes.io/name" "order-api")) }}
 {{- end }}
