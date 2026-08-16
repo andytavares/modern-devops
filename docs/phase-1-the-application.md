@@ -1314,6 +1314,32 @@ kubectl -n shop run smoke --rm -it --restart=Never \
 
 > **`refreshInterval` is a rotation budget, not a preference.** ESO re-reads OpenBao on this interval; if the value changed, it rewrites the Secret. But **an already-running pod does not see the change** — env vars are set at container start and mounted secret volumes update lazily. So the real rotation window is `refreshInterval` + however long until the pod restarts. If you need fast rotation, either mount the secret as a volume and re-read it in-process, or add [Reloader](https://github.com/stakater/Reloader) to restart Deployments when their secrets change. Setting `refreshInterval: 1m` and assuming rotation takes a minute is a mistake people make in production.
 
+> [!warning] **This one will get you, and it will not look like a secrets problem.**
+> Writing a new value into OpenBao does nothing to a running cluster until ESO's next
+> poll — up to `refreshInterval` later, an hour here. In between, the `ExternalSecret`
+> reports `SecretSynced` / `Ready=True`, because it *is* synced: to the value it read
+> last time. Restarting the pod does not help either; it rereads the same stale Secret.
+> The symptom is a credential you are certain you just set being rejected, which sends
+> people to check the credential rather than the clock.
+>
+> Force the poll, then restart the consumer:
+>
+> ```bash
+> kubectl -n backstage annotate externalsecret backstage \
+>   force-sync="$(date +%s)" --overwrite
+> kubectl -n backstage rollout restart deploy/backstage
+> ```
+>
+> Any change to the annotation triggers an immediate reconcile; the timestamp is just a
+> convenient way to guarantee the value differs from last time. Confirm it landed before
+> blaming anything else — length is enough, and does not print the secret:
+>
+> ```bash
+> kubectl -n backstage get secret backstage \
+>   -o jsonpath='{.data.GITHUB_TOKEN}' | base64 -d | wc -c
+> ```
+
+
 Commit:
 
 ```bash

@@ -287,3 +287,30 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   is free, what costs money is someone operating it, Strimzi fills the Confluent-for-Kubernetes slot
   for nothing — and it states plainly that broker operations are exactly what a managed service sells,
   so §8 should be read as understanding what MSK does on your behalf. Pages: [[strimzi]], [[floci]].
+
+- **2026-08-16** — **ESO stale-secret trap recorded, after it cost an hour on a token that was
+  already correct.** A fresh fine-grained GitHub PAT was written to OpenBao and Backstage kept
+  answering `401 Unauthorized`. The `ExternalSecret` reported `SecretSynced` / `Ready=True`
+  throughout — truthfully: it *had* synced, to the previous value, 22 minutes before the write.
+  With `refreshInterval: 1h` the cluster Secret still held the literal placeholder
+  `<your-fine-grained-pat>` (23 bytes vs 93 for a real `github_pat_`). Restarting the consumer does
+  not help; it rereads the same stale Secret. Fixed with
+  `kubectl annotate externalsecret <name> force-sync="$(date +%s)" --overwrite`, after which the
+  catalog populated on the first try. The tutorial already said `refreshInterval` is a rotation
+  budget; what it lacked was the escape hatch and the two cheap diagnostics — decoded **length**
+  (never the value), and `bao kv metadata get`'s newest `created_time` against the ExternalSecret's
+  `.status.refreshTime`. This is worth the space because the failure presents as a *credential*
+  problem and every instinct sends you to re-check the token. Pages: [[external-secrets-operator]],
+  [[secrets-management]]; both tutorial editions at the existing `refreshInterval` callout.
+
+- **2026-08-16** — **The catalog was describing a platform that stopped existing three sections
+  ago.** [[backstage]] listed order-api, order-worker and one bucket; `pricing` and `frontend` had
+  never been registered, and `order-api` declared `providesApis: [orders]` against an API entity
+  that was never defined — Backstage does not reject that, it renders a relation to nothing, which
+  is precisely the failure a catalog exists to prevent. Both API entities now carry real
+  definitions, and neither is hand-written: `API/pricing` points at `protos/shop/v1/pricing.proto`
+  — the same file [[pants]] compiles into both the Python server and the Go stubs, so there is no
+  second copy to drift from — and `API/orders` points at a generated `openapi.json` guarded by a
+  drift test. The test was verified by making it fail (bogus path added to the spec), not merely by
+  watching it pass. A hand-maintained API spec is a lie with a timestamp on it. Pages:
+  [[backstage]], [[grpc]], [[order-platform]].
