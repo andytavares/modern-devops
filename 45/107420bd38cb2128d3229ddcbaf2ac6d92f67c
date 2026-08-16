@@ -1,125 +1,126 @@
-portal/packages/backend/package.json
-  s_a10aebdc52be9f::t_7a5feb975dee93 1-59
-deploy/platform/backstage-secrets.yaml
-  s_a10aebdc52be9f::t_afe2c1cb377814 16-53
-  h_16ba00fe96244d 1-15
-wiki/.obsidian/graph.json
-  s_a10aebdc52be9f::t_db6feac1612c13 1-22
-portal/packages/README.md
-  s_a10aebdc52be9f::t_dbcb23dbc5600f 1-9
-portal/examples/template/content/index.js
-  s_a10aebdc52be9f::t_6d23e343cef823 1
-portal/packages/backend/src/index.ts
-  h_16ba00fe96244d 1-72
-deploy/backstage/templates/new-service/template.yaml
-  h_16ba00fe96244d 1-63
-portal/packages/app/src/setupTests.ts
-  s_a10aebdc52be9f::t_018e5423fd2d17 1
-portal/.yarnrc.yml
-  h_16ba00fe96244d 2-5
-  s_a10aebdc52be9f::t_c02678b5aceb61 6-7,13
-  s_a10aebdc52be9f::t_46337de28c74b9 1
-  s_a10aebdc52be9f::t_f47823d9d5ba1f 8-12
-portal/app-config.production.yaml
-  h_16ba00fe96244d 1-41
-portal/packages/app/public/manifest.json
-  s_a10aebdc52be9f::t_48832a949c9d29 1-15
-portal/yarn.lock
-  s_a10aebdc52be9f::t_97c8d9b8b0b8f9 1-31080
-portal/plugins/README.md
-  s_a10aebdc52be9f::t_afeed7e5f62403 1-9
-portal/packages/app/src/index.tsx
-  s_a10aebdc52be9f::t_baf014e2f57074 1-6
-portal/examples/org.yaml
-  s_a10aebdc52be9f::t_4bf684fe9a332f 1-17
+portal/backstage.json
+  s_a10aebdc52be9f::t_19baf94f0fc15e 1-3
+infra/backstage-values.yaml
+  h_16ba00fe96244d 1-7,13-25
+  s_a10aebdc52be9f::t_121b6ca80566a6 8-12
 portal/packages/app/public/robots.txt
   s_a10aebdc52be9f::t_83874c86596f56 1-2
-portal/.dockerignore
-  s_a10aebdc52be9f::t_6b34989fd0473f 1-8
-.buildkite/pipeline.sh
-  h_16ba00fe96244d 170-212
-portal/packages/app/public/safari-pinned-tab.svg
-  s_a10aebdc52be9f::t_9b30d688de2267 1
+portal/packages/app/src/modules/nav/SidebarLogo.tsx
+  s_a10aebdc52be9f::t_f42bac518a4fbb 1-36
+"deploy/backstage/templates/new-bucket/skeleton/deploy/platform/infra/${{ values.bucketName }}.yaml"
+  h_16ba00fe96244d 1-34
 "deploy/backstage/templates/new-service/skeleton/deploy/charts/order-platform/services/${{ values.name }}.yaml"
   h_16ba00fe96244d 1-9
-infra/backstage-values.yaml
-  s_a10aebdc52be9f::t_0d94fa712bb5de 8-12
-  h_16ba00fe96244d 1-7,13-25
+portal/packages/app/package.json
+  s_a10aebdc52be9f::t_5e054f92180a4b 1-73
+portal/packages/app/src/App.tsx
+  s_a10aebdc52be9f::t_c1cf04b852b0b9 1-7
 portal/packages/app/src/modules/nav/LogoIcon.tsx
   s_a10aebdc52be9f::t_fd8abde7050b60 1-28
-portal/.prettierignore
-  s_a10aebdc52be9f::t_1ee0735da91b73 1-4
+portal/packages/app/.eslintignore
+  s_a10aebdc52be9f::t_279c1d31f776b5 1
 deploy/charts/order-platform/values.yaml
   s_a10aebdc52be9f::t_71c2fbad7f0d34 51
   h_16ba00fe96244d 52-54
-deploy/charts/order-platform/templates/scaffolded.yaml
-  s_a10aebdc52be9f::t_6771c165641e0f 1-82
-portal/.yarn/releases/yarn-4.18.0.cjs
-  s_a10aebdc52be9f::t_28e7cbaf28dc9a 1-1000
-portal/playwright.config.ts
-  s_a10aebdc52be9f::t_63c0b06aec73c4 1-66
-portal/packages/app/src/App.tsx
-  s_a10aebdc52be9f::t_c1cf04b852b0b9 1-7
-portal/packages/backend/.eslintrc.js
-  s_a10aebdc52be9f::t_0d151c3bf15665 1
-portal/packages/app/src/modules/nav/Sidebar.tsx
-  s_a10aebdc52be9f::t_7c6c8626df40f4 1-59
-portal/.gitignore
-  s_a10aebdc52be9f::t_67ce678f3ad3ef 1-56
-portal/packages/app/.eslintrc.js
-  s_a10aebdc52be9f::t_3c4cc56b328e2a 1
-portal/packages/app/e2e-tests/app.test.ts
-  s_a10aebdc52be9f::t_9fde4c272fe9d6 1-33
-portal/packages/app/src/modules/nav/index.ts
-  s_a10aebdc52be9f::t_5aa65a8d17ca9f 1-7
-portal/app-config.yaml
-  s_a10aebdc52be9f::t_30dc403bc4d373 1-145
-wiki/.obsidian/workspace.json
-  s_a10aebdc52be9f::t_afa895fb47fd81 14-17,102,115,158,181-182
-deploy/backstage/templates/new-bucket/template.yaml
-  h_16ba00fe96244d 1-48
-portal/packages/backend/README.md
-  s_a10aebdc52be9f::t_5cea3c033179e1 1-59
-catalog-info.yaml
-  h_16ba00fe96244d 1-52
-portal/packages/app/src/modules/nav/LogoFull.tsx
-  s_a10aebdc52be9f::t_802f6213c8416f 1-28
-portal/tsconfig.json
-  s_a10aebdc52be9f::t_f017eb0440e49c 1-17
-portal/packages/app/.eslintignore
-  s_a10aebdc52be9f::t_279c1d31f776b5 1
-portal/.eslintrc.js
-  s_a10aebdc52be9f::t_85a894a650ed41 1-3
-portal/packages/app/src/modules/nav/SidebarLogo.tsx
-  s_a10aebdc52be9f::t_f42bac518a4fbb 1-36
-portal/.eslintignore
-  s_a10aebdc52be9f::t_3afe1b8c2b8ad0 1
-portal/backstage.json
-  s_a10aebdc52be9f::t_19baf94f0fc15e 1-3
-portal/examples/entities.yaml
-  s_a10aebdc52be9f::t_05ad40b7f8de28 1-41
-portal/README.md
-  s_a10aebdc52be9f::t_20ef0236103c03 1-10
-portal/examples/template/content/package.json
-  s_a10aebdc52be9f::t_f9c66e29bea241 1-5
-portal/examples/template/template.yaml
-  s_a10aebdc52be9f::t_7617694890469f 1-88
-portal/packages/app/package.json
-  s_a10aebdc52be9f::t_5e054f92180a4b 1-73
-portal/packages/backend/Dockerfile
-  s_a10aebdc52be9f::t_7f85f14b63c75c 1-70
+portal/examples/template/content/index.js
+  s_a10aebdc52be9f::t_6d23e343cef823 1
 portal/package.json
   s_a10aebdc52be9f::t_c02678b5aceb61 1-66
 portal/packages/app/src/App.test.tsx
   s_a10aebdc52be9f::t_d454cfc50581d3 1-28
+portal/packages/backend/Dockerfile
+  s_a10aebdc52be9f::t_7f85f14b63c75c 1-70
+deploy/charts/order-platform/templates/scaffolded.yaml
+  s_a10aebdc52be9f::t_6771c165641e0f 1-82
+portal/.yarn/releases/yarn-4.18.0.cjs
+  s_a10aebdc52be9f::t_28e7cbaf28dc9a 1-1000
+deploy/backstage/templates/new-service/template.yaml
+  h_16ba00fe96244d 1-63
+portal/packages/backend/.eslintrc.js
+  s_a10aebdc52be9f::t_0d151c3bf15665 1
+portal/packages/backend/package.json
+  s_a10aebdc52be9f::t_7a5feb975dee93 1-59
+portal/packages/app/public/manifest.json
+  s_a10aebdc52be9f::t_48832a949c9d29 1-15
+portal/.prettierignore
+  s_a10aebdc52be9f::t_1ee0735da91b73 1-4
+portal/.eslintrc.js
+  s_a10aebdc52be9f::t_85a894a650ed41 1-3
 portal/packages/app/public/index.html
   s_a10aebdc52be9f::t_f7e1c49d28da30 1-60
-portal/examples/template/content/catalog-info.yaml
-  s_a10aebdc52be9f::t_8bb593c559a738 1-8
-"deploy/backstage/templates/new-bucket/skeleton/deploy/platform/infra/${{ values.bucketName }}.yaml"
-  h_16ba00fe96244d 1-34
+portal/packages/backend/README.md
+  s_a10aebdc52be9f::t_5cea3c033179e1 1-59
+portal/packages/backend/src/index.ts
+  h_16ba00fe96244d 1-72
+portal/playwright.config.ts
+  s_a10aebdc52be9f::t_63c0b06aec73c4 1-66
+portal/examples/template/template.yaml
+  s_a10aebdc52be9f::t_7617694890469f 1-88
+catalog-info.yaml
+  h_16ba00fe96244d 1-52
+portal/packages/app/src/modules/nav/index.ts
+  s_a10aebdc52be9f::t_5aa65a8d17ca9f 1-7
+portal/.gitignore
+  s_a10aebdc52be9f::t_67ce678f3ad3ef 1-56
+portal/yarn.lock
+  s_a10aebdc52be9f::t_97c8d9b8b0b8f9 1-31080
+portal/packages/app/src/setupTests.ts
+  s_a10aebdc52be9f::t_018e5423fd2d17 1
+portal/plugins/README.md
+  s_a10aebdc52be9f::t_afeed7e5f62403 1-9
+wiki/.obsidian/workspace.json
+  s_a10aebdc52be9f::t_afa895fb47fd81 14-17,102,115,158,181-182
+portal/.dockerignore
+  s_a10aebdc52be9f::t_6b34989fd0473f 1-8
+portal/packages/app/e2e-tests/app.test.ts
+  s_a10aebdc52be9f::t_9fde4c272fe9d6 1-33
+portal/packages/app/src/modules/nav/Sidebar.tsx
+  s_a10aebdc52be9f::t_7c6c8626df40f4 1-59
+portal/tsconfig.json
+  s_a10aebdc52be9f::t_f017eb0440e49c 1-17
+portal/examples/template/content/package.json
+  s_a10aebdc52be9f::t_f9c66e29bea241 1-5
+portal/packages/app/public/safari-pinned-tab.svg
+  s_a10aebdc52be9f::t_9b30d688de2267 1
+portal/examples/org.yaml
+  s_a10aebdc52be9f::t_4bf684fe9a332f 1-17
+portal/packages/app/src/modules/nav/LogoFull.tsx
+  s_a10aebdc52be9f::t_802f6213c8416f 1-28
+portal/app-config.yaml
+  s_a10aebdc52be9f::t_30dc403bc4d373 1-145
+portal/packages/app/.eslintrc.js
+  s_a10aebdc52be9f::t_3c4cc56b328e2a 1
+wiki/.obsidian/graph.json
+  s_a10aebdc52be9f::t_db6feac1612c13 1-22
+.buildkite/pipeline.sh
+  h_16ba00fe96244d 170-212
+portal/README.md
+  s_a10aebdc52be9f::t_20ef0236103c03 1-10
+portal/.eslintignore
+  s_a10aebdc52be9f::t_3afe1b8c2b8ad0 1
 portal/catalog-info.yaml
   s_a10aebdc52be9f::t_30f51e21574892 1-13
+deploy/platform/backstage-secrets.yaml
+  h_16ba00fe96244d 1-15
+  s_a10aebdc52be9f::t_afe2c1cb377814 16
+  s_a10aebdc52be9f::t_541ea1120d3666 17-53
+portal/app-config.production.yaml
+  h_16ba00fe96244d 1-41
+portal/packages/app/src/index.tsx
+  s_a10aebdc52be9f::t_baf014e2f57074 1-6
+portal/.yarnrc.yml
+  s_a10aebdc52be9f::t_f47823d9d5ba1f 8-12
+  s_a10aebdc52be9f::t_46337de28c74b9 1
+  s_a10aebdc52be9f::t_c02678b5aceb61 6-7,13
+  h_16ba00fe96244d 2-5
+deploy/backstage/templates/new-bucket/template.yaml
+  h_16ba00fe96244d 1-48
+portal/examples/entities.yaml
+  s_a10aebdc52be9f::t_05ad40b7f8de28 1-41
+portal/packages/README.md
+  s_a10aebdc52be9f::t_dbcb23dbc5600f 1-9
+portal/examples/template/content/catalog-info.yaml
+  s_a10aebdc52be9f::t_8bb593c559a738 1-8
 ---
 {
   "schema_version": "authorship/3.0.0",
