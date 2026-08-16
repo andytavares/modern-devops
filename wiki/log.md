@@ -146,3 +146,17 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   answer and the useful diagnostic: `no basic auth credentials` means a missing Secret, `not found`
   means a missing image. Remaining blocker is genuinely the image: `shop/portal` has never been
   built, since the `build-portal` step is `branches: "main"`. Pages: [[backstage]].
+- **2026-08-16** — Build #22 on `main`: six of seven steps green, `build portal` failed in 24s with
+  `copier: stat: "/packages/backend/dist/skeleton.tar.gz": no such file or directory` (exit 125).
+  §14.8 pointed CI at `portal/packages/backend/Dockerfile`, which `create-app` generates as a **host
+  build** — its own header requires `yarn install --immutable && yarn tsc && yarn build:backend` to
+  have run first. It *copies* the skeleton tarball, it never creates one, and the CI step is a
+  [[buildah]] pod with no Node toolchain. The tutorial's host-build suggestion had the same omission.
+  Added `portal/Dockerfile` — Backstage's documented three-stage
+  [multi-stage build](https://backstage.io/docs/deployment/docker#multi-stage-build) — and pointed
+  the pipeline at it, keeping the host-build file for local iteration. Two adjustments were needed
+  beyond the published version: `COPY plugins plugins` had to go, since `create-app` leaves
+  `plugins/` holding only a README **and** `.dockerignore` excludes `plugins` outright, and the three
+  `FROM node:24-trixie-slim` lines were fully qualified — Buildah resolved `node` only via its
+  shortname alias list, the same luck that `python` had and `golang` did not (see [[buildah]]).
+  Pages: [[backstage]], [[buildah]].

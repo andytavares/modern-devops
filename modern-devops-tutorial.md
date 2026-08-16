@@ -4426,7 +4426,7 @@ cat <<YAML
                     set -euo pipefail
                     buildah bud \\
                       --tls-verify=false \\
-                      --file portal/packages/backend/Dockerfile \\
+                      --file portal/Dockerfile \\
                       --tag "$REGISTRY/shop/portal:$SHA" \\
                       portal
 
@@ -4434,7 +4434,49 @@ cat <<YAML
 YAML
 ```
 
-> **Twenty to forty minutes, in a `vfs`-backed privileged pod, on your laptop.** That is the honest cost of building Backstage in-cluster, and `vfs` (which we chose in §12.5 because overlay-in-overlay needs privileges we'd rather not grant) is most of it. Two mitigations worth knowing: `branches: "main"` keeps it off every branch build, and while you are iterating on the portal you should build it on the host — `docker build -f portal/packages/backend/Dockerfile -t nexus:8082/shop/portal:dev portal && docker push nexus:8082/shop/portal:dev` — and let CI own it only once it's stable. Waiting is not a lesson.
+> **Twenty to forty minutes, in a `vfs`-backed privileged pod, on your laptop.** That is the honest cost of building Backstage in-cluster, and `vfs` (which we chose in §12.5 because overlay-in-overlay needs privileges we'd rather not grant) is most of it. Two mitigations worth knowing: `branches: "main"` keeps it off every branch build, and while you are iterating on the portal you should build it on the host and let CI own it only once it's stable. Waiting is not a lesson. On the host, use the Dockerfile `create-app` generated — but note that it is a **host build** and needs the project compiled first:
+
+```bash
+cd portal
+yarn install --immutable
+yarn tsc
+yarn build:backend          # produces packages/backend/dist/{skeleton,bundle}.tar.gz
+cd ..
+docker build -f portal/packages/backend/Dockerfile -t nexus:8082/shop/portal:dev portal
+docker push nexus:8082/shop/portal:dev
+```
+
+> [!warning] **Two Dockerfiles, and CI must use the right one.**
+> `create-app` generates `portal/packages/backend/Dockerfile`, whose own header says:
+>
+> ```
+> # Before building this image, be sure to have run the following commands in the repo root:
+> #   yarn install --immutable
+> #   yarn tsc
+> #   yarn build:backend
+> ```
+>
+> It is a **host build**: it only *copies* `packages/backend/dist/skeleton.tar.gz`, it does not create
+> it. Our CI step is a Buildah pod with no Node toolchain, so pointing it at that file fails after a
+> couple of minutes of pulling base layers:
+>
+> ```
+> STEP 12/18: COPY --chown=node:node yarn.lock package.json packages/backend/dist/skeleton.tar.gz ./
+> Error: ... copier: stat: "/packages/backend/dist/skeleton.tar.gz": no such file or directory
+> exit status 125
+> ```
+>
+> That is why `portal/Dockerfile` exists: Backstage's documented
+> [multi-stage build](https://backstage.io/docs/deployment/docker#multi-stage-build), which compiles
+> the project *inside* the image and is therefore self-contained. Three stages — a skeleton layer of
+> nothing but `package.json` files so dependency installs cache, a build stage that runs the same
+> `yarn tsc` / `yarn build` you would run by hand, and a production stage carrying only the bundle and
+> production dependencies. It resolves npm through Nexus because `.yarnrc.yml` is copied in before
+> `yarn install`, so the [§14.2](#142-first-an-npm-proxy-in-nexus) proxy applies to the container
+> build too.
+>
+> Keep both. The host build is faster while you iterate; the multi-stage one is what CI can actually
+> run.
 
 Backstage needs a database and a GitHub token. The token comes from OpenBao through ESO, exactly like every other secret ([§7.6](#76-let-kubernetes-pull-from-nexus)):
 

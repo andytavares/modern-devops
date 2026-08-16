@@ -77,6 +77,36 @@ Two paved paths (§14.6–14.7):
 - New catalog files in an existing repo are **not** auto-discovered without a location entry or the
   GitHub discovery provider. This is the one seam the paved path leaves for a human (§14.7).
 
+## Two Dockerfiles, and CI can only use one of them
+
+`create-app` generates `packages/backend/Dockerfile`, which is a **host build**. Its own header says
+so: it expects `yarn install --immutable && yarn tsc && yarn build:backend` to have already produced
+`packages/backend/dist/`. It *copies* `skeleton.tar.gz`; it never creates it.
+
+Our [[buildkite]] step is a [[buildah]] pod with no Node toolchain, so it must use Backstage's
+[multi-stage Dockerfile](https://backstage.io/docs/deployment/docker#multi-stage-build) instead —
+three stages: a skeleton layer of nothing but `package.json` files so dependency installs cache, a
+build stage running the same `yarn tsc` / `yarn build` you would run by hand, and a production stage
+carrying only the bundle and production dependencies. Slower than a host build; self-contained, which
+is the point.
+
+> [!warning] Pointing CI at the host-build Dockerfile — hit 2026-08-16
+> ```
+> STEP 12/18: COPY --chown=node:node yarn.lock package.json packages/backend/dist/skeleton.tar.gz ./
+> Error: ... copier: stat: "/packages/backend/dist/skeleton.tar.gz": no such file or directory
+> exit status 125
+> ```
+> Two minutes of pulling base layers before it fails, and the message names an artefact you have never
+> heard of rather than saying "you skipped the build". Keep both files: the host build is faster while
+> iterating, the multi-stage one is what CI can run.
+
+> [!warning] `COPY plugins plugins` fails on a portal with no internal plugins
+> Backstage's multi-stage Dockerfile carries `# Comment this out if you don't have any internal
+> plugins` above that line — take it literally. `create-app` leaves `plugins/` holding only a
+> `README.md`, **and `.dockerignore` excludes `plugins` outright**, so the glob matches nothing:
+> `no items matching glob "/src/plugins" copied (1 filtered out using /src/.dockerignore)`.
+> The two facts compound: even the README wouldn't have saved it.
+
 > [!warning] The `backstage` namespace needs its own pull secret. Hit 2026-08-16
 > ```
 > Failed to pull image "nexus:8082/shop/portal:dev": pull access denied,
