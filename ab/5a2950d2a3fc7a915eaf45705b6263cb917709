@@ -1,0 +1,25 @@
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_b9a8ed3b6588cf 4901-4922,4984
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_aff7cc134a1bba 340-353
+portal/app-config.production.yaml
+  s_a10aebdc52be9f::t_48c312cfcb9074 42,44,47
+deploy/charts/order-platform/templates/order-api.yaml
+  s_a10aebdc52be9f::t_aff7cc134a1bba 52,79-88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "ab5a2950d2a3fc7a915eaf45705b6263cb917709",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
