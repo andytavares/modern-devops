@@ -1,0 +1,52 @@
+docs/phase-3-delivery.md
+  s_a10aebdc52be9f::t_7dd68a9ff6123d 1-133,151-796
+  s_a10aebdc52be9f::t_99214203587484 134-150
+docs/appendices.md
+  s_a10aebdc52be9f::t_7dd68a9ff6123d 1-205
+deploy/charts/order-platform/values.yaml
+  s_a10aebdc52be9f::t_b43b8ec4f7b81d 45-53
+wiki/log.md
+  s_a10aebdc52be9f::t_9b2f0cef1a883a 180-199
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_3c57b04d7c7bc9 2399-2407,2681-2718
+  s_a10aebdc52be9f::t_11462006e1bac0 9-20
+  s_a10aebdc52be9f::t_ab3a88ffd7960f 2719-2721
+CLAUDE.md
+  s_a10aebdc52be9f::t_11462006e1bac0 11-14
+docs/phase-6-operating.md
+  s_a10aebdc52be9f::t_7dd68a9ff6123d 1-293
+docs/README.md
+  s_a10aebdc52be9f::t_378b8cf1b06ed2 1-77
+docs/phase-0-foundations.md
+  s_a10aebdc52be9f::t_d69ce6751c4fe7 13
+  s_a10aebdc52be9f::t_7dd68a9ff6123d 1-12,14-575
+deploy/charts/order-platform/templates/servicemonitor.yaml
+  s_a10aebdc52be9f::t_bb5f9d9d2c8ab5 1-36
+docs/phase-1-the-application.md
+  s_a10aebdc52be9f::t_7dd68a9ff6123d 1-1864,1944-1978
+  s_a10aebdc52be9f::t_787c428be69ae8 1865-1943
+docs/phase-2-observability.md
+  s_a10aebdc52be9f::t_7dd68a9ff6123d 1-97,100-102,105-109,114,122-129,134,136-138,140,149-150,154-389
+  s_a10aebdc52be9f::t_f555a35933b36c 98-99,103-104,110-113,115-121,130-133,135,139,141-148,151-153
+docs/phase-4-service-mesh.md
+  s_a10aebdc52be9f::t_7dd68a9ff6123d 1-236,239,241,247,307-329
+  s_a10aebdc52be9f::t_99214203587484 237-238,240,242-246,248-306
+docs/phase-5-developer-portal.md
+  s_a10aebdc52be9f::t_7dd68a9ff6123d 1-986
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "e144d1965fa8fc4253435e6f82b0f869f918da36",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
