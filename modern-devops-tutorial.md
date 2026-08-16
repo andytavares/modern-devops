@@ -2673,7 +2673,16 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath='{.data.password}' | base64 -d && echo
 ```
 
-Open <http://argocd.localtest.me>, log in as `admin`. Your browser will warn about the certificate — expected, Argo CD self-signs.
+Open <https://argocd.localtest.me>, log in as `admin`. Your browser will warn about the certificate — expected, Argo CD self-signs.
+
+> **`https`, not `http`, and this one is a trap.** We deploy `argocd-server` in its default TLS mode
+> (no `--insecure`, `server.insecure` unset in `argocd-cmd-params-cm`), and the Ingress above sets
+> `backend-protocol: HTTPS`, so nginx terminates the browser's TLS and re-originates to Argo CD.
+> Argo CD therefore marks its `argocd.token` cookie `Secure`. Over plain `http://` the login page
+> renders fine and the password is accepted — but the browser silently discards a `Secure` cookie,
+> so the next request arrives unauthenticated and you are bounced back to `/login`. **Forever, with
+> no error anywhere**: not in the browser, not in `kubectl logs deploy/argocd-server`. An endless
+> login redirect on `http://` is this and nothing else.
 
 Install the CLI (useful, and required for one step below):
 
