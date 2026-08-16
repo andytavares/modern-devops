@@ -1,0 +1,120 @@
+services/order-worker/BUILD
+  s_a10aebdc52be9f::t_8ef500f0165501 3
+  s_a10aebdc52be9f::t_2505cab2022f52 1-2,4-10
+frontend/package.json
+  s_a10aebdc52be9f::t_fe5e3d6c89aaf9 12-13
+  s_a10aebdc52be9f::t_5fcaf783187a9d 1-11,14-20
+frontend/Dockerfile
+  s_a10aebdc52be9f::t_5b6acb28437ce8 1-4,9-21
+  s_a10aebdc52be9f::t_80be864d7b6145 5-8
+3rdparty/python/requirements.txt
+  s_a10aebdc52be9f::t_05fe07d4ba55e0 26-29
+3rdparty/python/linux.json
+  s_a10aebdc52be9f::t_5303b68633d989 1
+frontend/src/style.css
+  s_a10aebdc52be9f::t_c88f02e4ea63c9 74-82
+  s_a10aebdc52be9f::t_1b5f488fbf8cd7 1-73,83-208
+services/order-worker/Dockerfile
+  s_a10aebdc52be9f::t_9f6a588b1b2584 2-3,9-14,16
+  s_a10aebdc52be9f::t_d37217ed374c09 4-8
+frontend/src/vite-env.d.ts
+  s_a10aebdc52be9f::t_ebfa8a75beec44 1-10
+frontend/src/BUILD
+  s_a10aebdc52be9f::t_51d27636556998 2-3
+  s_a10aebdc52be9f::t_5f2bdb77008564 1
+frontend/src/tally.ts
+  s_a10aebdc52be9f::t_b1e14f029c43cf 1-44
+frontend/.npmrc
+  s_a10aebdc52be9f::t_f86a3d83de2cc8 1
+frontend/nginx.conf
+  s_a10aebdc52be9f::t_de7c953ba545cb 1-22
+frontend/.dockerignore
+  s_a10aebdc52be9f::t_d477e2b5e20a37 1-2
+services/order-api/tests/test_api.py
+  s_a10aebdc52be9f::t_5f27f71492370d 1,9,14-49,80-130
+  s_a10aebdc52be9f::t_572e0d2bb6cd1c 13
+frontend/.gitignore
+  s_a10aebdc52be9f::t_1e00e4efdda43f 1-2
+mypy.ini
+  s_a10aebdc52be9f::t_de48f2195c61cd 1-28
+pants.toml
+  s_a10aebdc52be9f::t_05fe07d4ba55e0 74-81
+3rdparty/python/BUILD
+  s_a10aebdc52be9f::t_6047f65080c27d 5-17
+frontend/index.html
+  s_a10aebdc52be9f::t_6f4f4358a7a52a 1-13
+frontend/src/api.ts
+  s_a10aebdc52be9f::t_f0619a0a08dd27 1-19,26-59
+  s_a10aebdc52be9f::t_3ba6d61ff88d14 20-25
+frontend/src/tally.test.ts
+  s_a10aebdc52be9f::t_ecada2e4e7bf7f 1-8,10-67
+  s_a10aebdc52be9f::t_61d28c31e5b429 9
+services/pricing/tests/test_pricing.py
+  s_a10aebdc52be9f::t_cdd9874e585971 8-10,16-18,26-28,34-36,42-44,51-53
+  s_a10aebdc52be9f::t_572e0d2bb6cd1c 3
+  s_a10aebdc52be9f::t_263df32b77866b 1-2,4-7,11-15,19-25,29-33,37-41,45-50,54-90
+frontend/src/main.ts
+  s_a10aebdc52be9f::t_bbf7d16c39e290 2,13,21-25,38,42-45,99-101,104-111,114-139,148,154,181,238,241
+  s_a10aebdc52be9f::t_4b6c682abba8d2 1,3-12,14-20,26-37,39-41,46-98,102-103,112-113,140-144,147,149-152,155-180,182-237,239-240,242-245
+  s_a10aebdc52be9f::t_dd38ba41ebc7ff 145-146,153
+services/order-api/BUILD
+  s_a10aebdc52be9f::t_4b0191fdecf8d3 22-25
+  s_a10aebdc52be9f::t_572e0d2bb6cd1c 3,14
+  s_a10aebdc52be9f::t_eacc1b469c87f8 20
+  s_a10aebdc52be9f::t_2f17e26249515d 8-11
+  s_a10aebdc52be9f::t_177412f00d9e0b 1-2,4-7,16-19,21,26
+  s_a10aebdc52be9f::t_3345a2ccd981e1 12-13,15
+services/order-api/Dockerfile
+  s_a10aebdc52be9f::t_683ec7536e5475 2-7,9,12,14,16,19
+frontend/BUILD
+  s_a10aebdc52be9f::t_ec4595572cf695 1-7,16
+  s_a10aebdc52be9f::t_bf88bb57996a92 8-13,15,17-21
+  s_a10aebdc52be9f::t_d92de6a97fb2fc 14
+services/pricing/BUILD
+  s_a10aebdc52be9f::t_7775bdf5905825 1-2,4-10,16-17,23-26,28,33
+  s_a10aebdc52be9f::t_572e0d2bb6cd1c 3,21,27
+  s_a10aebdc52be9f::t_4744f1d174f50b 19-20,22
+  s_a10aebdc52be9f::t_2167fae4b804cf 11-15,18
+  s_a10aebdc52be9f::t_5a4524a0f66774 29-32
+frontend/tsconfig.json
+  s_a10aebdc52be9f::t_acb5570b715824 1-19,21-23
+  s_a10aebdc52be9f::t_37ad5c9ea8df8e 20
+frontend/vite.config.ts
+  s_a10aebdc52be9f::t_1034fb419c0ad9 1-7
+frontend/package-lock.json
+  s_a10aebdc52be9f::t_636e9623917d1a 1-1177
+locks/python-default.lock
+  s_a10aebdc52be9f::t_f0519cb1b680f8 23,2047-2064,2480
+services/order-api/order_api/main.py
+  s_a10aebdc52be9f::t_ed1b674091a004 12-13,20-21,39-79,82,97-98,103-105,113,138-140,149-170,178-193,207-209,219-236
+services/order-api/order_api/settings.py
+  s_a10aebdc52be9f::t_3297b7c8f50600 16-22,32
+services/pricing/pricing/settings.py
+  s_a10aebdc52be9f::t_37b1a6217b019b 1-13
+services/pricing/pricing/main.py
+  s_1ebb84202b1fca::t_b7201335295970 1-171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "9bd00864f52b3e6d22646c28e95b62d6c4aba51a",
+  "prompts": {},
+  "sessions": {
+    "s_1ebb84202b1fca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a9d1d666f8eae3cca",
+        "model": "unknown"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    },
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
