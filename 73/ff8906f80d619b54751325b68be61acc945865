@@ -1,0 +1,29 @@
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_458de19d3176c8 259-261,2394-2396,2679-2689
+  s_a10aebdc52be9f::t_568f2460dcb609 4403-4536
+  s_a10aebdc52be9f::t_82b488aece3605 1205
+  s_a10aebdc52be9f::t_d64009e4b704f7 3567,5078,5092,5097
+  s_a10aebdc52be9f::t_12748e743a9596 4401,4686-4722
+  s_a10aebdc52be9f::t_9b3086edc66f5d 4537-4564
+  s_a10aebdc52be9f::t_5ca2179c19ef9c 4402
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_a9970452c08707 112-123
+wiki/log.md
+  s_a10aebdc52be9f::t_c1b13a921cedfc 163-179
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "73ff8906f80d619b54751325b68be61acc945865",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
