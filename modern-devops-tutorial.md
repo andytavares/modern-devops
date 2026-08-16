@@ -255,6 +255,16 @@ dev = [
     "ruff==0.12.8",
 ]
 
+# Declared here, not only as a CI env var, so `uv.lock` records this registry
+# and the lock validates identically on a laptop and in the build pod.
+[[tool.uv.index]]
+url = "http://nexus:8081/repository/pypi-proxy/simple"
+default = true
+
+[tool.uv]
+# Plain HTTP, per §5.8. Without this uv refuses the index outright.
+allow-insecure-host = ["nexus"]
+
 [tool.ruff]
 line-length = 100
 
@@ -265,6 +275,25 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 ```
+
+> **Why the index lives here and not in the CI environment.** It is tempting to leave `pyproject.toml`
+> pointing at PyPI and set `UV_DEFAULT_INDEX` (or its deprecated predecessor `UV_INDEX_URL`) only in
+> the pipeline. That combination cannot work, and the failure is delayed until CI. `uv.lock` records
+> the registry each package came from, and uv refuses a lockfile whose registries aren't in the
+> current index configuration — from uv's own resolver:
+>
+> > *"If the user provided at least one index URL (from the command line, or from a configuration
+> > file), don't use the existing lockfile if it references any registries that are no longer included
+> > in the current configuration."*
+>
+> So a lock generated on your laptop against `pypi.org` can never satisfy a build that points uv at
+> Nexus, and `uv sync --locked` fails with **"The lockfile at `uv.lock` needs to be updated"** — on a
+> lockfile you just committed and which passes locally. Declaring the index in `pyproject.toml` puts
+> it *in the lock*, so both environments agree and CI needs no uv-specific environment at all.
+>
+> Note this pins `nexus:8081` into the project, which is only resolvable in this environment
+> ([§5.7](#57-make-nexus-resolve-from-your-laptop)). That is the honest cost of a hermetic index, and
+> it is the same trade a real internal PyPI mirror makes.
 
 Create the package directories:
 
@@ -1118,9 +1147,30 @@ docker exec nexus cat /nexus-data/admin.password && echo
 Open <http://localhost:8081>, sign in as `admin` with that password. You'll be walked through:
 
 1. **New password** — set something you'll remember. This tutorial assumes `admin123`.
-2. **Enable anonymous access?** — choose **Disable anonymous access**.
+2. **Enable anonymous access?** — choose **Enable anonymous access**.
 
-> **Why disable anonymous.** It forces us to wire real credentials through OpenBao and an `imagePullSecret`, which is what production does. Enabling anonymous pull would cut three steps out of [§7](#7-openbao-and-external-secrets) and cut the most valuable lesson with them.
+> **Anonymous *read on the proxies*, authenticated *everything on the registry*.** This is a narrower
+> setting than it sounds, and the distinction is the whole point. Nexus controls Docker anonymous
+> pulls with a **second, per-repository** switch — *"Allow anonymous docker pull"* on the Docker
+> repository itself, which we leave **unchecked** in [§5.4](#54-create-the-docker-hosted-registry).
+> Sonatype's docs are explicit: *"enabling global anonymous access is necessary, but you also need to
+> enable a repository-level setting on each individual Docker repository for anonymous pulls to
+> function correctly"* ([anonymous access](https://help.sonatype.com/en/anonymous-access.html)).
+> So global anonymous access does **not** give away `docker pull`, and [§7](#7-openbao-and-external-secrets)'s
+> OpenBao → ExternalSecret → `imagePullSecret` chain stays exactly as valuable as it was.
+>
+> Tighten it properly once you're through §5: **⚙ → Security → Roles → `nx-anonymous`** and cut its
+> privileges down to `nx-repository-view-pypi-pypi-proxy-*` and `nx-repository-view-go-go-proxy-*`.
+> Sonatype recommends precisely this — *"modify the default anonymous role (`nx-anonymous`) to
+> restrict access to only necessary content"* ([users](https://help.sonatype.com/en/users.html)).
+> Anonymous can then read the two language proxies and nothing else.
+
+> [!warning] Earlier revisions of this tutorial said **Disable anonymous access** here.
+> That made [§12](#12-buildkite-ci) unrunnable. The build steps fetch from the PyPI and Go proxies
+> with **no credentials** — `PIP_INDEX_URL` and `GOPROXY` are bare URLs — so every dependency
+> resolution failed with `401 Unauthorized`, surfacing as `go: ... 401 Unauthorized` and, for `uv`,
+> as a step that hangs rather than fails. Disabling anonymous access and then not authenticating CI
+> are two instructions that cannot both be followed.
 
 ### 5.4 Create the Docker hosted registry
 
@@ -2854,7 +2904,7 @@ The free tier is sufficient for everything here.
 
 1. Sign up at <https://buildkite.com>, create an organization.
 2. **Agents → Clusters**. A cluster is a pool of agents with its own tokens and queues. Create one named `local`.
-3. Inside `local`, go to **Queues** and confirm a queue named `default` exists. Create a queue named **`kubernetes`** — our agent stack advertises this tag, and steps target it.
+3. Inside `local`, go to **Queues** and confirm a queue named `default` exists. Create a queue named **`kubernetes`** — our agent stack advertises this tag, and steps target it. On the *"Select your agent infrastructure"* step you **must** choose **Self-hosted**, not Hosted.
 4. Go to **Agent tokens → New token**, description `kind-devops`. **Copy the token now** — it is shown once.
 5. **Pipelines → New pipeline**:
    - Name: `order-platform`
@@ -2870,6 +2920,28 @@ The free tier is sufficient for everything here.
    - Create the pipeline. Buildkite will offer to add a GitHub webhook — accept it, authorising the GitHub App when prompted.
 
 > **Why the UI-side pipeline is one step.** The pipeline stored in Buildkite's UI is a bootstrap; the real definition is *generated* by `.buildkite/pipeline.sh` **in your repo** ([§12.5](#125-the-pipeline)). That means pipeline changes are reviewed in PRs alongside the code they build, and a branch can change its own build. Never grow the UI-side pipeline beyond this step.
+
+> [!warning] **Self-hosted vs Hosted is the single most expensive click in this tutorial.**
+> Buildkite's New Queue form defaults to **Hosted**, and a hosted queue runs jobs on Buildkite's own
+> machines — not your kind cluster. Everything still *looks* right: the queue says `Connected`, your
+> `agent-stack-k8s` pod is `Running`, and builds start. But the controller logs
+> `job tags do not match expected tags in configuration, skipping` on a loop, because a hosted agent
+> tags itself `namespace-experiments=docker.builder=local` and your controller only advertises
+> `queue=kubernetes`. Buildkite's hosted agent then runs the job instead, hits the `kubernetes`
+> plugin — which `agent-stack-k8s` *interprets* rather than downloads — tries to `git clone`
+> `buildkite-plugins/kubernetes-buildkite-plugin`, and dies with:
+>
+> ```
+> Can't issue repository access token: The repo you've requested a token for
+> (buildkite-plugins/kubernetes-buildkite-plugin) is in a different org to the
+> repo for this job (<you>/modern-devops).
+> 🚨 Error: failed to checkout plugin kubernetes: exit status 128
+> ```
+>
+> A Git authentication error about a repository you have never heard of is what a wrong queue type
+> looks like. The infrastructure choice **cannot be changed after creation** — the queue's Settings
+> page offers only description, capacity and *Delete Queue* — so getting it wrong means deleting the
+> queue and making a new one. Check it before you click Create.
 
 > **`agents: { queue: kubernetes }` is not optional.** Every job in a cluster is assigned to a queue, and a step with no `queue` tag lands on the cluster's *default* queue. Our agent stack ([§12.3](#123-install-the-agent-stack-in-kubernetes)) advertises `queue=kubernetes` only, so an untagged bootstrap step sits in the `default` queue forever with no agent to run it — a build stuck at "waiting for agent" with no error.
 
@@ -3043,10 +3115,13 @@ cat <<'YAML'
 env:
   # Nexus proxies. Builds never talk to pypi.org or proxy.golang.org directly:
   # that is the supply-chain choke point from §5.1, made real.
+  # pip needs these to install uv itself. uv does NOT get its index from here:
+  # it reads [[tool.uv.index]] in services/order-api/pyproject.toml, so the
+  # registry is recorded in uv.lock and `--locked` validates the same way on a
+  # laptop and in this pod. Setting UV_DEFAULT_INDEX here instead would put the
+  # index in CI only, and the committed lock would never match it.
   PIP_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
   PIP_TRUSTED_HOST: "nexus"
-  UV_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
-  UV_INSECURE_HOST: "nexus"
   GOPROXY: "http://nexus:8081/repository/go-proxy"
   # The public checksum database is unreachable through a private proxy, so
   # verification must be turned off for modules the proxy serves. In production
@@ -3081,17 +3156,31 @@ steps:
       - kubernetes:
           podSpec:
             containers:
-              - image: golang:1.26-alpine
+              # Debian, not alpine: `go test -race` needs cgo, and the alpine
+              # image ships CGO_ENABLED=0 with no C toolchain. Adding gcc and
+              # musl-dev to alpine also works; this is one word instead.
+              - image: golang:1.26
                 command:
                   - |
                     set -euo pipefail
-                    apk add --no-cache git
                     cd services/order-worker
                     go vet ./...
                     go test -race ./...
 
   - wait
 YAML
+
+# `golang:1.26` and not `golang:1.26-alpine` for the TEST step specifically:
+#
+#   golang:1.26-alpine : CGO_ENABLED=0, no gcc
+#   golang:1.26        : CGO_ENABLED=1, gcc 14.2.0, git 2.47.3
+#
+# `go test -race` is implemented with a C runtime, so on alpine it refuses with
+# `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1` — and setting
+# that variable alone doesn't help, because there is no compiler to use. The
+# Dockerfile in §3.2 still builds FROM golang:1.26-alpine, and should: there we
+# *want* CGO_ENABLED=0 for a static binary in a scratch image. Test and build
+# want opposite things from the same toolchain, which is why they differ.
 
 # ── 2. Build and push images ───────────────────────────────────────────────
 # One template, one step per service. When these were two hand-maintained
@@ -4587,6 +4676,11 @@ Two version rules worth internalising:
 | Pods can't resolve `nexus` | Nexus container got a new IP | Re-run [§5.10](#510-teach-pods-about-nexus-coredns) with the current `docker inspect nexus` IP. |
 | `docker push` → `http: server gave HTTP response to HTTPS client` | `insecure-registries` not applied | [§5.8](#58-trust-the-plain-http-registry-from-docker), then **restart Docker**. |
 | `docker login nexus:8082` → 401 with correct password | Docker Bearer Token Realm not active | Nexus → ⚙ → Security → Realms → activate it ([§5.4](#54-create-the-docker-hosted-registry)). |
+| CI: `go: ... 401 Unauthorized` from `nexus:8081`, or `uv sync` hangs | Anonymous access disabled in Nexus | Builds pass no credentials to the proxies. Enable global anonymous access ([§5.3](#53-run-nexus)); Docker pull stays authenticated via the per-repository switch. Check with `curl -o /dev/null -w '%{http_code}' http://nexus:8081/repository/pypi-proxy/simple/` — expect `200`. |
+| CI: `uv sync --locked` → "lockfile needs to be updated", but it passes locally | `uv.lock` records a different registry than the build resolves against | Declare the index in `pyproject.toml` via `[[tool.uv.index]]` and re-run `uv lock` ([§3.1](#31-order-api-python--fastapi)). Setting the index only in CI can never match a committed lock. |
+| CI: `go: -race requires cgo` | Test step on an alpine Go image | `golang:1.26-alpine` is `CGO_ENABLED=0` with no gcc. Use `golang:1.26` for the test step ([§12.5](#125-the-pipeline)). |
+| Build fails cloning `buildkite-plugins/kubernetes-buildkite-plugin` | The Buildkite queue is **Hosted**, not Self-hosted | The job ran on Buildkite's machines, which don't understand the `kubernetes` plugin. Queue type can't be changed after creation — delete it and recreate as Self-hosted ([§12.2](#122-create-the-buildkite-side)). |
+| `agent-stack-k8s` logs `job tags do not match expected tags in configuration` | Same as above | A hosted agent adds `namespace-experiments=docker.builder=local`; your controller advertises only `queue=kubernetes`. |
 | ClusterSecretStore `Invalid` | OpenBao SA lacks TokenReview, or role name mismatch | `kubectl -n external-secrets logs deploy/external-secrets`. Check the `system:auth-delegator` binding and that the role is `eso` bound to SA `external-secrets` in ns `external-secrets`. |
 | ExternalSecret `SecretSyncedError`, `permission denied` | KV v2 path missing the `/data/` segment | The policy must be `path "shop/data/*"`, not `path "shop/*"` ([§7.4](#74-configure-kubernetes-authentication)). |
 | Kafka pods `Pending` | No PVs / insufficient resources | `kubectl -n kafka describe pod <pod>`. On kind the default local-path provisioner needs disk — check Docker's disk allocation. |

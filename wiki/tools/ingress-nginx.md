@@ -5,7 +5,7 @@ role: The cluster edge — every browser-facing URL enters here
 version: controller-v1.13.0 (kind variant manifest)
 docs: https://kubernetes.github.io/ingress-nginx/
 date_added: 2026-08-15
-date_updated: 2026-08-15
+date_updated: 2026-08-16
 status: in-use
 ---
 
@@ -44,6 +44,11 @@ Kept as the edge rather than replaced by an Istio gateway (§9.1) because it alr
 
 - Port mappings are fixed at cluster creation; you cannot move the edge without a rebuild.
 - A 404 from `curl localhost` right after install is correct — nginx is up with no matching Ingress.
+- **It is a `Deployment`, not a `DaemonSet`.** The kind provider manifest ships one replica pinned by
+  `nodeSelector` with `hostPort` 80/443. `kubectl rollout restart daemonset/ingress-nginx-controller`
+  fails with `NotFound` — which matters most in §13.2, where a missed restart means nginx never gets
+  its [[istio]] sidecar and STRICT mTLS turns every page load into a connection reset. The tutorial
+  said `daemonset/` in two places until 2026-08-15.
 
 ## Official docs
 

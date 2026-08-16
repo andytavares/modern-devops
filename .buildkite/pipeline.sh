@@ -43,10 +43,13 @@ cat <<'YAML'
 env:
   # Nexus proxies. Builds never talk to pypi.org or proxy.golang.org directly:
   # that is the supply-chain choke point from §5.1, made real.
+  # pip needs these to install uv itself. uv does NOT get its index from here:
+  # it reads [[tool.uv.index]] in services/order-api/pyproject.toml, so the
+  # registry is recorded in uv.lock and `--locked` validates the same way on a
+  # laptop and in this pod. Setting UV_DEFAULT_INDEX here instead would put the
+  # index in CI only, and the committed lock would never match it.
   PIP_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
   PIP_TRUSTED_HOST: "nexus"
-  UV_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
-  UV_INSECURE_HOST: "nexus"
   GOPROXY: "http://nexus:8081/repository/go-proxy"
   # The public checksum database is unreachable through a private proxy, so
   # verification must be turned off for modules the proxy serves. In production
@@ -81,11 +84,13 @@ steps:
       - kubernetes:
           podSpec:
             containers:
-              - image: golang:1.26-alpine
+              # Debian, not alpine: `go test -race` needs cgo, and the alpine
+              # image ships CGO_ENABLED=0 with no C toolchain. Adding gcc and
+              # musl-dev to alpine also works; this is one word instead.
+              - image: golang:1.26
                 command:
                   - |
                     set -euo pipefail
-                    apk add --no-cache git
                     cd services/order-worker
                     go vet ./...
                     go test -race ./...
