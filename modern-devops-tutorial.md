@@ -2357,6 +2357,62 @@ kubectl -n floci run probe --rm -it --restart=Never --image=curlimages/curl:8.11
 
 The first command runs in `default`, which has no injection, so its traffic arrives as plaintext and Envoy drops it. The second runs in `floci`, gets a sidecar, and speaks mTLS without a single line of application code knowing about it. **That difference is the entire value proposition** — identity is a property of the platform, not of your services.
 
+#### The one thing STRICT breaks that nobody warns you about
+
+You just enrolled `ingress-nginx` in the mesh and turned on STRICT. Both were correct.
+Together, they break every Ingress you have, and the error message points at the wrong thing:
+
+```
+upstream connect error or disconnect/reset before headers.
+reset reason: connection termination
+```
+
+That reads like the backend is down. It is not. Every pod is `2/2 Running` and answers
+fine from inside the cluster. What is actually happening is two separate mismatches, and
+you need both fixes:
+
+**1. NGINX talks to pod IPs, not Services.** By default the controller load-balances
+across raw endpoint addresses — `10.244.1.222:8000`, not the ClusterIP. Istio identifies
+destinations by *service*, and a bare pod IP does not name one, so the sidecar has nothing
+to originate mTLS to and falls back to plaintext.
+
+**2. NGINX preserves the browser's `Host:` header.** This is the half people miss. Envoy
+routes HTTP by authority, not by address — so even after you fix (1) and the connection is
+addressed to the ClusterIP, the header still says `app.localtest.me`. That hostname matches
+no service in the mesh. Envoy hands it to `PassthroughCluster`, which means "I do not know
+what this is, send it as-is" — plaintext, into a port that was just told to accept nothing
+but mTLS. The destination sidecar resets the connection, exactly as instructed.
+
+Two annotations, both required:
+
+```yaml
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/service-upstream: "true"
+    nginx.ingress.kubernetes.io/upstream-vhost: "order-api.shop.svc.cluster.local"
+```
+
+Prove it worked, and do not accept a `200` as proof — a `200` only tells you bytes moved.
+Ask the destination sidecar what security policy it applied:
+
+```bash
+kubectl -n shop exec deploy/order-api -c istio-proxy -- \
+  pilot-agent request GET 'stats?filter=istio_requests_total' \
+  | grep reporter.destination | grep -o 'connection_security_policy\.[a-z_]*'
+# connection_security_policy.mutual_tls
+```
+
+`mutual_tls` — with `source_principal` reading
+`spiffe://cluster.local/ns/ingress-nginx/sa/ingress-nginx` — is the evidence. Anything
+reporting `none` or `unknown` means you have a working website and no mTLS at the edge,
+which is the outcome most people ship without noticing.
+
+> [!warning] Why this is worth a whole section: the failure is silent until it isn't.
+> Nothing warns you at apply time. `kubectl get pods` is green, `helm lint` passes, the
+> Ingress reports an address, and Argo says `Synced`/`Healthy`. The platform is telling
+> you it is fine, and the only component that disagrees is a browser.
+
+
 ### 9.5 Authorization: deny by default, then allow the paths that exist
 
 mTLS answers *who is calling*. It does not answer *whether they should be*. Any meshed workload can still call Floci with a valid certificate.

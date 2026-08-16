@@ -74,6 +74,15 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ $svc.name }}
+  annotations:
+    # Same pair as order-api and frontend, and for the same reason: the edge is
+    # outside the mesh, the backend is inside it under STRICT mTLS. Without
+    # these, every scaffolded service comes up healthy and answers the browser
+    # with "upstream connect error ... connection termination" — which is the
+    # worst possible first experience of a paved path (§14.6), because the
+    # service is fine and the template is what's broken.
+    nginx.ingress.kubernetes.io/service-upstream: "true"
+    nginx.ingress.kubernetes.io/upstream-vhost: "{{ $svc.name }}.{{ $.Release.Namespace }}.svc.cluster.local"
 spec:
   ingressClassName: nginx
   rules:
