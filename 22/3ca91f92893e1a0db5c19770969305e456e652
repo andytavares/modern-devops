@@ -1,0 +1,31 @@
+wiki/tools/istio.md
+  s_a10aebdc52be9f::t_fb402282a7744f 89-100
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_ef1310811837ae 2360
+  s_a10aebdc52be9f::t_29d853f0394cfb 2361-2415
+wiki/tools/ingress-nginx.md
+  s_a10aebdc52be9f::t_b8d3cc9cd172ea 53-84
+wiki/log.md
+  s_a10aebdc52be9f::t_da276de5d4d206 317-346
+docs/phase-4-service-mesh.md
+  s_a10aebdc52be9f::t_ef1310811837ae 179
+  s_a10aebdc52be9f::t_29d853f0394cfb 180-234
+wiki/index.md
+  s_a10aebdc52be9f::t_9584a54f2dd206 29-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "223ca91f92893e1a0db5c19770969305e456e652",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
