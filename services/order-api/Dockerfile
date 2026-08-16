@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM python:3.13-slim AS builder
+FROM docker.io/library/python:3.13-slim AS builder
 
 # uv resolves and installs an order of magnitude faster than pip, and writes a
 # lockfile we can commit for reproducible builds.
@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
 
-FROM python:3.13-slim AS runtime
+FROM docker.io/library/python:3.13-slim AS runtime
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
 WORKDIR /app
 COPY --from=builder --chown=10001:10001 /app /app

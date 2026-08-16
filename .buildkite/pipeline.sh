@@ -7,7 +7,18 @@
 set -eu
 
 REGISTRY="nexus:8082"
+# A build triggered by hand in the UI sets BUILDKITE_COMMIT to the literal
+# string "HEAD" rather than a SHA, which would tag images `:HEAD` — a mutable
+# tag that means a different image on every build, and the exact thing §10.3
+# says a tag must never be. Resolve it to a real SHA before it reaches a tag.
+if [ "$BUILDKITE_COMMIT" = "HEAD" ]; then
+  BUILDKITE_COMMIT="$(git rev-parse HEAD)"
+fi
 SHA="$(echo "$BUILDKITE_COMMIT" | cut -c1-12)"
+
+case "$SHA" in
+  *[!0-9a-f]*|"") echo "refusing to build: BUILDKITE_COMMIT is not a SHA ($BUILDKITE_COMMIT)" >&2; exit 1 ;;
+esac
 
 # Services are discovered, not listed. A directory under services/ with a
 # Dockerfile in it is a service, and that is the entire contract. This is what

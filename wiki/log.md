@@ -73,3 +73,16 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   `portNumber: 15020` — 15020 is unnamed so `port:` cannot address it, and `targetPort` is deprecated
   by the CRD in favour of `portNumber`. Verified with `kubectl apply --dry-run=server`. Pages:
   [[prometheus]], [[istio]], [[gitops]], [[open-questions]].
+- **2026-08-16** — Build #8 hung for 20+ minutes on `build order-worker`, and two earlier builds with
+  it, exhausting the Buildkite concurrency limit. Cause: [[buildah]] refuses to guess a registry for an
+  unqualified image name. `quay.io/buildah/stable` ships three `unqualified-search-registries` and
+  `short-name-mode = "enforcing"`, so `FROM golang:1.26-alpine` produced an interactive
+  *"Please select an image"* prompt; the build pod has a TTY, so it waited forever. Without a TTY the
+  same command exits 125 in a second, which is why it never reproduced locally. `python:3.13-slim` had
+  been resolving silently only because Buildah's bundled `000-shortnames.conf` aliases `python` and
+  not `golang` — luck, not design. All `FROM` lines are now fully qualified.
+  Found alongside it: a manually-triggered build sets `BUILDKITE_COMMIT` to the literal string `HEAD`,
+  so the pipeline had pushed `shop/order-api:HEAD` — a mutable tag, precisely what
+  [[immutable-image-tags]] forbids. `pipeline.sh` now resolves it with `git rev-parse` and refuses to
+  build on any non-hex value. Verified all three cases (`HEAD`, a real SHA, garbage → exit 1).
+  Pages: [[buildah]], [[immutable-image-tags]].

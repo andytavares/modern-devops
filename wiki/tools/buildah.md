@@ -5,7 +5,7 @@ role: Builds and pushes OCI images inside CI pods
 version: quay.io/buildah/stable:v1.40.1
 docs: https://buildah.io/
 date_added: 2026-08-15
-date_updated: 2026-08-15
+date_updated: 2026-08-16
 status: in-use
 ---
 
@@ -43,6 +43,42 @@ plain `config.json`.
   why the Backstage image build takes 20–40 minutes (§14.8).
 - **`BUILDAH_FORMAT=docker`** emits Docker-format manifests, which older registries prefer.
 - **`REGISTRY_AUTH_FILE`** points at the mounted auth JSON — no `docker login` needed.
+
+## Every `FROM` must be fully qualified
+
+Docker silently assumes Docker Hub for an unqualified image name. **Buildah does not.**
+`quay.io/buildah/stable` ships:
+
+```
+unqualified-search-registries = ["registry.fedoraproject.org", "registry.access.redhat.com", "docker.io"]
+short-name-mode = "enforcing"
+```
+
+so `golang:1.26-alpine` is genuinely ambiguous and Buildah asks which registry you meant.
+
+> [!warning] It hangs in CI and fails instantly on a laptop — hit 2026-08-16
+> ```
+> [1/2] STEP 1/7: FROM golang:1.26-alpine AS builder
+> ? Please select an image:
+>   ▸ registry.fedoraproject.org/golang:1.26-alpine
+>     registry.access.redhat.com/golang:1.26-alpine
+>     docker.io/library/golang:1.26-alpine
+> ```
+>
+> The [[buildkite]] build pod has a TTY, so Buildah waits for an answer that never comes. Three builds
+> sat for 20–29 minutes and exhausted the Buildkite concurrency limit. **Without** a TTY the same
+> command fails in a second — `Error: short-name resolution enforced but cannot prompt without a TTY`
+> (verified: exit 125 short-name, exit 0 fully qualified) — so it does not reproduce outside CI.
+>
+> **The trap is that it half-works.** `python:3.13-slim` resolved silently the whole time, because
+> Buildah's bundled `/etc/containers/registries.conf.d/000-shortnames.conf` happens to alias
+> `"python" = "docker.io/library/python"`. There is no alias for `golang`. That list is a convenience,
+> not a contract — do not let one image's luck convince you the pattern is safe.
+
+There is a supply-chain argument beyond the mechanics: an unqualified name is a name whose **meaning
+depends on the machine resolving it**, which is precisely what [[supply-chain-choke-point]] exists to
+eliminate. Pinning the registry is the same discipline as pinning the tag — see
+[[immutable-image-tags]].
 
 ## Why this, not the alternative
 

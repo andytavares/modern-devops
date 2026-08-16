@@ -532,7 +532,7 @@ def test_routes_are_registered():
 
 ```dockerfile
 # syntax=docker/dockerfile:1.7
-FROM python:3.13-slim AS builder
+FROM docker.io/library/python:3.13-slim AS builder
 
 # uv resolves and installs an order of magnitude faster than pip, and writes a
 # lockfile we can commit for reproducible builds.
@@ -553,7 +553,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
 
-FROM python:3.13-slim AS runtime
+FROM docker.io/library/python:3.13-slim AS runtime
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
 WORKDIR /app
 COPY --from=builder --chown=10001:10001 /app /app
@@ -906,7 +906,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 
 ```dockerfile
 # syntax=docker/dockerfile:1.7
-FROM golang:1.26-alpine AS builder
+FROM docker.io/library/golang:1.26-alpine AS builder
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -931,6 +931,40 @@ USER 65532:65532
 EXPOSE 9090
 ENTRYPOINT ["/order-worker"]
 ```
+
+> [!warning] **Fully qualify every `FROM`, or CI hangs forever with no error.**
+> `docker.io/library/golang:1.26-alpine`, not `golang:1.26-alpine`. Docker silently assumes Docker
+> Hub for an unqualified name; **Buildah does not**, and [§12.5](#125-the-pipeline) builds with
+> Buildah. `quay.io/buildah/stable` ships:
+>
+> ```
+> unqualified-search-registries = ["registry.fedoraproject.org", "registry.access.redhat.com", "docker.io"]
+> short-name-mode = "enforcing"
+> ```
+>
+> so a short name is genuinely ambiguous and Buildah asks which registry you meant:
+>
+> ```
+> [1/2] STEP 1/7: FROM golang:1.26-alpine AS builder
+> ? Please select an image:
+>   ▸ registry.fedoraproject.org/golang:1.26-alpine
+>     registry.access.redhat.com/golang:1.26-alpine
+>     docker.io/library/golang:1.26-alpine
+> ```
+>
+> The build pod has a TTY, so Buildah waits for an answer that will never come — the step runs until
+> the pipeline times out, and stuck jobs pile up against your Buildkite concurrency limit. Run the same
+> thing on your laptop without a TTY and it fails in one second with
+> `short-name resolution enforced but cannot prompt without a TTY`, which is why this is hard to
+> reproduce outside CI.
+>
+> **Do not rely on it working by accident.** `python:3.13-slim` resolves silently only because
+> Buildah's bundled `000-shortnames.conf` happens to alias `"python" = "docker.io/library/python"`.
+> There is no such alias for `golang`. That list is a convenience, not a contract.
+>
+> There is a supply-chain argument too, and it is the same one as [§5.1](#51-what-nexus-is-actually-for):
+> an unqualified name is a name whose *meaning depends on the machine resolving it*. Pinning the
+> registry is the same discipline as pinning the tag.
 
 > **Tradeoff — distroless vs alpine vs scratch.** Distroless static gives you a non-root user, CA certificates and timezone data, and nothing else — no shell, no package manager, so `kubectl exec` into it is impossible. That's the point: it's a ~2 MB attack surface. The cost is real, though — when something breaks in production you cannot shell in, and you must debug via `kubectl debug --image=busybox` ephemeral containers instead. Alpine keeps a shell at the price of a package manager and musl libc quirks. For a compiled static Go binary, distroless is the right default.
 
@@ -3130,7 +3164,18 @@ A Buildkite pipeline does not have to be a file. `buildkite-agent pipeline uploa
 set -eu
 
 REGISTRY="nexus:8082"
+# A build triggered by hand in the UI sets BUILDKITE_COMMIT to the literal
+# string "HEAD" rather than a SHA, which would tag images `:HEAD` — a mutable
+# tag that means a different image on every build, and the exact thing §10.3
+# says a tag must never be. Resolve it to a real SHA before it reaches a tag.
+if [ "$BUILDKITE_COMMIT" = "HEAD" ]; then
+  BUILDKITE_COMMIT="$(git rev-parse HEAD)"
+fi
 SHA="$(echo "$BUILDKITE_COMMIT" | cut -c1-12)"
+
+case "$SHA" in
+  *[!0-9a-f]*|"") echo "refusing to build: BUILDKITE_COMMIT is not a SHA ($BUILDKITE_COMMIT)" >&2; exit 1 ;;
+esac
 
 # Services are discovered, not listed. A directory under services/ with a
 # Dockerfile in it is a service, and that is the entire contract. This is what
