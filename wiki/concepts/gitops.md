@@ -3,7 +3,7 @@ type: concept
 tags: [delivery, operations]
 docs: https://opengitops.dev/
 date_added: 2026-08-15
-date_updated: 2026-08-15
+date_updated: 2026-08-16
 ---
 
 # GitOps
@@ -39,6 +39,10 @@ project ([[argo-cd]], §11.1) CI has no kubeconfig, no cluster token, and no `he
   that needs an explicit guard (§12.5). Split repos don't have this problem — the strongest practical
   argument for splitting.
 - **Polling is a fallback.** The real fix for latency is a webhook, not a shorter interval.
+- **Once a resource is under Argo CD, every field of it is** — including fields you set imperatively.
+  A `kubectl label namespace shop istio-injection=enabled` survives right up until the next teardown,
+  then silently doesn't come back with the recreated Namespace. Anything that must be true of a
+  managed object belongs in the manifest. See [[istio]] for what that particular loss looks like.
 
 ## Official docs
 

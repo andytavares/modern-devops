@@ -54,11 +54,35 @@ scraping [[istio]]'s merged endpoint — see the gotcha below. Alert rules live 
 > the name to the wrong port. The tutorial has it right at §10.1: *"`http-envoy-prom` is the port name
 > Istio gives 15090"*. Corrected here in favour of the tutorial **and** the live cluster, which agree.
 >
-> **The open consequence:** the chart's `PodMonitor` selects `port: http-envoy-prom`, which resolves to
-> **15090** — Envoy only. If that is right, §13.3's check that `orders_received_total` is non-zero
-> cannot pass, because the application's own metrics live on 15020. Not yet confirmed either way; see
-> [[open-questions]]. **Do not change the chart on the strength of this note alone** — it needs a
-> meshed `order-api` pod and a real scrape to settle.
+> **The consequence, settled 2026-08-16:** the chart's `PodMonitor` selected `port: http-envoy-prom`
+> — 15090, Envoy only — so `orders_received_total` would never have appeared and §13.3's first check
+> could not pass. `istio_requests_total` *is* on 15090, so [[kiali]] would have looked healthy the
+> whole time: a silent half-failure. **Fixed to `portNumber: 15020`.**
+
+## Scrape the sidecar on 15020, addressed by number
+
+| Port | Named in pod spec | Serves |
+|---|---|---|
+| 15090 | `http-envoy-prom` | `envoy_*` and `istio_requests_total` — **Envoy only** |
+| 15020 | *(unnamed)* | the above **plus** `istio_agent_*` and the **merged application metrics** |
+
+Istio's docs settle it: *"forwards requests to the sidecar telemetry port **15020 for merged metrics**
+or **15090 for Envoy-only metrics**"* ([secure metrics](https://istio.io/latest/docs/tasks/observability/metrics/secure-metrics)),
+and the `enablePrometheusMerge` mesh setting is what makes the agent merge app metrics onto 15020 in
+the first place.
+
+Because 15020 has **no name** in the pod spec, a `PodMonitor` cannot reach it with `port:`. Use
+`portNumber: 15020` — `targetPort` exists but the CRD marks it *"Deprecated: use 'port' or
+'portNumber' instead"*.
+
+```yaml
+podMetricsEndpoints:
+  - portNumber: 15020
+    path: /stats/prometheus
+```
+
+Verified against a live sidecar (counts of metric lines) and accepted by
+`kubectl apply --dry-run=server` against the installed CRD.
 >
 > Trap: a pod with **no sidecar** has no `http-envoy-prom` port, so the PodMonitor silently matches
 > nothing and that workload vanishes from Prometheus. Alert on `absent(...)`.

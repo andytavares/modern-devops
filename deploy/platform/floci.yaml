@@ -2,6 +2,12 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: floci
+  labels:
+    # Mesh enrolment belongs in git, not in a `kubectl label` you run once.
+    # Argo CD recreates this Namespace on any teardown, and an imperative
+    # label does not come back with it: pods return as 1/1 with no sidecar,
+    # STRICT mTLS rejects them and the PodMonitor matches nothing.
+    istio-injection: enabled
 ---
 apiVersion: apps/v1
 kind: Deployment

@@ -1412,6 +1412,12 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: floci
+  labels:
+    # Mesh enrolment belongs in git, not in a `kubectl label` you run once.
+    # Argo CD recreates this Namespace on any teardown, and an imperative
+    # label does not come back with it: pods return as 1/1 with no sidecar,
+    # STRICT mTLS rejects them and the PodMonitor matches nothing.
+    istio-injection: enabled
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1735,6 +1741,12 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: shop
+  labels:
+    # Mesh enrolment belongs in git, not in a `kubectl label` you run once.
+    # Argo CD recreates this Namespace on any teardown, and an imperative
+    # label does not come back with it: pods return as 1/1 with no sidecar,
+    # STRICT mTLS rejects them and the PodMonitor matches nothing.
+    istio-injection: enabled
 ---
 apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
@@ -2089,13 +2101,28 @@ istioctl version
 
 Injection is per-namespace, and the interesting decisions are the exclusions.
 
+`shop` and `floci` are declared in *our* manifests ([§6.2](#62-deploy-floci-into-the-cluster), [§7.5](#75-install-external-secrets-operator)),
+so their labels belong in git and are already there. Only `ingress-nginx` — whose namespace comes from
+an upstream manifest we don't own — needs the imperative form:
+
 ```bash
-kubectl label namespace shop          istio-injection=enabled --overwrite
-kubectl label namespace floci         istio-injection=enabled --overwrite
 kubectl label namespace ingress-nginx istio-injection=enabled --overwrite
 
 kubectl get namespace -L istio-injection
 ```
+
+> [!warning] **A `kubectl label` on a namespace Argo CD manages does not survive.**
+> If you enrol `shop` and `floci` imperatively instead, it works — until the next teardown. Argo CD
+> recreates those namespaces from the manifests, which is exactly what `CreateNamespace=true` and the
+> `Namespace` objects in `deploy/platform/` are for, and the label does not come back with them.
+> Everything then starts *looking* fine and behaving wrongly: pods come up `1/1` instead of `2/2`, so
+> they have no sidecar, so STRICT mTLS refuses their traffic, so [[kiali]]'s graph is empty and the
+> `PodMonitor` — which addresses the sidecar's telemetry port — matches nothing at all. No error is
+> printed anywhere in that chain.
+>
+> This is the general GitOps rule the hard way: **once a resource is under Argo CD, every field of it
+> is, including the ones you set by hand.** `ingress-nginx` is the exception here only because nothing
+> in `deploy/` declares that namespace.
 
 | Namespace | Enrolled | Why |
 |---|---|---|
@@ -2613,7 +2640,7 @@ spec:
     # istio-proxy's merged endpoint: our application metrics (scraped over
     # loopback inside the pod, per the prometheus.io/* annotations above) plus
     # Envoy's own. One scrape, both halves, and it survives STRICT mTLS.
-    - port: http-envoy-prom
+    - portNumber: 15020
       path: /stats/prometheus
       interval: {{ .Values.podMonitor.interval }}
 {{- end }}

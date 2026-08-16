@@ -57,3 +57,19 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   http-envoy-prom`, i.e. 15090, which may mean application metrics are never scraped at all. Recorded
   in [[open-questions]] rather than acted on: settling it needs a meshed `order-api` pod and a real
   scrape, neither of which exists yet. Pages: [[prometheus]], [[open-questions]].
+- **2026-08-16** — Traffic generated against `shop.localtest.me` produced empty graphs. Three causes,
+  none of them the dashboards. (a) All four pods were `ImagePullBackOff` on
+  `nexus:8082/shop/order-api:dev` — the registry holds real SHA tags but `env/local/values.yaml` still
+  says `dev`, because the deploy step is `branches: "main"` and no build has completed on main yet.
+  Not a defect; the tag arrives with the first green build. (b) The `shop` namespace had lost
+  `istio-injection=enabled`: §9.3 applied it with `kubectl label`, but [[argo-cd]] recreates the
+  Namespace from `deploy/platform/` on any teardown and an imperative label does not come back.
+  Moved into the manifests for `shop` and `floci`; only `ingress-nginx` stays imperative, since
+  nothing in `deploy/` declares it. (c) Settled the open PodMonitor question — **it was wrong**. The
+  chart scraped `port: http-envoy-prom` = 15090 = Envoy-only, so `istio_requests_total` (and therefore
+  [[kiali]]) worked while the application's own `orders_received_total` never appeared: a silent
+  half-failure that §13.3's check would have caught with no explanation. Istio's docs are explicit
+  that 15020 carries merged metrics and 15090 Envoy-only; a live sidecar agrees. Fixed to
+  `portNumber: 15020` — 15020 is unnamed so `port:` cannot address it, and `targetPort` is deprecated
+  by the CRD in favour of `portNumber`. Verified with `kubectl apply --dry-run=server`. Pages:
+  [[prometheus]], [[istio]], [[gitops]], [[open-questions]].
