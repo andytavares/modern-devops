@@ -97,3 +97,16 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   applying server-side while diffing client-side is what creates the permanent false positive.
   Verified live — `Synced` after a hard refresh. General rule recorded: an `OutOfSync` resource with
   an empty diff is a diff-strategy problem, not drift. Pages: [[argo-cd]].
+- **2026-08-16** — `yarn --cwd packages/backend add @backstage/plugin-scaffolder-backend-module-github`
+  failed with `Unrecognized or legacy configuration settings found: npmMinimalAgeGate`. Cause: §14.3
+  ran `yarn set version 4.4.1` immediately after `create-app@latest`, downgrading Yarn below the
+  scaffold's own `.yarnrc.yml`. `npmMinimalAgeGate` (and `npmPreapprovedPackages`) arrived in **Yarn
+  4.12**, so a 4.4.1 binary cannot parse the config `create-app` had just written — and the parse
+  error blocks every Yarn command, including `yarn set version` itself. Fixed by removing the
+  backwards pin from the tutorial: `packageManager` in `package.json` is already the reproducibility
+  guarantee and Corepack honours it. Local checkout moved 4.4.1 → 4.18.0 via `yarn set version
+  stable`; `yarn config get npmMinimalAgeGate` now returns 4320 (3d).
+  Not a defect, but recorded because it looked like one: the next failure was
+  `404 (Repository not found)` from `nexus:8081/repository/npm-proxy/` — §14.2 creates that proxy and
+  had simply not been run. Nexus returns 404 for a missing *repository* and 401 for a missing
+  credential; reading which one you got saves a wrong turn. Pages: [[backstage]].

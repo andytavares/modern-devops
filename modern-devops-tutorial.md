@@ -3878,7 +3878,7 @@ curl -s -u admin:admin123 http://localhost:8081/service/rest/v1/repositories | j
 
 ### 14.3 Scaffold the portal
 
-Backstage needs an Active LTS Node and a pinned Yarn:
+Backstage needs an Active LTS Node. Let `create-app` choose the Yarn version — see the warning below:
 
 ```bash
 brew install node@22
@@ -3886,7 +3886,29 @@ corepack enable
 
 npx @backstage/create-app@latest --path portal
 cd portal
-yarn set version 4.4.1
+```
+
+> [!warning] **Do not `yarn set version` backwards here.**
+> Earlier revisions of this tutorial ran `yarn set version 4.4.1` at this point. That downgrades Yarn
+> below what `create-app@latest` generates, and the scaffold stops being able to read its own config:
+>
+> ```
+> Usage Error: Unrecognized or legacy configuration settings found: npmMinimalAgeGate
+> ```
+>
+> `create-app` writes supply-chain settings into `.yarnrc.yml` — `npmMinimalAgeGate` (refuse packages
+> published less than N ago, Yarn **4.12+**) and `npmPreapprovedPackages` (exempt `@backstage/*` from
+> it). Pinning 4.4.1 predates both. Nothing warns you at scaffold time; the failure arrives at the
+> first `yarn add`.
+>
+> `create-app` already pins the version it wants in `package.json`'s `packageManager` field, and
+> Corepack honours it — that *is* the reproducibility guarantee, so a second pin here buys nothing and
+> can only conflict. If you do need to move it, move it **forwards**: `yarn set version stable`.
+>
+> The age gate is worth understanding rather than deleting: it is [§5.1](#51-what-nexus-is-actually-for)'s
+> argument applied to time instead of location. Nexus controls *where* a dependency comes from; the
+> gate controls *how battle-tested* it is when you take it. `yarn add --no-time-gate` bypasses it for
+> one command when you genuinely need a fresh release.
 ```
 
 Point it at Nexus rather than the public registry — the same choke point the services use:
