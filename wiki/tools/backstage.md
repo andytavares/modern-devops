@@ -53,6 +53,18 @@ Two paved paths (§14.6–14.7):
   "action not found" *after* the template has done all its work.
 - **Bias every paved-path step towards adding a file rather than editing one** (§14.6). Creation is
   conflict-free and trivially reviewable; editing a shared values file is neither.
+- **A skeleton must inherit the platform's guarantees, or the paved path is a downgrade.** Ours ships
+  a **templated `uv.lock`** — the project name appears in it exactly once, so the scaffolder rewrites
+  it alongside `pyproject.toml` and the two still agree, keeping `uv sync --locked` working. The
+  alternative, dropping `--locked` for scaffolded services only, would make the generated service less
+  reproducible than the hand-written one it was copied from. The skeleton's `pyproject.toml` also
+  declares the [[sonatype-nexus]] index for the same reason it is declared in [[uv]]: an index set
+  only in CI can never match a committed lock, and omitting it sends every scaffolded service straight
+  to `pypi.org` past the [[supply-chain-choke-point]] with no error.
+- **Derive Prometheus metric prefixes in code, not in the template.** Service names are hyphenated and
+  metric names may not be, so `SERVICE.replace("-", "_")` at runtime beats emitting
+  `quotes-api_requests_total`, which fails at registration. A rename then cannot produce an invalid
+  metric name.
 - **Guest auth means there is no "who did that".** Every scaffolder run is attributed to one shared
   token. Production shape: GitHub OAuth for user identity plus a GitHub App so PRs are opened on
   behalf of the person who filled in the form.

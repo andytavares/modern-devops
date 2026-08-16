@@ -4158,7 +4158,30 @@ spec:
   system: order-platform
 ```
 
-The rest of the skeleton — `main.py`, `pyproject.toml`, a passing test, and a `Dockerfile` that is a copy of order-api's — is mechanical. Copy them from `services/order-api/`, replacing the service name with `${{ values.name }}`.
+The rest of the skeleton lives in the repo at `deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/`:
+
+```
+app/__init__.py     app/main.py     app/settings.py
+tests/__init__.py   tests/test_api.py
+pyproject.toml      uv.lock         Dockerfile      .python-version
+```
+
+The `Dockerfile` is a straight copy of order-api's, deliberately — a paved path that builds differently from the service it was modelled on stops being a paved path the first time someone debugs it. The rest is order-api with the parts a *new* service doesn't have removed: no Kafka producer, no S3 client, no signing key. What survives is the contract the chart depends on — `/healthz`, `/readyz`, `/metrics` on port 8000 — plus one placeholder route so the service does something observable on day one.
+
+> **Three things in here are not a mechanical copy, and each one is a trap avoided.**
+>
+> **`uv.lock` is templated too.** Skipping it and dropping `--locked` from the skeleton's Dockerfile would silently give every scaffolded service worse reproducibility than the two hand-written ones — a paved path that is *worse* than the manual route is how paved paths die. It works because the project name appears in `uv.lock` exactly once:
+> ```toml
+> [[package]]
+> name = "${{ values.name }}"
+> version = "0.1.0"
+> source = { editable = "." }
+> ```
+> The scaffolder substitutes it in the lock and in `pyproject.toml` together, so they still agree. Generate it once by rendering the skeleton under any name, running `uv lock`, and replacing that one name with the placeholder on the way back.
+>
+> **`pyproject.toml` carries the Nexus index.** `[[tool.uv.index]]` again, for the reason in [§3.1](#31-order-api-python--fastapi): an index set only in CI can never match a committed lock. Omit it and every scaffolded service quietly resolves from `pypi.org`, straight through the choke point [§5.1](#51-what-nexus-is-actually-for) exists to close — and nothing fails to tell you.
+>
+> **The metric prefix is computed in Python, not templated.** Service names are hyphenated (`quotes-api`); Prometheus metric names may not be. So `main.py` does `SERVICE.replace("-", "_")` rather than emitting `quotes-api_requests_total`, which would be rejected at registration. Doing it in code instead of in the scaffolder means a rename can never produce an invalid metric name, and there's a test asserting exactly that.
 
 For the chart to render these files, add one template that reads the directory:
 

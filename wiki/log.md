@@ -110,3 +110,16 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   `404 (Repository not found)` from `nexus:8081/repository/npm-proxy/` — §14.2 creates that proxy and
   had simply not been run. Nexus returns 404 for a missing *repository* and 401 for a missing
   credential; reading which one you got saves a wrong turn. Pages: [[backstage]].
+- **2026-08-16** — Wrote the `new-service` skeleton the tutorial had left as "mechanical, copy from
+  order-api": `app/{__init__,main,settings}.py`, `tests/{__init__,test_api}.py`, `pyproject.toml`,
+  `uv.lock`, `Dockerfile`, `.python-version`. Three parts were not mechanical. (a) `uv.lock` is
+  **templated** — the project name appears in it exactly once, so the scaffolder rewrites it with
+  `pyproject.toml` and `uv sync --locked` keeps working; dropping the lock instead would have made
+  scaffolded services less reproducible than the hand-written service they copy, which is how a paved
+  path stops being used. (b) The skeleton's `pyproject.toml` declares the [[sonatype-nexus]] index, or
+  every generated service silently resolves from pypi.org past the choke point. (c) The Prometheus
+  metric prefix is computed as `SERVICE.replace("-", "_")` at runtime, because hyphenated service
+  names are invalid metric names — with a test asserting it. Verified by rendering the skeleton under
+  **two different names** and running the real CI contract in `python:3.13-slim` against Nexus
+  (`uv sync --locked`, ruff, 6 tests pass) plus a `buildah bud` on the kind network, which is what CI
+  actually runs. Pages: [[backstage]], [[paved-paths]].
