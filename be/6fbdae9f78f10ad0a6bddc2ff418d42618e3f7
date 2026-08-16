@@ -1,0 +1,29 @@
+deploy/charts/order-platform/templates/BUILD
+  s_a10aebdc52be9f::t_b491e3f3ef2d95 1-3
+checks/test_frontend_api_port.py
+  s_a10aebdc52be9f::t_a47604111498b0 23-25
+  s_a10aebdc52be9f::t_fb4038b161a696 1-22,26-52
+frontend/BUILD
+  s_a10aebdc52be9f::t_b491e3f3ef2d95 22-25
+frontend/nginx.conf
+  s_a10aebdc52be9f::t_66126b9f6dc558 16-22
+checks/BUILD
+  s_a10aebdc52be9f::t_b491e3f3ef2d95 8
+  s_a10aebdc52be9f::t_fb4038b161a696 1-7,9-11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "be6fbdae9f78f10ad0a6bddc2ff418d42618e3f7",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
