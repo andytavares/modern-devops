@@ -32,4 +32,4 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1
 USER 10001
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "${{ values.name | replace("-", "_") }}.main:app", "--host", "0.0.0.0", "--port", "8000"]
