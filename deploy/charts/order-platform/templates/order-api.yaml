@@ -49,6 +49,7 @@ spec:
             {{- include "op.commonEnv" . | nindent 12 }}
             - name: S3_BUCKET
               value: {{ .Values.aws.s3Bucket | quote }}
+            - { name: PEX_ROOT, value: "/tmp/pex" }
             - name: SERVICE_VERSION
               value: {{ .Values.orderApi.image.tag | quote }}
             - name: ORDER_SIGNING_KEY
@@ -75,6 +76,16 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
+          # order-api is packaged as a PEX, which unpacks its dependency closure
+          # on first run and therefore needs somewhere writable. Under
+          # readOnlyRootFilesystem it has nowhere and dies in the PEX bootstrap
+          # before any application log line appears:
+          #   FileNotFoundError: No usable temporary directory found
+          # Same fix as pricing. Any service moving to PEX inherits this.
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
 ---
 apiVersion: v1
 kind: Service

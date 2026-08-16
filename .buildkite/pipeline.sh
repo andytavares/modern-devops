@@ -337,6 +337,20 @@ cat <<YAML
                     orderWorker:
                       image:
                         tag: "$SHA"
+                    # pricing and frontend were added later and were missed
+                    # here, so they fell back to the chart default tag "dev" —
+                    # an image CI never builds. The pods then sat in
+                    # ImagePullBackOff while every other service deployed fine.
+                    pricing:
+                      v1:
+                        image:
+                          tag: "$SHA"
+                      v2:
+                        image:
+                          tag: "$SHA"
+                    frontend:
+                      image:
+                        tag: "$SHA"
                     # Every scaffolded service (§14.6) is built from this same
                     # commit, so one tag covers all of them.
                     scaffolded:

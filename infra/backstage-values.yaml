@@ -10,6 +10,19 @@ backstage:
     # Without this the kubelet says `no basic auth credentials`.
     pullSecrets:
       - nexus-pull
+  # The chart sets `command: ["node","packages/backend"]` with empty args, which
+  # DISCARDS the image's CMD — and the image's CMD is where the --config flags
+  # live. Without these, Backstage loads only app-config.yaml, whose database
+  # block is `client: better-sqlite3, connection: ':memory:'` for local dev. It
+  # then dies trying to load a native sqlite binding that was never compiled,
+  # and every plugin fails with "Failed to instantiate service 'core.auth'" —
+  # an error that names neither the config nor the database.
+  args:
+    - "--config"
+    - "app-config.yaml"
+    - "--config"
+    - "app-config.production.yaml"
+
   extraEnvVarsSecrets:
     - backstage
 
