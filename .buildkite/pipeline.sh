@@ -1,0 +1,211 @@
+#!/bin/sh
+# Emits this build's pipeline as YAML on stdout. It talks to nothing and
+# changes nothing - run it locally and read what it prints.
+#
+# POSIX sh, deliberately: this runs in the default agent image, whose only
+# guaranteed shell is /bin/sh.
+set -eu
+
+REGISTRY="nexus:8082"
+SHA="$(echo "$BUILDKITE_COMMIT" | cut -c1-12)"
+
+# Services are discovered, not listed. A directory under services/ with a
+# Dockerfile in it is a service, and that is the entire contract. This is what
+# lets the Backstage paved path (§14.6) add a service without touching CI.
+SERVICES="$(cd services && ls -d */ 2>/dev/null | sed 's#/##' | while read -r s; do
+  [ -f "$s/Dockerfile" ] && echo "$s"
+done | sort | tr '\n' ' ')"
+
+if [ -z "$SERVICES" ]; then
+  echo "no services found under services/*/Dockerfile" >&2
+  exit 1
+fi
+
+# ── LOOP GUARD ─────────────────────────────────────────────────────────────
+# The deploy step at the bottom commits into the repo we build from, so
+# without this every deploy triggers a build that makes another deploy,
+# forever. Deciding it here, before any step exists, is the whole reason this
+# is a script.
+if git log -1 --pretty=%s | grep -q '^chore(deploy):'; then
+  cat <<'YAML'
+steps:
+  - label: ":fast_forward: deploy commit, nothing to build"
+    agents: { queue: kubernetes }
+    command: "echo 'HEAD is a deploy commit; skipping'"
+YAML
+  exit 0
+fi
+
+# ── Header ─────────────────────────────────────────────────────────────────
+# Every step runs in its own Kubernetes pod, created by agent-stack-k8s.
+# The `kubernetes` plugin is how a step describes the pod it wants.
+cat <<'YAML'
+env:
+  # Nexus proxies. Builds never talk to pypi.org or proxy.golang.org directly:
+  # that is the supply-chain choke point from §5.1, made real.
+  PIP_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
+  PIP_TRUSTED_HOST: "nexus"
+  UV_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
+  UV_INSECURE_HOST: "nexus"
+  GOPROXY: "http://nexus:8081/repository/go-proxy"
+  # The public checksum database is unreachable through a private proxy, so
+  # verification must be turned off for modules the proxy serves. In production
+  # you run an internal sumdb or vendor dependencies instead of disabling this.
+  GOSUMDB: "off"
+  GONOSUMDB: "*"
+  GOFLAGS: "-mod=mod"
+
+steps:
+  # ── 1. Tests, in parallel ────────────────────────────────────────────────
+  - label: ":python: test order-api"
+    key: test-api
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - image: python:3.13-slim
+                command:
+                  - |
+                    set -euo pipefail
+                    cd services/order-api
+                    pip install --quiet uv
+                    uv sync --locked --dev
+                    uv run ruff check .
+                    uv run pytest -q
+
+  - label: ":go: test order-worker"
+    key: test-worker
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - image: golang:1.26-alpine
+                command:
+                  - |
+                    set -euo pipefail
+                    apk add --no-cache git
+                    cd services/order-worker
+                    go vet ./...
+                    go test -race ./...
+
+  - wait
+YAML
+
+# ── 2. Build and push images ───────────────────────────────────────────────
+# One template, one step per service. When these were two hand-maintained
+# YAML blocks they differed only in a name, which is exactly the kind of
+# duplication that drifts without anyone noticing.
+for SVC in $SERVICES; do
+  # Only the Go image takes a version stamp (services/order-worker/Dockerfile
+  # declares ARG VERSION); buildah warns about build-args the Dockerfile never
+  # declares, so don't pass it to the Python one.
+  case "$SVC" in
+    order-worker) BUILD_ARGS="--build-arg \"VERSION=$SHA\" " ;;
+    *)            BUILD_ARGS="" ;;
+  esac
+
+  cat <<YAML
+
+  - label: ":docker: build $SVC ($SHA)"
+    key: build-$SVC
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            volumes:
+              - name: nexus-auth
+                secret: { secretName: nexus-push }
+            containers:
+              - image: quay.io/buildah/stable:v1.40.1
+                # See the securityContext note below. This is a real trade.
+                securityContext:
+                  privileged: true
+                env:
+                  - name: STORAGE_DRIVER
+                    value: vfs
+                  - name: BUILDAH_FORMAT
+                    value: docker
+                  - name: REGISTRY_AUTH_FILE
+                    value: /auth/config.json
+                volumeMounts:
+                  - name: nexus-auth
+                    mountPath: /auth
+                    readOnly: true
+                command:
+                  - |
+                    set -euo pipefail
+
+                    buildah bud \\
+                      --tls-verify=false \\
+                      ${BUILD_ARGS}--file services/$SVC/Dockerfile \\
+                      --tag "$REGISTRY/shop/$SVC:$SHA" \\
+                      --tag "$REGISTRY/shop/$SVC:latest" \\
+                      services/$SVC
+
+                    buildah push --tls-verify=false "$REGISTRY/shop/$SVC:$SHA"
+                    buildah push --tls-verify=false "$REGISTRY/shop/$SVC:latest"
+
+                    echo "pushed $REGISTRY/shop/$SVC:$SHA"
+YAML
+done
+
+# ── 3. The handoff to CD: write the tag into git ───────────────────────────
+cat <<YAML
+
+  - wait
+
+  - label: ":git: bump image tags to $SHA"
+    key: deploy
+    branches: "main"
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          checkout:
+            gitCredentialsSecret:
+              secretName: git-https-credentials
+          podSpec:
+            volumes:
+              - name: git-creds
+                secret: { secretName: git-https-credentials }
+            containers:
+              - image: alpine/git:2.47.2
+                volumeMounts:
+                  - name: git-creds
+                    mountPath: /gitcreds
+                    readOnly: true
+                command:
+                  - |
+                    set -eu
+                    git config user.name  "buildkite"
+                    git config user.email "buildkite@localtest.me"
+                    git config credential.helper "store --file=/gitcreds/.git-credentials"
+
+                    # The overlay has exactly one job - carry the two tags - so
+                    # rewriting it wholesale is deterministic and needs no yq.
+                    # The tags are literals: pipeline.sh already resolved them.
+                    cat > deploy/env/local/values.yaml <<'VALUES'
+                    # Generated by Buildkite. Do not edit by hand.
+                    orderApi:
+                      image:
+                        tag: "$SHA"
+                    orderWorker:
+                      image:
+                        tag: "$SHA"
+                    # Every scaffolded service (§14.6) is built from this same
+                    # commit, so one tag covers all of them.
+                    scaffolded:
+                      tag: "$SHA"
+                    VALUES
+
+                    git add deploy/env/local/values.yaml
+                    if git diff --cached --quiet; then
+                      echo "no change; nothing to deploy"
+                      exit 0
+                    fi
+
+                    git commit -m "chore(deploy): order-platform $SHA [skip ci]"
+                    git push origin HEAD:main
+                    echo "pushed deploy commit; Argo CD will sync"
+YAML
