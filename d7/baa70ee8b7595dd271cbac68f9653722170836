@@ -1,0 +1,40 @@
+CLAUDE.md
+  s_a10aebdc52be9f::t_42b41a7a46b1ca 10-13,30-32
+  s_a10aebdc52be9f::t_6ec7cc3b598df5 47-53
+deploy/charts/order-platform/templates/pricing.yaml
+  s_a10aebdc52be9f::t_0aa92dc4d061d7 27
+deploy/charts/order-platform/BUILD
+  s_a10aebdc52be9f::t_4f72179b83b911 1-4
+deploy/charts/order-platform/templates/scaffolded.yaml
+  s_a10aebdc52be9f::t_253c0c4513aef8 60-65,109
+  s_a10aebdc52be9f::t_c77078dcd96064 66-69
+wiki/log.md
+  s_a10aebdc52be9f::t_9780b97657b53b 347-370
+deploy/platform/buildkite-secrets.yaml
+  s_a10aebdc52be9f::t_253c0c4513aef8 34-35
+wiki/index.md
+  s_a10aebdc52be9f::t_6ec7cc3b598df5 18-23
+  s_a10aebdc52be9f::t_9780b97657b53b 6-7,36-38
+portal/app-config.production.yaml
+  s_a10aebdc52be9f::t_3febd6c06cb7ac 2-7,10,19
+  s_a10aebdc52be9f::t_251dd0b6cb4e12 12
+  s_a10aebdc52be9f::t_13ca48fb134ccc 38
+deploy/charts/order-platform/.helmignore
+  s_a10aebdc52be9f::t_4f72179b83b911 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "d7baa70ee8b7595dd271cbac68f9653722170836",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
