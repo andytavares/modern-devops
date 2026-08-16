@@ -1,0 +1,95 @@
+wiki/tools/grpc.md
+  s_a10aebdc52be9f::t_c9f3f6469b605c 1-138
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_3717e896eda55d 935-964
+wiki/tools/vite.md
+  s_a10aebdc52be9f::t_f60ce5879bd05c 1-120
+wiki/open-questions.md
+  s_a10aebdc52be9f::t_07aede49c5997c 70-102
+wiki/tools/pex.md
+  s_a10aebdc52be9f::t_6b7c9b157527f6 1-143
+docs/phase-3-delivery.md
+  s_a10aebdc52be9f::t_1a00f714326c6e 1-796
+docs/phase-0-foundations.md
+  s_a10aebdc52be9f::t_1a00f714326c6e 1-575
+docs/phase-1-the-application.md
+  s_a10aebdc52be9f::t_3717e896eda55d 741-770
+  s_a10aebdc52be9f::t_1a00f714326c6e 1-740,771-2008
+docs/README.md
+  s_a10aebdc52be9f::t_59fcc363a3d44f 70-90
+  s_a10aebdc52be9f::t_1a00f714326c6e 1-21,23,25-26,32-48,51-54,56-69,91-106
+  s_a10aebdc52be9f::t_90a427c988d5fe 49-50,55
+  s_a10aebdc52be9f::t_7a414b41940352 22,24,27-31
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/${{ values.name | replace('-', '_') }}/main.py"
+  s_a10aebdc52be9f::t_7c476fb2379dd8 5,72-80
+docs/phase-4-service-mesh.md
+  s_a10aebdc52be9f::t_bc6ffc9c59e39a 410-412
+  s_a10aebdc52be9f::t_567ff04d680dee 379,585
+  s_a10aebdc52be9f::t_1a00f714326c6e 1-5,9-317,646-655,661-663
+  s_a10aebdc52be9f::t_b277eec104f1ff 318-378,380-409,413-584,586-645
+  s_a10aebdc52be9f::t_a0f624af9ad637 656-660
+  s_a10aebdc52be9f::t_7d21d0e75ad9cb 6-8
+docs/phase-2-observability.md
+  s_a10aebdc52be9f::t_1a00f714326c6e 1-389
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/tests/test_api.py"
+  s_a10aebdc52be9f::t_7c476fb2379dd8 3
+wiki/tools/go.md
+  s_a10aebdc52be9f::t_86e674e0412f28 24-52,57-60
+  s_a10aebdc52be9f::t_8279fd96f4f3d4 20-22,95
+docs/appendices.md
+  s_a10aebdc52be9f::t_1a00f714326c6e 1-205
+docs/phase-6-operating.md
+  s_a10aebdc52be9f::t_1a00f714326c6e 1-2,4-29,31-305
+  s_a10aebdc52be9f::t_e91a8893601702 3,30,306
+docs/phase-7-polyglot-monorepo.md
+  s_a10aebdc52be9f::t_567ff04d680dee 277,312
+  s_a10aebdc52be9f::t_5f2730d0f19b9b 469-474
+  s_a10aebdc52be9f::t_fc8c0acadb633b 1-45,47-106,108-113,115-170,172-217,219-276,278-311,313-468,475-499,501-512,519-728
+  s_a10aebdc52be9f::t_9cd7d29068c8dc 46,107,114,171,218,500
+  s_a10aebdc52be9f::t_b5cda6d8091708 513-518
+wiki/index.md
+  s_a10aebdc52be9f::t_6f889bf675a656 11-23,46,83-88,94
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/Dockerfile"
+  s_a10aebdc52be9f::t_af36ebd4a8919b 2-6,8,11,13-17,20,23
+docs/phase-5-developer-portal.md
+  s_a10aebdc52be9f::t_e91a8893601702 3,1007,1009
+  s_a10aebdc52be9f::t_1a00f714326c6e 1-2,4-346,348-350,361-1006,1008
+  s_a10aebdc52be9f::t_c48e4aeaa5ed39 347,351-360
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/BUILD"
+  s_a10aebdc52be9f::t_ca04552e810213 8,20
+  s_a10aebdc52be9f::t_679a736f1dab8e 1-7,9-19,21-28
+pants.toml
+  s_a10aebdc52be9f::t_ca04552e810213 30-33
+wiki/tools/pants.md
+  s_a10aebdc52be9f::t_37ba7d473de839 1-157
+wiki/log.md
+  s_a10aebdc52be9f::t_07aede49c5997c 163-196
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/${{ values.name | replace('-', '_') }}/settings.py"
+  s_a10aebdc52be9f::t_179a1b377bb55f 14
+wiki/.obsidian/workspace.json
+  s_f6b56194b5eed0::t_c0f156eec503ec 181-184
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "ef9a260ae99e52bc5af64b8f4c300daee0e2244f",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    },
+    "s_f6b56194b5eed0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "agent-a8536af40739cb8f5",
+        "model": "unknown"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
