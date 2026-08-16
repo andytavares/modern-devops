@@ -3,6 +3,23 @@ python_sources(
     sources=["order_api/**/*.py"],
 )
 
+python_sources(
+    name="tools",
+    sources=["openapi_dump.py"],
+    dependencies=[":lib"],
+)
+
+pex_binary(
+    name="dump-openapi",
+    entry_point="openapi_dump.py",
+    dependencies=[":tools"],
+)
+
+resource(
+    name="openapi-spec",
+    source="openapi.json",
+)
+
 python_tests(
     name="tests",
     # `!tests/__init__.py`: it's a namespace marker, not a test — including it
@@ -12,7 +29,9 @@ python_tests(
     # The `app` top-level package name collides with pricing's own `app` package
     # under the shared `/services/*` source root, so dependency inference can't
     # disambiguate `from order_api.main import ...` on its own.
-    dependencies=[":lib"],
+    # `:openapi-spec` is a resource, not code, so nothing infers it — the drift
+    # test reads it off disk by path.
+    dependencies=[":lib", ":openapi-spec"],
 )
 
 pex_binary(
