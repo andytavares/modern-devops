@@ -8,6 +8,10 @@ research get written *back* into it. It compounds. The tutorial does not.
 
 ```
 modern-devops-tutorial.md   # the primary source. Long-form, opinionated, section-numbered (§N.M).
+docs/                       # the phased edition of the same material, in build order.
+  README.md                 # the map: seven phases, why that order, what each one ends with
+  phase-N-*.md              # one file per phase; original §N.M numbering preserved
+  appendices.md             # versions, troubleshooting, omissions, command reference
 raw/                        # IMMUTABLE. Sources dropped by the human: doc excerpts, transcripts, links.
 wiki/                       # CLAUDE-OWNED. Every file here is written and maintained by Claude.
   index.md                  # catalog of every page, grouped by role in the platform

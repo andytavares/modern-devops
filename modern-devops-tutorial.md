@@ -6,6 +6,18 @@
 
 ---
 
+> [!tip] There is a phased edition of this document.
+> [`docs/README.md`](docs/README.md) splits the same material into seven phases that each end with
+> something working and checkable — cluster → running application → observability → delivery → mesh →
+> portal → operating it. Same section numbers, so `§7.6` means the same thing in both, and the wiki's
+> citations resolve against either.
+>
+> **They differ in three places, deliberately**, because the phased order changes what is true when:
+> it installs the application with `helm install` in [§10.5](docs/phase-1-the-application.md#105-install-it)
+> and hands it to Argo CD later, it scrapes metrics with a `ServiceMonitor` before the mesh exists,
+> and it swaps that for the `PodMonitor` in §9.6 as the consequence of turning on STRICT mTLS.
+> This document keeps the original order, where Istio arrives before the app is deployed.
+
 ## 0. What this is, and what it is not
 
 This is a build-it-yourself platform. You will end up with a single-machine environment that has the same *shape* as a real production platform: source in GitHub, CI on Buildkite, artifacts in Nexus, secrets in OpenBao, deploys via Argo CD into Kubernetes, an AWS-shaped dependency emulated by Floci, an event bus on Kafka, and observability in Grafana.
@@ -256,7 +268,9 @@ dev = [
 ]
 
 # Declared here, not only as a CI env var, so `uv.lock` records this registry
-# and the lock validates identically on a laptop and in the build pod.
+# and the lock validates identically on a laptop and in the build pod. uv
+# refuses a lockfile whose registries aren't in the current index config, which
+# is what `uv sync --locked` was failing on when only CI set UV_INDEX_URL.
 [[tool.uv.index]]
 url = "http://nexus:8081/repository/pypi-proxy/simple"
 default = true
@@ -1230,7 +1244,7 @@ Open <http://localhost:8081>, sign in as `admin` with that password. You'll be w
 > Anonymous can then read the two language proxies and nothing else.
 
 > [!warning] Earlier revisions of this tutorial said **Disable anonymous access** here.
-> That made [§12](#12-buildkite-ci) unrunnable. The build steps fetch from the PyPI and Go proxies
+> That made [§12](#12-buildkite-ci-that-runs-on-your-infrastructure) unrunnable. The build steps fetch from the PyPI and Go proxies
 > with **no credentials** — `PIP_INDEX_URL` and `GOPROXY` are bare URLs — so every dependency
 > resolution failed with `401 Unauthorized`, surfacing as `go: ... 401 Unauthorized` and, for `uv`,
 > as a step that hangs rather than fails. Disabling anonymous access and then not authenticating CI
@@ -2412,6 +2426,15 @@ orderWorker:
     requests: { cpu: 50m, memory: 64Mi }
     limits:   { memory: 128Mi }
 
+# Exactly one of these two should be on. serviceMonitor is the pre-mesh scrape
+# path (§13.3); podMonitor replaces it once STRICT mTLS refuses plaintext
+# scrapes (§9.6). Both start false because the monitoring.coreos.com CRDs do
+# not exist until §13.2 installs kube-prometheus-stack, and Argo CD fails the
+# whole Application sync on a resource whose CRD is missing.
+serviceMonitor:
+  enabled: false
+  interval: 15s
+
 podMonitor:
   # false until §13.2 installs kube-prometheus-stack and with it the
   # monitoring.coreos.com CRDs. Argo CD does not skip a resource whose CRD is
@@ -2419,6 +2442,9 @@ podMonitor:
   # workload in `shop` as Missing. Flip to true in §13.3 and commit.
   enabled: false
   interval: 15s
+
+scaffolded:
+  tag: "dev"     # CI overwrites this in the env overlay, same as the other two
 ```
 
 > [!warning] **A missing CRD fails the whole Application, not just the one resource.**
@@ -2682,6 +2708,47 @@ spec:
 {{- end }}
 ```
 
+**`deploy/charts/order-platform/templates/servicemonitor.yaml`**
+
+```yaml
+{{- if .Values.serviceMonitor.enabled }}
+# The pre-mesh scrape path. Prometheus talks straight to each Service's metrics
+# port over plaintext, which is the obvious thing and works fine — right up
+# until STRICT mTLS (§9.4) starts refusing it, at which point every one of these
+# targets goes down and *nothing logs an error*.
+#
+# §9.6 is that failure. The fix is podmonitor.yaml, which scrapes the sidecar's
+# merged endpoint instead. Exactly one of these two should be enabled:
+#   before Istio -> serviceMonitor.enabled: true
+#   after Istio  -> podMonitor.enabled: true
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: order-platform
+  labels:
+    # kube-prometheus-stack's Prometheus selects monitors by this label in the
+    # default configuration we install in §13.
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames: ["shop"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: order-platform
+  endpoints:
+    # Two entries because the two services name their ports differently:
+    # order-api serves the app and its metrics on `http`, order-worker exposes
+    # `metrics` separately. A ServiceMonitor selects by port *name*, so a port
+    # that does not exist on a given Service is simply skipped.
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}
+```
+
 **`deploy/charts/order-platform/templates/podmonitor.yaml`**
 
 ```yaml
@@ -2701,9 +2768,17 @@ spec:
     matchLabels:
       app.kubernetes.io/part-of: order-platform
   podMetricsEndpoints:
-    # istio-proxy's merged endpoint: our application metrics (scraped over
-    # loopback inside the pod, per the prometheus.io/* annotations above) plus
-    # Envoy's own. One scrape, both halves, and it survives STRICT mTLS.
+    # istio-proxy's MERGED endpoint on 15020: our application metrics (scraped
+    # over loopback inside the pod, per the prometheus.io/* annotations above)
+    # plus Envoy's and Istio's. One scrape, all of it, and it survives STRICT.
+    #
+    # It must be 15020 and it must be addressed by number. Istio: "forwards
+    # requests to the sidecar telemetry port 15020 for merged metrics or 15090
+    # for Envoy-only metrics". 15090 is the one carrying the port NAME
+    # `http-envoy-prom`; 15020 is unnamed in the pod spec, so `port:` cannot
+    # reach it and `portNumber:` is required. Selecting http-envoy-prom gets
+    # you istio_requests_total (Kiali works) but never the application's own
+    # metrics, which is a silent half-failure.
     - portNumber: 15020
       path: /stats/prometheus
       interval: {{ .Values.podMonitor.interval }}
@@ -3581,7 +3656,7 @@ kubeProxy: { enabled: false }
 
 ```bash
 helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
-  --version 82.14.1 \
+  --version 88.3.0 \
   --namespace monitoring --create-namespace \
   --values infra/monitoring-values.yaml \
   --wait --timeout 15m
@@ -4415,7 +4490,170 @@ spec:
 
 ### 14.8 Build and deploy the portal
 
-The portal is built by our own CI, on the same path as everything else — it's just a bigger image. Take the official multi-stage Dockerfile from Backstage's deployment docs (`packages/backend/Dockerfile` in the generated app already contains it) and add the build step to the generator:
+The portal is built by our own CI, on the same path as everything else — it's just a bigger image. It needs a Dockerfile CI can actually run (see the warning below for why the generated one will not do), and a build step in the generator:
+
+**`portal/Dockerfile`** — Backstage's [multi-stage build](https://backstage.io/docs/deployment/docker#multi-stage-build), which compiles the project *inside* the image. This is the one CI uses; see the warning below for why the generated `packages/backend/Dockerfile` cannot be.
+
+```dockerfile
+# Multi-stage build, from https://backstage.io/docs/deployment/docker#multi-stage-build
+#
+# This exists alongside packages/backend/Dockerfile, which create-app generates
+# and which is a *host build*: it expects `yarn install && yarn tsc &&
+# yarn build:backend` to have already produced packages/backend/dist/. That is
+# fine on a laptop and impossible in our CI, where the build step is a Buildah
+# pod with no Node toolchain. This one builds the project inside the image, so
+# `buildah bud` against the portal directory is self-contained.
+#
+# Slower than a host build. That is the trade for not needing Node in CI.
+
+# Stage 1 - Create yarn install skeleton layer
+FROM docker.io/library/node:24-trixie-slim AS packages
+
+WORKDIR /app
+COPY backstage.json package.json yarn.lock ./
+COPY .yarn ./.yarn
+COPY .yarnrc.yml ./
+
+COPY packages packages
+
+# No internal plugins in this portal — portal/plugins/ holds only a README, and
+# .dockerignore excludes it, so this COPY matches nothing and fails the build.
+# Uncomment it the day you add one.
+# COPY plugins plugins
+
+RUN find packages \! -name "package.json" -mindepth 2 -maxdepth 2 -exec rm -rf {} \+
+
+# Stage 2 - Install dependencies and build packages
+FROM docker.io/library/node:24-trixie-slim AS build
+
+# Set Python interpreter for `node-gyp` to use
+ENV PYTHON=/usr/bin/python3
+
+# Install isolate-vm dependencies, these are needed by the @backstage/plugin-scaffolder-backend.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3 g++ build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install sqlite3 dependencies. You can skip this if you don't use sqlite3 in the image,
+# in which case you should also move better-sqlite3 to "devDependencies" in package.json.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends libsqlite3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+USER node
+WORKDIR /app
+
+COPY --from=packages --chown=node:node /app .
+
+# .yarnrc.yml points npmRegistryServer at Nexus, so this resolves through the
+# choke point (§5.1) exactly like pip and Go do — the build pod's DNS reaches
+# `nexus` the same way every other pod does.
+RUN --mount=type=cache,target=/home/node/.cache/yarn,sharing=locked,uid=1000,gid=1000 \
+    yarn install --immutable
+
+COPY --chown=node:node . .
+
+RUN yarn tsc
+RUN yarn --cwd packages/backend build
+
+RUN mkdir packages/backend/dist/skeleton packages/backend/dist/bundle \
+    && tar xzf packages/backend/dist/skeleton.tar.gz -C packages/backend/dist/skeleton \
+    && tar xzf packages/backend/dist/bundle.tar.gz -C packages/backend/dist/bundle
+
+# Stage 3 - Build the actual backend image and install production dependencies
+FROM docker.io/library/node:24-trixie-slim
+
+# Set Python interpreter for `node-gyp` to use
+ENV PYTHON=/usr/bin/python3
+
+# Install isolate-vm dependencies, these are needed by the @backstage/plugin-scaffolder-backend.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3 g++ build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install sqlite3 dependencies. You can skip this if you don't use sqlite3 in the image,
+# in which case you should also move better-sqlite3 to "devDependencies" in package.json.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends libsqlite3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# From here on we use the least-privileged `node` user to run the backend.
+USER node
+
+# This should create the app dir as `node`.
+# If it is instead created as `root` then the `tar` command below will
+# fail: `can't create directory 'packages/': Permission denied`.
+# If this occurs, then ensure BuildKit is enabled (`DOCKER_BUILDKIT=1`)
+# so the app dir is correctly created as `node`.
+WORKDIR /app
+
+# Copy the install dependencies from the build stage and context
+COPY --from=build --chown=node:node /app/.yarn ./.yarn
+COPY --from=build --chown=node:node /app/.yarnrc.yml  ./
+COPY --from=build --chown=node:node /app/backstage.json ./
+COPY --from=build --chown=node:node /app/yarn.lock /app/package.json /app/packages/backend/dist/skeleton/ ./
+
+# Note: The skeleton bundle only includes package.json files -- if your app has
+# plugins that define a `bin` export, the bin files need to be copied as well to
+# be linked in node_modules/.bin during yarn install.
+
+RUN --mount=type=cache,target=/home/node/.cache/yarn,sharing=locked,uid=1000,gid=1000 \
+    yarn workspaces focus --all --production && rm -rf "$(yarn cache clean)"
+
+# Copy the built packages from the build stage
+COPY --from=build --chown=node:node /app/packages/backend/dist/bundle/ ./
+
+# Copy any other files that we need at runtime
+COPY --chown=node:node app-config*.yaml ./
+
+# This will include the examples, if you don't need these simply remove this line
+COPY --chown=node:node examples ./examples
+
+# This switches many Node.js dependencies to production mode.
+ENV NODE_ENV=production
+
+# This disables node snapshot for Node 20 to work with the Scaffolder
+ENV NODE_OPTIONS="--no-node-snapshot"
+
+CMD ["node", "packages/backend", "--config", "app-config.yaml", "--config", "app-config.production.yaml"]
+```
+
+`create-app` also writes a `.dockerignore` tuned for the *host* build, and one line in it is fatal to the multi-stage one:
+
+**`portal/.dockerignore`**
+
+```
+.git
+.yarn/cache
+.yarn/install-state.gz
+node_modules
+# NOT excluded: portal/Dockerfile is a multi-stage build that compiles from
+# source inside the image, so `yarn tsc` needs packages/*/src. create-app writes
+# this file for the *host* build, where dist/ is prebuilt and the sources are
+# dead weight. Excluding them fails with TS18003 "No inputs were found in config
+# file", which names tsconfig.json and never mentions Docker.
+# packages/*/src
+packages/*/node_modules
+plugins
+*.local.yaml
+```
+
+> **`packages/*/src` must not be excluded.** For a host build the TypeScript sources are dead weight — `dist/` is already compiled, so excluding them just makes the context smaller. The multi-stage build compiles *from* those sources, and without them `yarn tsc` fails with:
+>
+> ```
+> error TS18003: No inputs were found in config file '/app/tsconfig.json'.
+> Specified 'include' paths were '["packages/*/src", ...]'
+> ```
+>
+> Which names `tsconfig.json` and never mentions Docker, so it sends you into TypeScript config rather than at what you copied into the build context. `plugins` stays excluded, because the `COPY plugins plugins` line is commented out above.
 
 **`.buildkite/pipeline.sh`** — after the services loop, before the deploy step:
 
@@ -4537,6 +4775,43 @@ spec:
   data:
     - secretKey: GITHUB_TOKEN
       remoteRef: { key: backstage, property: github_token }
+---
+# The portal is pulled from Nexus like everything else, so the `backstage`
+# namespace needs its own pull secret. Secrets do not cross namespaces — §7's
+# `nexus-pull` lives in `shop` and is invisible here. Without this the kubelet
+# reports `no basic auth credentials`, which reads like a registry problem and
+# is really a missing Secret in this namespace.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: nexus-pull
+  namespace: backstage
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: nexus-pull
+    creationPolicy: Owner
+    template:
+      type: kubernetes.io/dockerconfigjson
+      data:
+        .dockerconfigjson: |
+          {
+            "auths": {
+              "nexus:8082": {
+                "username": "{{ .username }}",
+                "password": "{{ .password }}",
+                "auth": "{{ printf "%s:%s" .username .password | b64enc }}"
+              }
+            }
+          }
+  data:
+    - secretKey: username
+      remoteRef: { key: nexus, property: username }
+    - secretKey: password
+      remoteRef: { key: nexus, property: password }
 ```
 
 **`infra/backstage-values.yaml`**
@@ -4892,7 +5167,7 @@ Also delete the Buildkite pipeline and agent token in the Buildkite UI, and revo
 
 ## Appendix A — Version matrix
 
-Verified 2026-08-15. Re-check before you start; these move.
+Verified 2026-08-16 against a running cluster — every version below was read back from the live workload or the installed chart, not from a changelog. Re-check before you start; these move.
 
 | Component | Version | How to check |
 |---|---|---|
@@ -4906,12 +5181,12 @@ Verified 2026-08-15. Re-check before you start; these move.
 | Strimzi | 0.50.1 (Kafka 4.1.0) | `helm search repo strimzi/strimzi-kafka-operator --versions` |
 | Argo CD | v3.4.7 | [releases](https://github.com/argoproj/argo-cd/releases) |
 | agent-stack-k8s | 0.46.3 | [releases](https://github.com/buildkite/agent-stack-k8s/releases) |
-| kube-prometheus-stack | 82.14.1 | `helm search repo prometheus-community/kube-prometheus-stack --versions` |
+| kube-prometheus-stack | 88.3.0 (Prometheus Operator v0.93.0) | `helm search repo prometheus-community/kube-prometheus-stack --versions` |
 | Istio (`base`, `istiod`) | 1.30.3 | `helm search repo istio/istiod --versions` |
 | Kiali (`kiali-server`) | 2.30.0 | `helm search repo kiali/kiali-server --versions` |
 | Backstage chart | 2.10.0 (`create-app` 1.53.1) | `helm search repo backstage/backstage --versions` |
 | Node.js | 22.x or 24.x (Active LTS) | `node --version` |
-| Yarn | 4.4.1 | `yarn --version` |
+| Yarn | 4.18.0 — whatever `create-app` pins in `packageManager`; **never downgrade** ([§14.3](#143-scaffold-the-portal)) | `yarn --version` |
 | Buildah | `quay.io/buildah/stable:v1.40.1` | [quay.io tags](https://quay.io/repository/buildah/stable?tab=tags) |
 | Go | 1.26.x | `go version` |
 | Python | 3.13.x | `python3 --version` |

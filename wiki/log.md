@@ -160,6 +160,43 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   `FROM node:24-trixie-slim` lines were fully qualified — Buildah resolved `node` only via its
   shortname alias list, the same luck that `python` had and `golang` did not (see [[buildah]]).
   Pages: [[backstage]], [[buildah]].
+- **2026-08-16** — Full audit of the repo against `modern-devops-tutorial.md`, mechanically rather
+  than by reading. Extracted all 51 ``**`path`** + fenced block`` listings and diffed each against the
+  real file. Result: **0 missing files**, 47 exact matches, and 4 declared partials that were proven
+  correct rather than waved through — the two `.buildkite/pipeline.sh` halves (§12.5 + §14.8) were
+  shown to reconstruct the file byte-for-byte, and every line of the `portal/.yarnrc.yml` and
+  `packages/backend/src/index.ts` fragments was confirmed present in the real file.
+  Seven drifts found and fixed, all of them cases where a fix had landed in a file but only half in
+  the tutorial: the `pyproject.toml` uv-index comment, the `values.yaml` `scaffolded:` block, the
+  PodMonitor 15020 rationale, the `nexus-pull` ExternalSecret in `backstage-secrets.yaml`, a
+  `golang:1.26` rationale block that existed only in the tutorial and not in `pipeline.sh`, and two
+  files CI depends on that the tutorial never listed at all — `portal/Dockerfile` and
+  `portal/.dockerignore`. §14.8 also still claimed `packages/backend/Dockerfile` "already contains"
+  the multi-stage build, which is the false statement that produced the exit-125 failure; corrected.
+  Also swept 50 internal `§` anchors (one broken: `#12-buildkite-ci`) and re-verified the version
+  matrix by reading versions back off the **live cluster** — two were wrong: Yarn (4.4.1 → 4.18.0,
+  the value removed as a defect) and kube-prometheus-stack (82.14.1 → 88.3.0, which is what is
+  actually installed and what §13 was validated on). Pages: [[log]].
+- **2026-08-16** — Produced a **phased edition** of the tutorial in `docs/`: seven phases that each
+  end in something working and checkable, plus a README explaining why that order. Section numbers
+  are preserved verbatim, so every `§N.M` citation in this wiki resolves against either edition.
+  Assembly was mechanical (extract by heading, rewrite cross-file anchors, verify every link) rather
+  than hand-copied, so the two editions cannot silently drift in the parts they share: all 16
+  numbered sections placed exactly once, §0 became the README, 0 broken links across 9 files.
+  Three places genuinely differ, because reordering changes what is true when — recorded here so the
+  difference is not mistaken for drift:
+  1. Phase 1 installs the app with `helm install` (new §10.4 build-by-hand and §10.5 install) and
+     Phase 3 hands the release to [[argo-cd]] with an explicit `helm uninstall`. The single-doc
+     edition never deploys the app until Argo does.
+  2. Observability comes **before** the mesh, so Phase 2 scrapes with a `ServiceMonitor` on the app's
+     own port. This required a new chart template, `servicemonitor.yaml`, plus a
+     `serviceMonitor.enabled` value — exactly one of the two monitors should ever be on.
+  3. §9.6 becomes the moment STRICT mTLS breaks that scrape and you swap to the `PodMonitor` on
+     15020. In the single-doc order the mesh precedes monitoring, so the same lesson can only be told
+     retrospectively.
+  The reordering also fixes a latent oddity in the original: Istio arrived at §9, enabling STRICT
+  mTLS on a `shop` namespace that had no workloads in it yet. Pages: [[argo-cd]], [[prometheus]],
+  [[istio]], [[order-platform]].
 - **2026-08-16** — **Polyglot monorepo documented.** Four new pages — [[pants]], [[pex]], [[grpc]],
   [[vite]] — plus a new phase document `docs/phase-7-polyglot-monorepo.md` (§17 Pants, §18 one proto
   two languages, §19 pricing / PEX / frontend / CI), and the canary added to `docs/phase-4` as §9.8
@@ -194,3 +231,4 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   DestinationRule is §9.8 — the fix belongs in the manifest, and a documentation pass should not edit
   deployed YAML. Flagged in `docs/phase-4` §9.8.
 
+||||||| 12e1572
