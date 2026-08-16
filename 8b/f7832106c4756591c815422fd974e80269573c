@@ -1,0 +1,33 @@
+deploy/argocd/apps/platform.yaml
+  h_16ba00fe96244d 11
+deploy/argocd/root.yaml
+  h_16ba00fe96244d 12
+deploy/argocd/apps/order-platform.yaml
+  h_16ba00fe96244d 11
+modern-devops-tutorial.md
+  s_9772e0855326d8::t_b635cd9c535d52 1001-1006,1011-1014,1017-1043,1052
+  s_9772e0855326d8::t_98835c322fb1de 4543,4576-4577
+infra/kind-cluster.yaml
+  h_16ba00fe96244d 1-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "8bf7832106c4756591c815422fd974e80269573c",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_9772e0855326d8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a4de7b58-90e0-4765-bc66-6cf005f5bf79",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
