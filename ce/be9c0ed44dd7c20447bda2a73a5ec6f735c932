@@ -1,0 +1,40 @@
+wiki/tools/argo-cd.md
+  s_a10aebdc52be9f::t_16dc8b8a6cd521 66-87
+deploy/charts/order-platform/values.yaml
+  s_a10aebdc52be9f::t_da218cac26bdfa 46-50
+wiki/tools/prometheus.md
+  s_a10aebdc52be9f::t_9885e84066c774 76-92
+  s_a10aebdc52be9f::t_f13cedd82513bc 36-61
+  s_a10aebdc52be9f::t_3d849716d0fc29 8
+infra/monitoring-values.yaml
+  h_16ba00fe96244d 1-41
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_84845367403d64 2325-2329,2333-2351
+  s_a10aebdc52be9f::t_6121ef160fed2e 3486,3489-3503
+  s_a10aebdc52be9f::t_7f453575a0f832 2352
+wiki/open-questions.md
+  s_a10aebdc52be9f::t_92ad10af6adafa 43-51
+wiki/log.md
+  s_a10aebdc52be9f::t_f4ca7c5b3db742 40-59
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "cebe9c0ed44dd7c20447bda2a73a5ec6f735c932",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
