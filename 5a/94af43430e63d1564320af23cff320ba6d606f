@@ -1,0 +1,45 @@
+deploy/charts/order-platform/values.yaml
+  s_a10aebdc52be9f::t_dda3d1c02f3008 45-77
+deploy/charts/order-platform/templates/frontend.yaml
+  s_a10aebdc52be9f::t_709bdd56ef6439 52-61
+  s_a10aebdc52be9f::t_cf5205e0277125 1-51,62-92
+deploy/env/local/values.yaml
+  s_a10aebdc52be9f::t_383003eeb24234 8-17
+deploy/platform/istio/pricing-fault-injection.yaml.disabled
+  s_a10aebdc52be9f::t_40f2aa51630e18 1-71
+services/order-api/BUILD
+  s_a10aebdc52be9f::t_0915bd240e7207 26-29
+services/pricing/Dockerfile
+  s_a10aebdc52be9f::t_6871007490e34d 1-20
+services/pricing/BUILD
+  s_a10aebdc52be9f::t_0915bd240e7207 33-36
+services/order-api/Dockerfile
+  s_a10aebdc52be9f::t_6871007490e34d 12
+deploy/platform/istio/pricing-traffic.yaml
+  s_a10aebdc52be9f::t_6690f43e7aca5a 1-147
+deploy/platform/istio/authorization-policy.yaml
+  s_a10aebdc52be9f::t_0b6cfbec9af743 25,40-66
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_4e112a5ad9f6fc 24,26-29,31,126-134,136-140
+  s_a10aebdc52be9f::t_c24c0f8769f162 194-239
+  s_a10aebdc52be9f::t_990b725d96d426 77-87,89,94-97,101-120
+  s_a10aebdc52be9f::t_0a39a22af74a1e 173-179,182,185
+deploy/charts/order-platform/templates/pricing.yaml
+  s_a10aebdc52be9f::t_8a8df32a8ba429 1-84
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "5a94af43430e63d1564320af23cff320ba6d606f",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
