@@ -1,0 +1,25 @@
+backstage:
+  image:
+    registry: nexus:8082
+    # Set this to the SHA your CI pushed. Nothing rewrites it for you — see the
+    # note below.
+    repository: shop/portal
+    tag: "dev"
+    # Secrets do not cross namespaces: §7's nexus-pull lives in `shop`, so the
+    # backstage namespace needs its own (created by backstage-secrets.yaml).
+    # Without this the kubelet says `no basic auth credentials`.
+    pullSecrets:
+      - nexus-pull
+  extraEnvVarsSecrets:
+    - backstage
+
+ingress:
+  enabled: true
+  className: nginx
+  host: backstage.localtest.me
+
+postgresql:
+  enabled: true
+  auth:
+    username: bn_backstage
+    password: backstage-change-me

@@ -1,0 +1,9 @@
+# One file per scaffolded service. The chart globs this directory, so adding a
+# service is a file creation, never an edit — which is what makes it a clean PR.
+name: ${{ values.name }}
+description: ${{ values.description }}
+port: 8000
+replicas: 1
+ingress:
+  enabled: ${{ values.exposePublicly }}
+  host: ${{ values.name }}.localtest.me

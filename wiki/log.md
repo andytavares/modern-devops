@@ -134,3 +134,15 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   revision leaves a Helm-owned `backstage-postgresql` Secret and the retry fails *differently*
   (`PASSWORDS ERROR ... does not contain the key "user-password"`) until `helm uninstall` clears it.
   Pages: [[backstage]].
+- **2026-08-16** — Backstage pod: `no basic auth credentials` pulling `nexus:8082/shop/portal:dev`.
+  Two omissions in §14.8, both from secrets not crossing namespaces: `backstage-secrets.yaml` created
+  only `GITHUB_TOKEN`, so the `backstage` namespace had no `dockerconfigjson` at all (§7's
+  `nexus-pull` is in `shop`), and `infra/backstage-values.yaml` never set
+  `backstage.image.pullSecrets`, which the chart exposes and defaults to `[]`. Added an
+  [[external-secrets-operator]] ExternalSecret for `nexus-pull` in `backstage` plus the values entry.
+  Verified: the ExternalSecret reached `SecretSynced` in 5s, its credential returns HTTP 200 against
+  `nexus:8082/v2/_catalog`, the pod now carries `imagePullSecrets: [nexus-pull]`, and the kubelet
+  error changed from `no basic auth credentials` to plain `NotFound` — which is the *authenticated*
+  answer and the useful diagnostic: `no basic auth credentials` means a missing Secret, `not found`
+  means a missing image. Remaining blocker is genuinely the image: `shop/portal` has never been
+  built, since the `build-portal` step is `branches: "main"`. Pages: [[backstage]].
