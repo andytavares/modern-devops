@@ -81,11 +81,13 @@ steps:
       - kubernetes:
           podSpec:
             containers:
-              - image: golang:1.26-alpine
+              # Debian, not alpine: `go test -race` needs cgo, and the alpine
+              # image ships CGO_ENABLED=0 with no C toolchain. Adding gcc and
+              # musl-dev to alpine also works; this is one word instead.
+              - image: golang:1.26
                 command:
                   - |
                     set -euo pipefail
-                    apk add --no-cache git
                     cd services/order-worker
                     go vet ./...
                     go test -race ./...

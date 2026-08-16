@@ -17,6 +17,18 @@ dev = [
     "ruff==0.12.8",
 ]
 
+# Declared here, not only as a CI env var, so `uv.lock` records this registry
+# and the lock validates identically on a laptop and in the build pod. uv
+# refuses a lockfile whose registries aren't in the current index config, which
+# is what `uv sync --locked` was failing on when only CI set UV_INDEX_URL.
+[[tool.uv.index]]
+url = "http://nexus:8081/repository/pypi-proxy/simple"
+default = true
+
+[tool.uv]
+# Plain HTTP, per §5.8. Without this uv refuses the index outright.
+allow-insecure-host = ["nexus"]
+
 [tool.ruff]
 line-length = 100
 
