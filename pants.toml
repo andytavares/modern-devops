@@ -65,6 +65,16 @@ search_path = ["<PYENV>", "<PATH>", "/opt/homebrew/opt/python@3.13/libexec/bin"]
 indexes = ["http://nexus:8081/repository/pypi-proxy/simple"]
 
 [golang]
+# Pants defaults cgo_enabled to TRUE, which produces a dynamically linked
+# binary needing /lib/ld-linux-aarch64.so.1. gcr.io/distroless/static has no
+# libc and no linker, so the pod dies with:
+#   exec /order-worker: no such file or directory
+# — on a file that is present and executable, which is why it reads as a
+# missing binary rather than a missing loader. The original hand-written
+# Dockerfile set CGO_ENABLED=0 for exactly this reason; moving the build into
+# Pants silently dropped it.
+cgo_enabled = false
+
 # Go modules also resolve through Nexus. GOSUMDB is off for the same reason as
 # §12.5: the public checksum database is unreachable through a private proxy.
 subprocess_env_vars = [
