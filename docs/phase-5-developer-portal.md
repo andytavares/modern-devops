@@ -61,7 +61,7 @@ curl -s -u admin:admin123 http://localhost:8081/service/rest/v1/repositories | j
 
 ### 14.3 Scaffold the portal
 
-Backstage needs an Active LTS Node. Let `create-app` choose the Yarn version — see the warning below:
+Backstage needs an Active LTS Node. Let `create-app` choose the Yarn version:
 
 ```bash
 brew install node@22
@@ -71,28 +71,18 @@ npx @backstage/create-app@latest --path portal
 cd portal
 ```
 
-> [!warning] **Do not `yarn set version` backwards here.**
-> Earlier revisions of this tutorial ran `yarn set version 4.4.1` at this point. That downgrades Yarn
-> below what `create-app@latest` generates, and the scaffold stops being able to read its own config:
->
-> ```
-> Usage Error: Unrecognized or legacy configuration settings found: npmMinimalAgeGate
-> ```
->
-> `create-app` writes supply-chain settings into `.yarnrc.yml` — `npmMinimalAgeGate` (refuse packages
-> published less than N ago, Yarn **4.12+**) and `npmPreapprovedPackages` (exempt `@backstage/*` from
-> it). Pinning 4.4.1 predates both. Nothing warns you at scaffold time; the failure arrives at the
-> first `yarn add`.
->
-> `create-app` already pins the version it wants in `package.json`'s `packageManager` field, and
-> Corepack honours it — that *is* the reproducibility guarantee, so a second pin here buys nothing and
-> can only conflict. If you do need to move it, move it **forwards**: `yarn set version stable`.
->
-> The age gate is worth understanding rather than deleting: it is [§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for)'s
-> argument applied to time instead of location. Nexus controls *where* a dependency comes from; the
-> gate controls *how battle-tested* it is when you take it. `yarn add --no-time-gate` bypasses it for
-> one command when you genuinely need a fresh release.
-```
+> **Do not run `yarn set version` here.** `create-app` pins the version it wants in `package.json`'s
+> `packageManager` field and Corepack honours it, so a second pin buys nothing and an older one makes
+> the scaffold unable to read the `.yarnrc.yml` it just wrote. If you ever need to move it, move it
+> **forwards**: `yarn set version stable`.
+
+Two of the settings `create-app` writes into `.yarnrc.yml` are worth knowing rather than deleting:
+`npmMinimalAgeGate` refuses packages published less recently than the given window, and
+`npmPreapprovedPackages` exempts `@backstage/*` from it. That is
+[§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for)'s argument applied to time instead of
+location — Nexus controls *where* a dependency comes from, the gate controls *how battle-tested* it is
+when you take it. `yarn add --no-time-gate` bypasses it for one command when you genuinely need a fresh
+release.
 
 Point it at Nexus rather than the public registry — the same choke point the services use:
 
@@ -127,17 +117,28 @@ yarn start          # http://localhost:3000
 
 ### 14.4 Configure it for this platform
 
+Replace `<your-github-user>` with the account your fork of this repo lives under, here and everywhere
+else it appears in this phase. The URLs are `https`, not `http`: the Backstage frontend calls
+`crypto.randomUUID`, which the browser only exposes in a secure context, so the portal is served over
+TLS at the edge and every URL it knows about itself has to agree ([§14.8](#148-build-and-deploy-the-portal)).
+
 **`portal/app-config.production.yaml`**
 
 ```yaml
 app:
-  baseUrl: http://backstage.localtest.me
+  baseUrl: https://backstage.localtest.me
 
 backend:
-  baseUrl: http://backstage.localtest.me
-  listen: ':7007'
+  baseUrl: https://backstage.localtest.me
+  listen:
+    # Object form. The string shorthand (`listen: ':7007'`) is rejected:
+    #   Invalid type in config for key 'backend.listen', got string, wanted object
+    # host must be 0.0.0.0, not the 127.0.0.1 default, or the container binds to
+    # loopback and the kubelet's probes never reach it.
+    host: 0.0.0.0
+    port: 7007
   cors:
-    origin: http://backstage.localtest.me
+    origin: https://backstage.localtest.me
   database:
     client: pg
     connection:
@@ -156,7 +157,7 @@ auth:
   providers:
     guest:
       # Backstage refuses guest sign-in outside development unless you say this
-      # out loud. Read §14.7 before you copy this line anywhere real.
+      # out loud. Read the end of §14.8 before you copy this line anywhere real.
       dangerouslyAllowOutsideDevelopment: true
 
 catalog:
@@ -194,7 +195,7 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: order-api
-  description: FastAPI order intake
+  description: FastAPI order intake; prices every order over gRPC before accepting it
   annotations:
     github.com/project-slug: <your-github-user>/modern-devops
 spec:
@@ -203,6 +204,8 @@ spec:
   owner: group:default/platform
   system: order-platform
   providesApis: [orders]
+  consumesApis: [pricing]
+  dependsOn: [component:default/pricing]
 ---
 apiVersion: backstage.io/v1alpha1
 kind: Component
@@ -216,6 +219,72 @@ spec:
   system: order-platform
   consumesApis: [orders]
   dependsOn: [resource:default/orders-raw]
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: pricing
+  description: >-
+    gRPC pricing service. Runs as two versions behind one Kubernetes Service so
+    Istio can shift traffic between them; the version that answered is returned
+    to the caller as `served_by` (§18).
+  annotations:
+    github.com/project-slug: <your-github-user>/modern-devops
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/platform
+  system: order-platform
+  providesApis: [pricing]
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: frontend
+  description: >-
+    Canary Watch — the Vite dashboard that tallies `served_by` across repeated
+    orders, so a traffic shift is something you watch rather than something you
+    read out of a metric (§19).
+  annotations:
+    github.com/project-slug: <your-github-user>/modern-devops
+spec:
+  type: website
+  lifecycle: production
+  owner: group:default/platform
+  system: order-platform
+  consumesApis: [orders]
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: orders
+  description: The REST surface order-api exposes at the edge
+spec:
+  type: openapi
+  lifecycle: production
+  owner: group:default/platform
+  system: order-platform
+  # Generated, never hand-written — `pants run services/order-api:dump-openapi`.
+  # A drift test fails the build if this file stops matching the routes, because
+  # a stale spec the portal keeps rendering is worse than no spec at all.
+  definition:
+    $text: ./services/order-api/openapi.json
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: pricing
+  description: The gRPC contract between order-api and pricing
+spec:
+  type: grpc
+  lifecycle: production
+  owner: group:default/platform
+  system: order-platform
+  # The .proto is the contract itself, and Pants compiles this exact file into
+  # both the Python server and the Go stubs (§17.4). There is no second copy to
+  # drift from.
+  definition:
+    $text: ./protos/shop/v1/pricing.proto
 ---
 apiVersion: backstage.io/v1alpha1
 kind: Resource
@@ -236,11 +305,16 @@ spec:
   children: []
 ```
 
+> **`definition.$text` points at the generated artefact, never a copy.** The OpenAPI JSON is emitted
+> from the routes and the `.proto` *is* the gRPC contract, so what the portal renders cannot drift from
+> what the services actually speak. An API entity whose definition is a hand-maintained second copy is
+> worse than no API entity at all.
+
 > **`dependsOn: [resource:default/orders-raw]` is the line that earns the catalog its keep.** When someone asks "what breaks if this bucket goes away", the answer is a query, not an archaeology project. Ownership and dependency edges are the only two pieces of catalog metadata that consistently pay for the effort of maintaining them; the rest is decoration until proven otherwise.
 
 ### 14.6 Paved path 1 — a new service
 
-The template ships a skeleton and one chart file. Nothing else, because nothing else is needed: CI globs `services/*/Dockerfile` and the chart globs its own `services/*.yaml`.
+The template ships a skeleton and one chart file. Nothing else, because nothing else is needed: CI discovers any `services/*` directory holding both a `BUILD` and a `Dockerfile`, and the chart globs its own `services/*.yaml`.
 
 **`deploy/backstage/templates/new-service/template.yaml`**
 
@@ -310,7 +384,7 @@ spec:
         url: ${{ steps.pr.output.remoteUrl }}
 ```
 
-The skeleton is ordinary files with `${{ values.x }}` placeholders. The two that matter:
+The skeleton is ordinary files with `${{ values.x }}` placeholders. Start with the two that wire a new service into the platform — how it deploys, and who owns it:
 
 **`deploy/backstage/templates/new-service/skeleton/deploy/charts/order-platform/services/${{ values.name }}.yaml`**
 
@@ -344,37 +418,80 @@ spec:
 The rest of the skeleton lives in the repo at `deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/`:
 
 ```
-${{ values.name | replace("-", "_") }}/__init__.py   … /main.py   … /settings.py
+${{ values.name | replace('-', '_') }}/__init__.py   … /main.py   … /settings.py
 tests/__init__.py   tests/test_api.py
-pyproject.toml      uv.lock         Dockerfile      .python-version
+BUILD               Dockerfile
 ```
 
-> [!warning] **The package directory is templated, not called `app` — and the reason is not style.**
-> This originally emitted `app/`, copying order-api. Every service under the `/services/*` source root
-> that declares a top-level `app` package collides, mypy refuses with `Duplicate module named "app"`,
-> and the paved path became a machine for producing that failure: the *first* scaffolded service works
-> and the *second* breaks the build for the whole repo, including for people who never touched the
-> portal. Templating it as `${{ values.name | replace("-", "_") }}` — the same way the metric prefix
-> already was, because service names are hyphenated and Python packages may not be — makes every
-> scaffolded package name unique by construction. The full story is
-> [§17.4](phase-7-polyglot-monorepo.md#174-source-roots-and-the-duplicate-module-trap).
+Name the package directory `${{ values.name | replace('-', '_') }}`, not `app`. Every service under the
+`services/*` source root that declares a top-level `app` package collides with every other one, so
+templating the directory makes each scaffolded package name unique by construction — see
+[§17.4](phase-7-polyglot-monorepo.md#174-source-roots-and-the-duplicate-module-trap).
 
-The `Dockerfile` is a straight copy of order-api's, deliberately — a paved path that builds differently from the service it was modelled on stops being a paved path the first time someone debugs it. The rest is order-api with the parts a *new* service doesn't have removed: no Kafka producer, no S3 client, no signing key. What survives is the contract the chart depends on — `/healthz`, `/readyz`, `/metrics` on port 8000 — plus one placeholder route so the service does something observable on day one.
+**`deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/BUILD`**
 
-> **Three things in here are not a mechanical copy, and each one is a trap avoided.**
->
-> **`uv.lock` is templated too.** Skipping it and dropping `--locked` from the skeleton's Dockerfile would silently give every scaffolded service worse reproducibility than the two hand-written ones — a paved path that is *worse* than the manual route is how paved paths die. It works because the project name appears in `uv.lock` exactly once:
-> ```toml
-> [[package]]
-> name = "${{ values.name }}"
-> version = "0.1.0"
-> source = { editable = "." }
-> ```
-> The scaffolder substitutes it in the lock and in `pyproject.toml` together, so they still agree. Generate it once by rendering the skeleton under any name, running `uv lock`, and replacing that one name with the placeholder on the way back.
->
-> **`pyproject.toml` carries the Nexus index.** `[[tool.uv.index]]` again, for the reason in [§3.1](phase-1-the-application.md#31-order-api-python--fastapi): an index set only in CI can never match a committed lock. Omit it and every scaffolded service quietly resolves from `pypi.org`, straight through the choke point [§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for) exists to close — and nothing fails to tell you.
->
-> **The metric prefix is computed in Python, not templated.** Service names are hyphenated (`quotes-api`); Prometheus metric names may not be. So `main.py` does `SERVICE.replace("-", "_")` rather than emitting `quotes-api_requests_total`, which would be rejected at registration. Doing it in code instead of in the scaffolder means a rename can never produce an invalid metric name, and there's a test asserting exactly that.
+```python
+# A scaffolded service is a first-class member of the Pants monorepo. Without
+# this file CI would not build it at all — service discovery in
+# .buildkite/pipeline.sh keys off services/*/BUILD, and a directory Pants does
+# not know about cannot be linted, typechecked, tested or packaged. The failure
+# would be silent: the pipeline would simply not mention the new service.
+python_sources(
+    name="lib",
+    sources=["${{ values.name | replace('-', '_') }}/**/*.py"],
+)
+
+python_tests(
+    name="tests",
+    sources=["tests/**/*.py", "!tests/__init__.py"],
+    # Explicit because several services could otherwise satisfy this import.
+    dependencies=[":lib"],
+)
+
+pex_binary(
+    name="bin",
+    entry_point="${{ values.name | replace('-', '_') }}.main:main",
+    dependencies=[":lib"],
+    # The cluster runs linux/arm64. Without this, a PEX built on a macOS
+    # laptop resolves macOS wheels, passes every check, and dies on import
+    # inside the container. See 3rdparty/python/BUILD.
+    complete_platforms=["3rdparty/python:linux-platform"],
+    # dist/ is the Buildah build context; the Dockerfile COPYs by this name.
+    output_path="${{ values.name }}.pex",
+)
+```
+
+**`deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/Dockerfile`**
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+#
+# Build context is `dist/` — the output of `pants package`, not this source
+# tree. The PEX already carries the whole dependency closure resolved from
+# locks/python-default.lock, so there is nothing for this image to install.
+FROM docker.io/library/python:3.13-slim
+
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
+
+WORKDIR /app
+COPY --chown=10001:10001 ${{ values.name }}.pex /app/service.pex
+
+# A PEX unpacks its dependency closure on first run, so it needs somewhere
+# writable. Under readOnlyRootFilesystem it has nowhere and dies in the PEX
+# bootstrap before any application log line appears. The chart mounts an
+# emptyDir at /tmp to match.
+ENV PEX_ROOT=/tmp/pex \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER 10001
+EXPOSE 8000
+ENTRYPOINT ["python", "/app/service.pex"]
+```
+
+The `Dockerfile` is the same four-line shape order-api's has, deliberately — a paved path that builds differently from the services it was modelled on stops being a paved path the first time someone debugs it. There is no `pyproject.toml` and no per-service lock: dependency resolution is the monorepo's job ([§17](phase-7-polyglot-monorepo.md)), which is also what keeps a scaffolded service resolving through Nexus rather than `pypi.org` without the template having to say so. The Python is order-api with the parts a *new* service doesn't have removed: no Kafka producer, no S3 client, no signing key. What survives is the contract the chart depends on — `/healthz`, `/readyz`, `/metrics` on port 8000 — plus one placeholder route so the service does something observable on day one.
+
+> **The metric prefix is computed in Python, not templated.** Service names are hyphenated (`quotes-api`); Prometheus metric names may not be. So `main.py` does `SERVICE.replace("-", "_")` rather than emitting `quotes-api_requests_total`, which would be rejected at registration. Doing it in code instead of in the scaffolder means a rename can never produce an invalid metric name, and `tests/test_api.py` asserts exactly that.
 
 For the chart to render these files, add one template that reads the directory:
 
@@ -408,6 +525,14 @@ spec:
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ $svc.port | quote }}
     spec:
+      # Kubernetes injects a Docker-link env var per Service in this namespace:
+      # ORDER_API_PORT, ORDER_WORKER_PORT, PRICING_PORT, FRONTEND_PORT — each
+      # set to "tcp://<clusterIP>:<port>". Any app reading a variable of that
+      # name as its own config gets a URL where it expected an integer:
+      #   ValueError: invalid literal for int() with base 10: 'tcp://10.96...'
+      # Env vars outrank every other config source, so the app cannot win.
+      # Service links are a Docker-links relic nothing here uses.
+      enableServiceLinks: false
       serviceAccountName: {{ $svc.name }}
       imagePullSecrets:
         - name: {{ $.Values.global.imagePullSecret }}
@@ -432,6 +557,16 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
+          # A scaffolded service is packaged as a PEX, which unpacks its
+          # dependency closure on first run and therefore needs somewhere
+          # writable. Under readOnlyRootFilesystem it has nowhere and dies in the
+          # PEX bootstrap before any application log line appears:
+          #   FileNotFoundError: No usable temporary directory found
+          # Same mount order-api and pricing carry, for the same reason.
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
 ---
 apiVersion: v1
 kind: Service
@@ -449,6 +584,15 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ $svc.name }}
+  annotations:
+    # Same pair as order-api and frontend, and for the same reason: the edge is
+    # outside the mesh, the backend is inside it under STRICT mTLS. Without
+    # these, every scaffolded service comes up healthy and answers the browser
+    # with "upstream connect error ... connection termination" — which is the
+    # worst possible first experience of a paved path (§14.6), because the
+    # service is fine and the template is what's broken.
+    nginx.ingress.kubernetes.io/service-upstream: "true"
+    nginx.ingress.kubernetes.io/upstream-vhost: "{{ $svc.name }}.{{ $.Release.Namespace }}.svc.cluster.local"
 spec:
   ingressClassName: nginx
   rules:
@@ -578,9 +722,11 @@ spec:
 
 ### 14.8 Build and deploy the portal
 
-The portal is built by our own CI, on the same path as everything else — it's just a bigger image. It needs a Dockerfile CI can actually run (see the warning below for why the generated one will not do), and a build step in the generator:
+The portal is built by our own CI, on the same path as everything else — it's just a bigger image. It needs a Dockerfile CI can actually run, and a build step in the generator.
 
-**`portal/Dockerfile`** — Backstage's [multi-stage build](https://backstage.io/docs/deployment/docker#multi-stage-build), which compiles the project *inside* the image. This is the one CI uses; see the warning below for why the generated `packages/backend/Dockerfile` cannot be.
+Write `portal/Dockerfile`, Backstage's [multi-stage build](https://backstage.io/docs/deployment/docker#multi-stage-build), and use it for every build of the portal — local and CI alike. `create-app` also generates `packages/backend/Dockerfile`; ignore it. That one is a *host build* that only copies a `dist/` you must have produced beforehand with a local Node toolchain, and our CI build step is a Buildah pod with no Node in it. The multi-stage file compiles the project inside the image, so `buildah bud` against the `portal` directory is self-contained.
+
+**`portal/Dockerfile`**
 
 ```dockerfile
 # Multi-stage build, from https://backstage.io/docs/deployment/docker#multi-stage-build
@@ -734,14 +880,7 @@ plugins
 *.local.yaml
 ```
 
-> **`packages/*/src` must not be excluded.** For a host build the TypeScript sources are dead weight — `dist/` is already compiled, so excluding them just makes the context smaller. The multi-stage build compiles *from* those sources, and without them `yarn tsc` fails with:
->
-> ```
-> error TS18003: No inputs were found in config file '/app/tsconfig.json'.
-> Specified 'include' paths were '["packages/*/src", ...]'
-> ```
->
-> Which names `tsconfig.json` and never mentions Docker, so it sends you into TypeScript config rather than at what you copied into the build context. `plugins` stays excluded, because the `COPY plugins plugins` line is commented out above.
+> **Leave `packages/*/src` commented out.** `create-app` writes that exclusion for a host build, where `dist/` is already compiled; our multi-stage build compiles *from* those sources, and excluding them fails `yarn tsc` with `error TS18003: No inputs were found in config file '/app/tsconfig.json'` — an error that names `tsconfig.json` and never mentions Docker. `plugins` stays excluded, because the `COPY plugins plugins` line is commented out above.
 
 **`.buildkite/pipeline.sh`** — after the services loop, before the deploy step:
 
@@ -790,58 +929,31 @@ cat <<YAML
 YAML
 ```
 
-> **Twenty to forty minutes, in a `vfs`-backed privileged pod, on your laptop.** That is the honest cost of building Backstage in-cluster, and `vfs` (which we chose in §12.5 because overlay-in-overlay needs privileges we'd rather not grant) is most of it. Two mitigations worth knowing: `branches: "main"` keeps it off every branch build, and while you are iterating on the portal you should build it on the host and let CI own it only once it's stable. Waiting is not a lesson. On the host, use the Dockerfile `create-app` generated — but note that it is a **host build** and needs the project compiled first:
+> **Twenty to forty minutes, in a `vfs`-backed privileged pod, on your laptop.** That is the honest cost of building Backstage in-cluster, and `vfs` (which we chose in §12.5 because overlay-in-overlay needs privileges we'd rather not grant) is most of it. `branches: "main"` keeps it off every branch build; while you are iterating on the portal, build the same file on your laptop instead and let CI own it once it's stable:
 
 ```bash
-cd portal
-yarn install --immutable
-yarn tsc
-yarn build:backend          # produces packages/backend/dist/{skeleton,bundle}.tar.gz
-cd ..
-docker build -f portal/packages/backend/Dockerfile -t nexus:8082/shop/portal:dev portal
+docker build -f portal/Dockerfile -t nexus:8082/shop/portal:dev portal
 docker push nexus:8082/shop/portal:dev
 ```
 
-> [!warning] **Two Dockerfiles, and CI must use the right one.**
-> `create-app` generates `portal/packages/backend/Dockerfile`, whose own header says:
->
-> ```
-> # Before building this image, be sure to have run the following commands in the repo root:
-> #   yarn install --immutable
-> #   yarn tsc
-> #   yarn build:backend
-> ```
->
-> It is a **host build**: it only *copies* `packages/backend/dist/skeleton.tar.gz`, it does not create
-> it. Our CI step is a Buildah pod with no Node toolchain, so pointing it at that file fails after a
-> couple of minutes of pulling base layers:
->
-> ```
-> STEP 12/18: COPY --chown=node:node yarn.lock package.json packages/backend/dist/skeleton.tar.gz ./
-> Error: ... copier: stat: "/packages/backend/dist/skeleton.tar.gz": no such file or directory
-> exit status 125
-> ```
->
-> That is why `portal/Dockerfile` exists: Backstage's documented
-> [multi-stage build](https://backstage.io/docs/deployment/docker#multi-stage-build), which compiles
-> the project *inside* the image and is therefore self-contained. Three stages — a skeleton layer of
-> nothing but `package.json` files so dependency installs cache, a build stage that runs the same
-> `yarn tsc` / `yarn build` you would run by hand, and a production stage carrying only the bundle and
-> production dependencies. It resolves npm through Nexus because `.yarnrc.yml` is copied in before
-> `yarn install`, so the [§14.2](#142-first-an-npm-proxy-in-nexus) proxy applies to the container
-> build too.
->
-> Keep both. The host build is faster while you iterate; the multi-stage one is what CI can actually
-> run.
+Three stages: a skeleton layer of nothing but `package.json` files so dependency installs cache, a build stage that runs `yarn tsc` and `yarn build`, and a production stage carrying only the bundle and production dependencies. It resolves npm through Nexus because `.yarnrc.yml` is copied in before `yarn install`, so the [§14.2](#142-first-an-npm-proxy-in-nexus) proxy applies to the container build too.
 
-Backstage needs a database and a GitHub token. The token comes from OpenBao through ESO, exactly like every other secret ([§7.6](phase-1-the-application.md#76-let-kubernetes-pull-from-nexus)):
+Backstage needs a database and a GitHub token. Without the token the catalog is empty and the scaffolder cannot open a pull request, so do this before the install rather than after.
+
+Create a **fine-grained** personal access token at <https://github.com/settings/personal-access-tokens/new>:
+
+- **Repository access** → *Only select repositories* → your fork of this repo.
+- **Permissions** → *Repository permissions* → **Contents: Read-only** (Backstage reads `catalog-info.yaml` and the two template files) and **Pull requests: Read and write** (the scaffolder opens the PRs).
+
+Nothing else. Generate it and copy the `github_pat_…` value — GitHub shows it once.
+
+The token comes into the cluster from OpenBao through ESO, exactly like every other secret ([§7.6](phase-1-the-application.md#76-let-kubernetes-pull-from-nexus)). Store it at `shop/backstage` under the key `github_token`, which is what the `ExternalSecret` below reads:
 
 ```bash
 kubectl create namespace backstage
 
-kubectl -n openbao exec -it openbao-0 -- sh -c '
-  export BAO_ADDR=http://127.0.0.1:8200
-  bao kv put shop/backstage github_token="<your-fine-grained-PAT>"'
+kubectl -n openbao exec -it openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 \
+  bao kv put shop/backstage github_token='github_pat_...'
 ```
 
 **`deploy/platform/backstage-secrets.yaml`**
@@ -917,6 +1029,19 @@ backstage:
     # Without this the kubelet says `no basic auth credentials`.
     pullSecrets:
       - nexus-pull
+  # The chart sets `command: ["node","packages/backend"]` with empty args, which
+  # DISCARDS the image's CMD — and the image's CMD is where the --config flags
+  # live. Without these, Backstage loads only app-config.yaml, whose database
+  # block is `client: better-sqlite3, connection: ':memory:'` for local dev. It
+  # then dies trying to load a native sqlite binding that was never compiled,
+  # and every plugin fails with "Failed to instantiate service 'core.auth'" —
+  # an error that names neither the config nor the database.
+  args:
+    - "--config"
+    - "app-config.yaml"
+    - "--config"
+    - "app-config.production.yaml"
+
   extraEnvVarsSecrets:
     - backstage
 
@@ -932,30 +1057,24 @@ postgresql:
     password: backstage-change-me
 ```
 
-> [!warning] **Do not set `POSTGRES_*` in `extraEnvVars` — the chart already does.**
-> With `postgresql.enabled: true` the chart wires the backend to its own Postgres subchart, emitting
-> exactly the four variables it needs. Adding them again by hand produces a Deployment with each key
-> twice, and the install dies before anything is created:
->
-> ```
-> Error: server-side apply failed for object backstage/backstage apps/v1, Kind=Deployment:
->   .spec.template.spec.containers[name="backstage-backend"].env:
->     duplicate entries for key [name="POSTGRES_HOST"]
->     ... POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD
-> ```
->
-> Server-side apply treats `env` as a list keyed by `name` and **rejects duplicate keys outright**.
-> Client-side apply silently kept the last one, which is why this pattern survived in a lot of
-> older values files — the strictness is new, and it is an improvement: two entries for the same
-> variable is always a bug, it just used to be a *silent* one.
->
-> The values the chart generates are identical to the ones being added here, so deleting the block
-> changes nothing about the running pod. Keep `extraEnvVarsSecrets`, which is what injects
-> `GITHUB_TOKEN` from [§14.8](#148-build-and-deploy-the-portal).
->
-> If you point Backstage at a database you control (`postgresql.enabled: false`), then you **do** set
-> `POSTGRES_*` yourself — that is the case `extraEnvVars` exists for, and there is no duplicate
-> because the chart contributes nothing.
+> **Do not add `POSTGRES_*` to `extraEnvVars`.** With `postgresql.enabled: true` the chart already
+> emits those four variables, and a second copy makes the install fail outright — server-side apply
+> treats `env` as a list keyed by `name` and rejects duplicate keys. `extraEnvVars` is for the other
+> case: point Backstage at a database you run yourself (`postgresql.enabled: false`) and you set
+> `POSTGRES_*` there, because then the chart contributes nothing.
+
+Push first. Backstage reads the catalog and both templates from GitHub over the URLs in
+`app-config.production.yaml`, so those files have to be on `main` in your fork before the portal starts
+looking for them:
+
+```bash
+git add portal catalog-info.yaml deploy/backstage deploy/platform/backstage-secrets.yaml \
+        deploy/charts/order-platform infra/backstage-values.yaml .buildkite/pipeline.sh
+git commit -m "feat(portal): backstage with service and infrastructure paved paths"
+git push
+```
+
+Then install:
 
 ```bash
 helm repo add backstage https://backstage.github.io/charts
@@ -968,33 +1087,20 @@ helm upgrade --install backstage backstage/backstage \
   --values infra/backstage-values.yaml --wait
 ```
 
-Open <http://backstage.localtest.me>, sign in as Guest, and you should see the catalogue from §14.5 and both templates under **Create**.
+ESO refreshes on its own schedule, so restart the portal once to be certain it is running with the token you just stored:
 
-> **You just went back to deploying by hand, and you should notice.**
-> [Phase 1](phase-1-the-application.md#105-install-it) installed the application with `helm install`
-> from your laptop. [Phase 3](phase-3-delivery.md#114-the-app-of-apps) took that away and made git the
-> deploy button. And here you are, three phases later, typing `helm upgrade --install` again with a
-> tag you set by hand — for the one component whose entire job is paving paths for other people.
->
-> That is not an oversight, it is the exercise: making the portal an Argo CD `Application` and
-> teaching CI to bump its tag is [§11.4](phase-3-delivery.md#114-the-app-of-apps) and
-> [§12.5](phase-3-delivery.md#125-the-pipeline) applied one more time, and doing it yourself is a far
-> better test of whether Phase 3 landed than reading a third worked example. Notice the irony while
-> you're at it — **the tool whose whole purpose is paving paths is currently the least paved thing in
-> the cluster.** That is also how platform teams usually look from the outside.
+```bash
+kubectl -n backstage rollout restart deployment/backstage
+kubectl -n backstage rollout status  deployment/backstage
+```
+
+Open **<https://backstage.localtest.me>** — `https`, not `http`. The frontend calls `crypto.randomUUID`, which browsers expose only in a secure context, so over plain http the UI loads a blank page and nothing else. The certificate is the ingress controller's self-signed default; accept the warning. Sign in as Guest and you should see the catalogue from §14.5 and both templates under **Create**.
 
 > **The portal is the one thing here still deployed by `helm install` from your laptop** — imperatively, outside GitOps, with a tag you set by hand. That is a deliberate stopping point, not an oversight: making it an Argo CD `Application` and teaching CI to bump its tag is exactly the work of [§11.4](phase-3-delivery.md#114-the-app-of-apps) and [§12.5](phase-3-delivery.md#125-the-pipeline) applied one more time, and doing it yourself is a better test of whether those two sections landed than reading a third worked example. Note the irony while you're at it — **the tool whose entire job is paving paths for other people is, right now, the least paved thing in the cluster.** That is how platforms usually look.
 
 > **Guest sign-in means there is no such thing as "who did that".** Every scaffolder run, every PR the portal opens, is attributed to the one GitHub token — so the audit trail says "the portal did it" and stops. That is tolerable on a laptop and indefensible anywhere else, because the portal's token is more privileged than any individual's. The production shape is GitHub OAuth for user identity plus the scaffolder acting as a GitHub App, so the PR is opened *on behalf of* the person who filled in the form. Wire that up before a second person uses your portal, not after.
 
-> **The bundled PostgreSQL is a `bitnamilegacy` image, and that's a smell worth tracking.** Bitnami's catalogue changes broke a lot of charts in 2025 and the Backstage chart's default now points at the legacy registry. It works, and for a laptop it is fine. For anything durable, run Postgres you actually control — an operator, or a managed database — and set `postgresql.enabled: false` with `POSTGRES_*` pointing at it. **Never let your portal's database be the least-maintained component in your platform**, because when it dies you lose the catalog, and the catalog is what you'd have used to find out what depends on it.
-
-```bash
-git add portal catalog-info.yaml deploy/backstage deploy/platform/backstage-secrets.yaml \
-        deploy/charts/order-platform infra/backstage-values.yaml .buildkite/pipeline.sh
-git commit -m "feat(portal): backstage with service and infrastructure paved paths"
-git push
-```
+> **The bundled PostgreSQL is a `bitnamilegacy` image, and that's a smell worth tracking.** The chart's default points at Bitnami's legacy registry, which is where images go once they stop being the maintained line. It works, and for a laptop it is fine. For anything durable, run Postgres you actually control — an operator, or a managed database — and set `postgresql.enabled: false` with `POSTGRES_*` pointing at it. **Never let your portal's database be the least-maintained component in your platform**, because when it dies you lose the catalog, and the catalog is what you'd have used to find out what depends on it.
 
 ---
 

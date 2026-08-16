@@ -255,6 +255,14 @@ spec:
 
 > **`prune: false` on platform, `prune: true` on the app.** Pruning is what makes git authoritative — delete a manifest, the object disappears. That's correct for application workloads. For shared infrastructure it's a footgun: a bad rebase that drops a file would delete your Kafka cluster and its PVCs. Different blast radius, different setting. Decide this per-Application, deliberately.
 
+> **Every CRD an Application references must already exist when it syncs.** Argo CD does not skip a
+> resource whose CRD is missing — it fails the entire Application, so one unrecognised `PodMonitor`
+> leaves every workload in `shop` reported as `Missing`. The chart's `serviceMonitor` and `podMonitor`
+> toggles both default to `false` for exactly this reason and are flipped only once
+> [§13.2](phase-2-observability.md#132-install) has installed the `monitoring.coreos.com` CRDs. The
+> same rule applies to anything else you add under `deploy/platform`: operator first, custom resources
+> second.
+
 > **`selfHeal: true` means `kubectl edit` is now temporary.** Argo reverts your change within seconds. This is the correct default and it will infuriate you the first time you're debugging live. The escape hatch is `argocd app set <app> --sync-policy none` for the duration of the incident — do that consciously rather than fighting the controller.
 
 Push and bootstrap:
@@ -297,7 +305,7 @@ The free tier is sufficient for everything here.
 
 1. Sign up at <https://buildkite.com>, create an organization.
 2. **Agents → Clusters**. A cluster is a pool of agents with its own tokens and queues. Create one named `local`.
-3. Inside `local`, go to **Queues** and confirm a queue named `default` exists. Create a queue named **`kubernetes`** — our agent stack advertises this tag, and steps target it. On the *"Select your agent infrastructure"* step you **must** choose **Self-hosted**, not Hosted.
+3. Inside `local`, go to **Queues** and confirm a queue named `default` exists. Create a queue named **`kubernetes`** — our agent stack advertises this tag, and steps target it. On the *"Select your agent infrastructure"* step the form defaults to **Hosted**; you **must** change it to **Self-hosted**, because a hosted queue runs jobs on Buildkite's machines instead of your cluster and the infrastructure type cannot be changed after the queue is created.
 4. Go to **Agent tokens → New token**, description `kind-devops`. **Copy the token now** — it is shown once.
 5. **Pipelines → New pipeline**:
    - Name: `order-platform`
@@ -313,28 +321,6 @@ The free tier is sufficient for everything here.
    - Create the pipeline. Buildkite will offer to add a GitHub webhook — accept it, authorising the GitHub App when prompted.
 
 > **Why the UI-side pipeline is one step.** The pipeline stored in Buildkite's UI is a bootstrap; the real definition is *generated* by `.buildkite/pipeline.sh` **in your repo** ([§12.5](#125-the-pipeline)). That means pipeline changes are reviewed in PRs alongside the code they build, and a branch can change its own build. Never grow the UI-side pipeline beyond this step.
-
-> [!warning] **Self-hosted vs Hosted is the single most expensive click in this tutorial.**
-> Buildkite's New Queue form defaults to **Hosted**, and a hosted queue runs jobs on Buildkite's own
-> machines — not your kind cluster. Everything still *looks* right: the queue says `Connected`, your
-> `agent-stack-k8s` pod is `Running`, and builds start. But the controller logs
-> `job tags do not match expected tags in configuration, skipping` on a loop, because a hosted agent
-> tags itself `namespace-experiments=docker.builder=local` and your controller only advertises
-> `queue=kubernetes`. Buildkite's hosted agent then runs the job instead, hits the `kubernetes`
-> plugin — which `agent-stack-k8s` *interprets* rather than downloads — tries to `git clone`
-> `buildkite-plugins/kubernetes-buildkite-plugin`, and dies with:
->
-> ```
-> Can't issue repository access token: The repo you've requested a token for
-> (buildkite-plugins/kubernetes-buildkite-plugin) is in a different org to the
-> repo for this job (<you>/modern-devops).
-> 🚨 Error: failed to checkout plugin kubernetes: exit status 128
-> ```
->
-> A Git authentication error about a repository you have never heard of is what a wrong queue type
-> looks like. The infrastructure choice **cannot be changed after creation** — the queue's Settings
-> page offers only description, capacity and *Delete Queue* — so getting it wrong means deleting the
-> queue and making a new one. Check it before you click Create.
 
 > **`agents: { queue: kubernetes }` is not optional.** Every job in a cluster is assigned to a queue, and a step with no `queue` tag lands on the cluster's *default* queue. Our agent stack ([§12.3](#123-install-the-agent-stack-in-kubernetes)) advertises `queue=kubernetes` only, so an untagged bootstrap step sits in the `default` queue forever with no agent to run it — a build stuck at "waiting for agent" with no error.
 
@@ -405,7 +391,9 @@ The log should show the controller connecting and polling. In the Buildkite UI, 
 
 ### 12.4 Credentials the build itself needs
 
-The build pushes images to Nexus. Source that credential from OpenBao, in the `buildkite` namespace.
+The build needs the Nexus credential twice, in two different shapes: Buildah reads a plain auth file
+to *push* images, and the kubelet needs a `kubernetes.io/dockerconfigjson` Secret to *pull* the CI
+image the verify step runs in. Both come from the same OpenBao entry, in the `buildkite` namespace.
 
 **`deploy/platform/buildkite-secrets.yaml`**
 
@@ -441,13 +429,57 @@ spec:
       remoteRef: { key: nexus, property: username }
     - secretKey: password
       remoteRef: { key: nexus, property: password }
+
+---
+# Any build step that runs an image out of Nexus needs the kubelet in this
+# namespace to hold credentials of its own. nexus-push above is Opaque — a
+# Buildah auth file — and the kubelet cannot use it as an imagePullSecret; that
+# requires the kubernetes.io/dockerconfigjson type. Same credential, different
+# Secret type, because two different consumers want two different shapes.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: nexus-pull
+  namespace: buildkite
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: nexus-pull
+    creationPolicy: Owner
+    template:
+      type: kubernetes.io/dockerconfigjson
+      data:
+        .dockerconfigjson: |
+          {
+            "auths": {
+              "nexus:8082": {
+                "username": "{{ .username }}",
+                "password": "{{ .password }}",
+                "auth": "{{ printf "%s:%s" .username .password | b64enc }}"
+              }
+            }
+          }
+  data:
+    - secretKey: username
+      remoteRef: { key: nexus, property: username }
+    - secretKey: password
+      remoteRef: { key: nexus, property: password }
 ```
 
 ```bash
 kubectl apply -f deploy/platform/buildkite-secrets.yaml
-kubectl -n buildkite get externalsecret nexus-push
+kubectl -n buildkite get externalsecret          # both SecretSynced=True
 kubectl -n buildkite get secret nexus-push -o jsonpath='{.data.config\.json}' | base64 -d | jq .
+kubectl -n buildkite get secret nexus-pull -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d | jq .
 ```
+
+> **Secrets do not cross namespaces.** `nexus-pull` already exists in `shop`
+> ([§7.6](phase-1-the-application.md#76-let-kubernetes-pull-from-nexus)), and that instance is invisible from
+> `buildkite`. Every namespace that pulls from Nexus needs its own copy, which is why the
+> `ExternalSecret` is duplicated rather than shared.
 
 ### 12.5 The pipeline
 
@@ -773,7 +805,7 @@ argocd app get order-platform
 kubectl -n shop get pods
 ```
 
-You should see `order-api` and `order-worker` pods Running, on images tagged with your commit SHA:
+You should see every workload the chart enables Running, on images tagged with your commit SHA:
 
 ```bash
 kubectl -n shop get deploy -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.template.spec.containers[0].image}{"\n"}{end}'

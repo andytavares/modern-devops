@@ -41,9 +41,16 @@ curl -sS -X POST http://shop.localtest.me/orders \
 {
   "order_id": "3f2b...",
   "status": "accepted",
-  "s3_key": "orders/2026-08-15/3f2b....json"
+  "s3_key": "orders/2026-08-15/3f2b....json",
+  "total_amount_cents": 13498,
+  "discount_cents": 1499,
+  "rule_applied": "bulk-10pct",
+  "priced_by": "v2"
 }
 ```
+
+`priced_by` is `pricing`'s own report of which version served the request
+([§18.1](phase-7-polyglot-monorepo.md#181-the-contract)) — it is what makes the canary visible.
 
 ### 15.2 Follow it through every hop
 
@@ -98,29 +105,36 @@ done
 
 The point of all this is that a code change reaches production without you touching the cluster.
 
-```bash
-cd services/order-api
-# Add a field to the response
-python3 - <<'PY'
-p = 'app/main.py'
-s = open(p).read()
-s = s.replace(
-    'return {"order_id": order_id, "status": "accepted", "s3_key": key}',
-    'return {"order_id": order_id, "status": "accepted", "s3_key": key, '
-    '"version": settings.service_version}'
-)
-open(p, 'w').write(s)
-PY
-cd ../..
+Add a field to the response. In `services/order-api/order_api/main.py`, the `create_order` handler
+ends with a `return` dict — add one line to it:
 
-git add services/order-api/app/main.py
+```python
+    return {
+        "order_id": order_id,
+        "status": "accepted",
+        "s3_key": key,
+        "version": settings.service_version,     # <- add this
+        "total_amount_cents": pricing.total_amount_cents,
+        "discount_cents": pricing.discount_cents,
+        "rule_applied": pricing.rule_applied,
+        "priced_by": pricing.served_by,
+    }
+```
+
+The spec is derived from the route signatures, so regenerate it in the same commit or
+`tests/test_openapi_spec.py` fails the build ([§19.6](phase-7-polyglot-monorepo.md#196-two-checks-nothing-else-would-catch)):
+
+```bash
+pants run services/order-api:dump-openapi > services/order-api/openapi.json
+
+git add services/order-api/order_api/main.py services/order-api/openapi.json
 git commit -m "feat(order-api): return service version in the order response"
 git push
 ```
 
 Now watch, in order:
 
-1. **Buildkite** — the pipeline starts within seconds (GitHub webhook). Tests run in parallel, then two Buildah builds, then the tag bump.
+1. **Buildkite** — the pipeline starts within seconds (GitHub webhook). One `lint · typecheck · test · package` step for every language ([§19.5](phase-7-polyglot-monorepo.md#195-one-ci-step-instead-of-two)), then the Buildah builds in parallel, then the tag bump.
 2. **Nexus** — <http://localhost:8081> → Browse → `docker-hosted`. A new tag appears, named for your commit SHA.
 3. **GitHub** — a `chore(deploy): order-platform <sha> [skip ci]` commit lands on `main`.
 4. **Argo CD** — <http://argocd.localtest.me>. `order-platform` goes `OutOfSync` → `Syncing` → `Healthy`.
@@ -138,7 +152,7 @@ Now watch, in order:
 
 ### 15.4 Break it on purpose
 
-You don't understand a system until you've watched it fail. Do all five.
+You don't understand a system until you've watched it fail. Do all six.
 
 **① A failing test must block the deploy.**
 
@@ -189,7 +203,7 @@ for i in $(seq 1 50); do
     -d '{"customer":"chaos","sku":"W","quantity":1,"amount_cents":1}'
   sleep 0.2
 done
-aws dynamodb scan --table-name orders --select COUNT | jq .Count
+$AWSCLI dynamodb scan --table-name orders --select COUNT | jq .Count
 ```
 
 With `replicas: 3` and `min.insync.replicas: 2`, writes continue. Strimzi recreates the broker and it rejoins the ISR. Now try it with two brokers down — `acks=all` writes start failing and order-api returns 502. **That's the system working as designed**: refusing writes it cannot guarantee, rather than accepting them and losing them.
@@ -232,8 +246,8 @@ The closing act, and the only one that tests the platform as a *product* rather 
 Then watch it happen, without doing anything else:
 
 ```bash
-# CI discovered it because services/quotes-api/Dockerfile exists (§12.5).
-# Watch the build list gain a step:
+# CI discovered it because services/quotes-api/ has both a BUILD file and a
+# Dockerfile (§19.5). Watch the build list gain a step:
 BUILDKITE_COMMIT="$(git rev-parse origin/main)" .buildkite/pipeline.sh | grep 'build quotes-api'
 
 # Argo CD renders it because the chart globs services/*.yaml (§14.6):
