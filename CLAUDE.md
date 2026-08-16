@@ -7,8 +7,10 @@ research get written *back* into it. It compounds. The tutorial does not.
 ## Layout
 
 ```
-modern-devops-tutorial.md   # the primary source. Long-form, opinionated, section-numbered (§N.M).
-docs/                       # the phased edition of the same material, in build order.
+modern-devops-tutorial.md   # GENERATED from docs/. Do not edit. Regenerate with
+                            #   python3 checks/build_single_edition.py . --write
+docs/                       # THE SOURCE. Seven phases in build order, section-numbered (§N.M).
+checks/                     # the tests that keep the docs honest (see rule 12)
   README.md                 # the map: seven phases, why that order, what each one ends with
   phase-N-*.md              # one file per phase; original §N.M numbering preserved
   appendices.md             # versions, troubleshooting, omissions, command reference
@@ -25,7 +27,9 @@ wiki/                       # CLAUDE-OWNED. Every file here is written and maint
 ## Rules
 
 1. **Never modify `raw/`.** It is the immutable source layer.
-2. **Never modify `modern-devops-tutorial.md` during a wiki operation.** The tutorial changes only
+2. **Never edit `modern-devops-tutorial.md` directly** — it is assembled from `docs/` and any edit is
+   overwritten on the next regeneration. Change the phase file, then regenerate. And never modify it
+   during a wiki operation: The tutorial changes only
    when the human asks for a tutorial change. If the wiki contradicts the tutorial, that is a
    finding to report, not a thing to silently fix.
 3. **Always update `wiki/index.md` and `wiki/log.md`** after any operation that creates or changes a page.
@@ -40,6 +44,13 @@ wiki/                       # CLAUDE-OWNED. Every file here is written and maint
 10. **Kebab-case filenames**: `external-secrets-operator.md`.
 11. **Uncertainty is content.** "We don't know whether X" belongs in `open-questions.md`, not in a
     confident sentence.
+12. **The tutorial is a progressive build, and the war stories do not live in it.** Phase 1 shows
+    `order-api` before gRPC exists; that is correct, and back-porting the end state would hand the
+    reader code importing a service they have not built. A reader who follows phases 0-7 in order
+    must end up holding this repo, with nothing failing on the first attempt. Defects found by
+    running it are recorded in `wiki/` and in Appendix B — the phase text states the correct step
+    and moves on. `checks/` enforces what it can: the single-file edition is assembled, every
+    listing must name a real path, and a listing that shows a whole file must show the current one.
 
 ## Documentation lookup order
 
