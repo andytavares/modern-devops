@@ -13,7 +13,15 @@
 # "dev". So the old --build-arg VERSION=$SHA is gone; set SERVICE_VERSION at
 # deploy time (e.g. in the Kubernetes manifest env) instead.
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY order-worker /order-worker
+# --chmod is required, not cosmetic. `pants package` writes an executable
+# binary, but the verify step uploads it as a Buildkite artifact and the build
+# step downloads it — and artifact transfer does not preserve file modes. The
+# bit is lost between the two pods, and the failure is not a build error but a
+# runtime one, with no application output at all:
+#   exec: "/order-worker": permission denied
+# The PEX services are immune only because they are invoked as
+# `python /app/x.pex` rather than executed directly.
+COPY --chmod=0755 order-worker /order-worker
 USER 65532:65532
 EXPOSE 9090
 ENTRYPOINT ["/order-worker"]
