@@ -86,6 +86,18 @@ explicit waypoint proxy before any L7 policy works. RAM-constrained? Ambient.
   `Namespace` object, it recreates it without any label you applied by hand — pods come back `1/1`,
   STRICT rejects their traffic, [[kiali]] goes empty and the `PodMonitor` matches nothing, all with no
   error printed. Put `istio-injection: enabled` in the manifest (hit 2026-08-16).
+- **HTTP is routed by authority, not by address — which is what breaks Ingress under STRICT.** A
+  request addressed to the right ClusterIP still lands in `PassthroughCluster` (plaintext, then reset)
+  if its `Host:` header names something the mesh doesn't know, like `app.localtest.me`. This is why an
+  in-mesh [[ingress-nginx]] needs `upstream-vhost` and not just `service-upstream`; see that page for
+  the full diagnosis. Hit 2026-08-16.
+- **`connection_security_policy` is the only honest answer to "is mTLS on?"** A `200` proves bytes
+  moved, nothing more — plaintext through `PassthroughCluster` returns `200` whenever the destination
+  isn't STRICT. Read the **destination** reporter's `istio_requests_total`; source-side reports
+  `unknown` even when the connection is fine, so checking the wrong side reads as a failure.
+- **Sidecars are injected as native sidecars on Kubernetes 1.29+** — `initContainers` with
+  `restartPolicy: Always`, not `containers`. `kubectl get pod -o jsonpath='{.spec.containers[*].name}'`
+  shows only the app and reads exactly like injection never happened. `READY 2/2` is the reliable tell.
 - **Drain the data plane before removing the control plane** — uninstalling `istiod` while sidecars run
   leaves proxies on last-known config that fail closed on restart.
 

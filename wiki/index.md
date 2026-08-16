@@ -26,6 +26,12 @@ whose sections are cited throughout as `§N.M`.
 > the same lesson. Each of the three pages now names the commercial tool, what it costs, what
 > concretely transfers, and **where it does not**.
 >
+> **The edge was broken the whole time and the platform never said so (2026-08-16).** Every Ingress
+> returned `upstream connect error … connection termination` while all nine pods were `2/2 Running`
+> and Argo read `Synced`/`Healthy`. [[ingress-nginx]] in the mesh under STRICT mTLS needs *two*
+> annotations — `service-upstream` **and** `upstream-vhost` — and fixing one alone does nothing. New
+> §9.4 subsection in both editions; full diagnosis on [[ingress-nginx]] and [[istio]].
+>
 > **Two defects found by running it on 2026-08-16.** A secret written to OpenBao was invisible to the
 > cluster for up to an hour while [[external-secrets-operator]] reported `Ready=True` — the escape
 > hatch and the two non-leaking diagnostics are now on that page and in [[secrets-management]]. And

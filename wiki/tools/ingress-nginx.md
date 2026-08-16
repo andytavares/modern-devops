@@ -50,6 +50,38 @@ Kept as the edge rather than replaced by an Istio gateway (§9.1) because it alr
   its [[istio]] sidecar and STRICT mTLS turns every page load into a connection reset. The tutorial
   said `daemonset/` in two places until 2026-08-15.
 
+> [!warning] **In-mesh with STRICT mTLS, an Ingress needs two annotations or every page load
+> fails.** Observed 2026-08-16 on `app.localtest.me` and `shop.localtest.me`, both returning
+> `upstream connect error or disconnect/reset before headers. reset reason: connection termination`
+> while all nine pods were `2/2 Running` and Argo reported `Synced`/`Healthy`.
+>
+> Two independent mismatches, and fixing only one changes nothing:
+>
+> 1. **NGINX proxies to pod IPs, not the Service.** The controller resolves endpoints and balances
+>    across `10.244.1.222:8000` directly. [[istio]] identifies destinations by service; a bare
+>    endpoint IP names none, so the sidecar has nothing to originate mTLS *to*.
+>    → `nginx.ingress.kubernetes.io/service-upstream: "true"` replaces the endpoint list with a
+>    single ClusterIP endpoint ([confirmed in `controller.go`](https://github.com/kubernetes/ingress-nginx/blob/main/internal/ingress/controller/controller.go),
+>    `getServiceClusterEndpoint`).
+> 2. **NGINX preserves the client's `Host:`.** Envoy routes HTTP by authority, not address, so the
+>    request still says `app.localtest.me` — which matches no mesh service. Envoy sends it to
+>    `PassthroughCluster` as plaintext, and the destination sidecar resets it.
+>    → `nginx.ingress.kubernetes.io/upstream-vhost: "<svc>.<ns>.svc.cluster.local"`.
+>
+> The diagnosis that ends the argument is in the source sidecar's stats — `destination_service_name`
+> reads `PassthroughCluster` with `response_flags.UC` while broken:
+>
+> ```bash
+> kubectl -n ingress-nginx exec deploy/ingress-nginx-controller -c istio-proxy -- \
+>   pilot-agent request GET 'stats?filter=istio_requests_total' | grep -o 'destination_service_name\.[A-Za-z-]*'
+> ```
+>
+> And a `200` is **not** proof of the fix — it only proves bytes moved. Check the destination
+> reporter for `connection_security_policy.mutual_tls` with a real `source_principal`
+> (`spiffe://cluster.local/ns/ingress-nginx/sa/ingress-nginx`). Fixed in the chart for `order-api`,
+> `frontend` **and** the scaffolded-service template, since otherwise every paved-path service
+> ([[paved-paths]]) ships broken.
+
 ## Official docs
 
 - Docs: https://kubernetes.github.io/ingress-nginx/

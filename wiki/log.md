@@ -314,3 +314,33 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   drift test. The test was verified by making it fail (bogus path added to the spec), not merely by
   watching it pass. A hand-maintained API spec is a lie with a timestamp on it. Pages:
   [[backstage]], [[grpc]], [[order-platform]].
+
+- **2026-08-16** — **Every Ingress in the platform was returning `upstream connect error … reset
+  reason: connection termination`, and nothing in the platform said so.** All nine pods `2/2
+  Running`, [[argo-cd]] `Synced`/`Healthy`, `helm lint` clean, Ingress reporting an address. The only
+  component that disagreed was a browser. Two independent mismatches between [[ingress-nginx]] and
+  [[istio]] STRICT mTLS, and fixing either alone changes nothing: NGINX proxies to **pod IPs**, which
+  name no service for Istio to originate mTLS to (`service-upstream`), and NGINX preserves the
+  client's **`Host:`**, which Envoy routes on — `app.localtest.me` matches no mesh service, so the
+  request goes to `PassthroughCluster` as plaintext and the destination sidecar resets it
+  (`upstream-vhost`). Diagnosed from the source sidecar's `istio_requests_total`, which named
+  `destination_service_name.PassthroughCluster` with `response_flags.UC` and
+  `connection_security_policy.unknown`. Fixed in the chart for `order-api`, `frontend` **and** the
+  scaffolded template — otherwise every service produced by a paved path ([[paved-paths]]) ships
+  broken, which is the worst possible first impression of a golden path. Verified by the destination
+  reporter: `connection_security_policy.mutual_tls`, `source_principal
+  spiffe://cluster.local/ns/ingress-nginx/sa/ingress-nginx`. A `200` was explicitly *not* accepted as
+  proof. New §9.4 subsection in both tutorial editions; pages [[ingress-nginx]], [[istio]].
+  Two smaller corrections recorded on [[istio]] along the way, both of which cost time by looking
+  like the bug: sidecars are injected as **native sidecars** on k8s 1.29+ (`initContainers` with
+  `restartPolicy: Always`), so `.spec.containers` shows only the app and reads exactly like injection
+  failed; and source-side `connection_security_policy` reports `unknown` even on healthy mTLS, so
+  checking the wrong reporter looks like a broken mesh.
+
+- **2026-08-16** — **[[argo-cd]] reported `Synced` against a revision it had not applied.**
+  `order-worker` sat in `CrashLoopBackOff` on image tag `1fe3e2087e87` while `values.yaml` at the
+  synced revision said `35e1623ebb53`, with `automated.selfHeal: true` and a `Succeeded` sync
+  operation 52 minutes stale. A hard refresh (`argocd.argoproj.io/refresh=hard`) immediately pulled
+  the new tag and the app went `Healthy`. Worth knowing because the *correct* reading of
+  `Synced`/`Degraded` here was "Argo's cache is lying", and every other signal pointed at the
+  workload.
