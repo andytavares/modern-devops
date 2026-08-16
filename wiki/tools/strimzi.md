@@ -36,6 +36,26 @@ quorum, brokers join.
 - **Operator, not StatefulSet** (§8.1): the generalisable lesson is that stateful systems on
   Kubernetes want an operator, and "I'll just write a StatefulSet" is how you learn why.
 
+## Why this, not the alternative
+
+Apache Kafka is Apache-2.0 — the broker is free. What costs money is **someone operating it for you**:
+Amazon MSK, Confluent Cloud, or **Confluent for Kubernetes**, the licensed operator Confluent sells to
+do approximately what Strimzi does. Strimzi is the CNCF project filling that slot for nothing, which is
+the same substitution this platform makes with [[openbao]] for Vault and [[sonatype-nexus]] CE for
+Artifactory.
+
+**Not an option:** using the AWS emulator's MSK. [[floci]] advertises `kafka` and answers
+`list-clusters`, but `create-cluster` 500s because that family of emulator launches a real broker as a
+sibling Docker container through `/var/run/docker.sock` — which a pod does not have. See [[floci]].
+
+**What transfers if your employer runs managed Kafka:** topics, partitions, keys, consumer groups,
+rebalancing, `acks=all` with `min.insync.replicas`, and offset-commit ordering. All of it.
+
+**What does not:** broker operations — rolling upgrades, node-pool sizing, watching the operator
+rebuild a broker. That is exactly what the managed services sell. Read §8 as *understanding what the
+managed service does on your behalf*. The `KafkaTopic` CRD is the piece that goes either way:
+topic-as-code is worth wanting wherever the brokers live.
+
 ## Gotchas
 
 - **Strimzi 0.46+ is KRaft-only**; 0.50 is the last release supporting Kubernetes 1.27–1.29. Operators

@@ -266,3 +266,24 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   correct. That is a genuine teaching gap, not a licensing one.
   Also removed a stray merge-conflict marker (`||||||| 12e1572`) that had been committed at the end of
   this file.
+- **2026-08-16** — Kafka choice re-examined after a challenge that the stack used non-standard tools.
+  Audited every Helm chart in the platform: all eleven are published by the upstream project's own
+  GitHub organisation (kubernetes, istio, argoproj, prometheus-community, external-secrets, openbao,
+  kiali, backstage, buildkite) — none from an individual. Strimzi was the one worth questioning, and
+  the Bitnami Kafka chart was evaluated as a replacement and **rejected on evidence**: its default
+  image is `docker.io/bitnami/kafka:4.0.0-debian-12-r10`, and Bitnami's own chart README states that
+  from 2025-08-28 all public-catalog images moved to `docker.io/bitnamilegacy` where they "no longer
+  receive updates", with maintained images behind the commercial Bitnami Secure Images. Swapping would
+  have moved off a free, CNCF-governed, actively maintained operator onto a frozen image.
+  Also tested whether the AWS emulator could stand in for managed Kafka, since that would have removed
+  the question entirely: it cannot. [[floci]] advertises `kafka: running` and answers
+  `list-clusters`, but `create-cluster` returns 500 with
+  `java.net.SocketException: No such file or directory` — that family of emulator launches a real
+  broker as a sibling Docker container via `/var/run/docker.sock`, which a pod does not have and must
+  not be given. Recorded on [[floci]] as the same class of gap as its IAM limitation: the emulator
+  provides the API surface, and the behaviour is the paid part.
+  Kept Strimzi and fixed the actual defect, which was the *justification* — it sold the choice on
+  "KRaft-only", a weak reason that read as arbitrary. Now framed like the other substitutions: Kafka
+  is free, what costs money is someone operating it, Strimzi fills the Confluent-for-Kubernetes slot
+  for nothing — and it states plainly that broker operations are exactly what a managed service sells,
+  so §8 should be read as understanding what MSK does on your behalf. Pages: [[strimzi]], [[floci]].

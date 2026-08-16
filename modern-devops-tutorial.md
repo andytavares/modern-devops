@@ -24,7 +24,7 @@ This is a build-it-yourself platform. You will end up with a single-machine envi
 
 It is not a toy. It is also not production. The difference is stated explicitly every time we take a shortcut, in a **Tradeoff** block. Read those blocks — they are the actual content. Anyone can `helm install`; knowing what you gave up when you did is the job.
 
-**It is shaped like an enterprise, not a startup, and that is a design decision.** Most engineers do not land on a greenfield team that picks its own tools. They land somewhere with an artifact repository they did not choose, a secrets manager another team operates, and a narrow slice of someone else's AWS account — so those things are here, in those roles, with those seams. Where the component a real employer hands you is behind a price tag or an account gate, we substitute the open-source equivalent that teaches the same lesson: **OpenBao** for HashiCorp Vault, **Nexus Repository Community Edition** for Nexus Pro or JFrog Artifactory (from $27,000/year self-managed, as of 2026-08), **Floci** for LocalStack Pro ($39–89 per developer per month; the free tier is non-commercial and requires an account). The substitution is at the *vendor* level, never the *concept* level — each one is chosen because its API, its vocabulary and its failure modes are the ones you will meet at work. Where a substitute stops being equivalent, the section that introduces it says so outright rather than selling you the swap.
+**It is shaped like an enterprise, not a startup, and that is a design decision.** Most engineers do not land on a greenfield team that picks its own tools. They land somewhere with an artifact repository they did not choose, a secrets manager another team operates, and a narrow slice of someone else's AWS account — so those things are here, in those roles, with those seams. Where the component a real employer hands you is behind a price tag or an account gate, we substitute the open-source equivalent that teaches the same lesson: **OpenBao** for HashiCorp Vault, **Nexus Repository Community Edition** for Nexus Pro or JFrog Artifactory (from $27,000/year self-managed, as of 2026-08), **Floci** for LocalStack Pro ($39–89 per developer per month; the free tier is non-commercial and requires an account), **Strimzi** for Confluent for Kubernetes or a managed broker like MSK. The substitution is at the *vendor* level, never the *concept* level — each one is chosen because its API, its vocabulary and its failure modes are the ones you will meet at work. Where a substitute stops being equivalent, the section that introduces it says so outright rather than selling you the swap.
 
 **Time:** 6–9 hours if you type everything. **Disk:** ~40 GB. **RAM:** 16 GB free.
 
@@ -111,7 +111,7 @@ Two languages, because a real platform is polyglot and the interesting problems 
 | Artifacts | **Sonatype Nexus** | What you get at work is Nexus Pro or JFrog Artifactory; we run Nexus **Community Edition**, which is the same binary under a usage cap rather than a different product. One box that is a Docker registry *and* a PyPI proxy *and* a Go module proxy, which teaches the real reason artifact repositories exist: not storage, but a supply-chain choke point. [§5.1](#51-what-nexus-is-actually-for) says what CE does not have. |
 | Secrets | **OpenBao** | What you get at work is HashiCorp Vault. Vault moved to BUSL in 2023; OpenBao is the Linux Foundation fork of its last MPL version and is API-compatible, so paths, policies, KV v2 and Kubernetes auth transfer verbatim — and the ecosystem already speaks it, which is why External Secrets Operator configures it with its **`vault`** provider. [§7.1](#71-the-problem-with-kubernetes-secrets). |
 | Cloud emulation | **Floci** | What you get at work is LocalStack Pro. Its Community edition sunset in March 2026 (auth token required, security updates frozen) and the paid tiers are $39–89 per developer per month. Floci is MIT-licensed, needs no account, and serves the real AWS wire protocol on port 4566 — so what you actually learn is the SDK, not the emulator. [§6.1](#61-why-an-emulator-at-all). |
-| Events | **Kafka via Strimzi** | Strimzi is the reference Kubernetes operator for Kafka and is now KRaft-only, so you learn the modern topology (no ZooKeeper) rather than a legacy one. |
+| Events | **Kafka via Strimzi** | Kafka itself is Apache-2.0 and free; what costs money is *someone running it for you* — MSK, Confluent Cloud, or Confluent for Kubernetes. Strimzi is the CNCF operator that does the same job for free, and it is KRaft-only so you learn the modern topology rather than a ZooKeeper-era one. [§8.1](#81-operator-not-statefulset) says what it does not teach you. |
 | Observability | **Grafana** via kube-prometheus-stack | One chart, the whole metrics pipeline: Prometheus Operator, Grafana, Alertmanager, node-exporter, kube-state-metrics. |
 | Service mesh | **Istio** (sidecar mode) | The mesh with the deepest documentation and the largest install base, and the one whose vocabulary — `PeerAuthentication`, `AuthorizationPolicy`, SPIFFE identities — you will meet in other people's clusters. Linkerd is genuinely simpler and lighter and is the better choice if mTLS is all you want; we take Istio because [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) is the part worth learning and Istio's policy model is the one being copied. |
 | Mesh visualisation | **Kiali** | Purpose-built for Istio: it reads the Prometheus you already have plus Istio's config and draws both the traffic graph and the validation errors. Nothing else tells you *"this AuthorizationPolicy references a ServiceAccount that doesn't exist"* without you going looking. |
@@ -1978,6 +1978,35 @@ git add deploy/ && git commit -m "feat(platform): floci, openbao and external se
 You could write a StatefulSet for Kafka. You'd then own broker ID assignment, rolling restarts that respect in-sync replica counts, certificate rotation, partition rebalancing on scale-up, and KRaft controller quorum management. That is a full-time job.
 
 Strimzi is a Kubernetes **operator**: it turns `Kafka`, `KafkaNodePool` and `KafkaTopic` custom resources into a managed cluster, and encodes the operational knowledge above as controller logic. This is what operators are *for* — stateful software with non-trivial day-2 operations.
+
+> **Why Strimzi, when you will probably never run Kafka yourself.** Be clear about what is and is not
+> free here. **Apache Kafka is Apache-2.0** — the broker costs nothing. What costs money is somebody
+> operating it for you: **Amazon MSK**, **Confluent Cloud**, or **Confluent for Kubernetes**, which is
+> the licensed operator Confluent sells to do roughly what Strimzi does. Strimzi is the CNCF project
+> that fills that slot for free, which is the same substitution as OpenBao for Vault and Nexus CE for
+> Artifactory — the vendor changes, the concepts do not.
+>
+> **And no, the AWS emulator cannot stand in for MSK.** Floci advertises a `kafka` service and
+> `aws kafka list-clusters` answers, so it looks promising. `create-cluster` returns a 500, and the
+> log says why: `java.net.SocketException: No such file or directory`. Emulators in this family do not
+> implement Kafka — they launch a *real* broker as a sibling Docker container through
+> `/var/run/docker.sock`, which a Kubernetes pod does not have and should not be given, since mounting
+> the node's Docker socket into a pod is a container-escape primitive. Verified against this cluster on
+> 2026-08-16. It is the same shape as the IAM gap in [§6](#6-floci-aws-without-aws): the emulator gives
+> you the API surface, and the behaviour is the part that is paid.
+>
+> **What transfers if your job is managed Kafka.** Almost all of the interesting part. Topics,
+> partitions and keys; consumer groups and rebalancing; `acks=all` with `min.insync.replicas` and what
+> happens to writes when the ISR shrinks ([§15.4](#154-break-it-on-purpose)); offset-commit ordering
+> and why committing *after* the downstream write buys you at-least-once with idempotent results. None
+> of that changes because a cloud provider runs the brokers.
+>
+> **What does not transfer.** Broker operations — which is precisely what MSK and Confluent Cloud sell.
+> If your employer runs managed Kafka you will never do a rolling broker upgrade, never size a
+> `KafkaNodePool`, and never watch the operator rebuild a broker after you delete it. Treat §8's
+> operator content as *understanding what the managed service is doing on your behalf*, not as a skill
+> you will bill for. The `KafkaTopic` CRD is the one piece that genuinely goes either way: topic-as-code
+> is a pattern you will want wherever your brokers live.
 
 > **Modern Kafka is KRaft.** ZooKeeper is gone: Kafka nodes take `controller` and/or `broker` roles and manage metadata via a Raft quorum among the controllers. Strimzi 0.46 and later are KRaft-only (0.45 was the last release supporting ZooKeeper). If you find a tutorial with a `zookeeper:` block in the `Kafka` resource, it is out of date.
 

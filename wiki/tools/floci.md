@@ -60,6 +60,24 @@ so nothing in this platform tells you whether an IAM policy is correct. LocalSta
 emulate IAM enforcement. That is the one capability gap that is a real teaching gap rather than a
 licensing one. See also the general emulator caveats under Gotchas.
 
+> [!warning] MSK is advertised but does not work in Kubernetes — verified 2026-08-16
+> `/_localstack/health` lists `"kafka": "running"` and `aws kafka list-clusters` returns cleanly, so it
+> looks like managed Kafka is available. It is not:
+>
+> ```
+> aws kafka create-cluster ... -> An error occurred (500)
+> floci logs: java.net.SocketException: No such file or directory
+> pod volumes: (none)   /var/run/docker.sock: absent
+> ```
+>
+> Emulators in this family do not implement Kafka. They launch a **real broker as a sibling Docker
+> container** via `/var/run/docker.sock`. A pod has no such socket, and mounting the node's Docker
+> socket into a pod is a container-escape primitive — so this is not a configuration gap to close, it
+> is a shape mismatch. Use [[strimzi]] for Kafka here.
+>
+> Same class as the IAM gap above: the emulator gives you the API surface; the behaviour is the paid
+> part.
+
 ## Gotchas
 
 - Credentials are ignored but **must be present** — the SDKs refuse to sign without them, hence the
