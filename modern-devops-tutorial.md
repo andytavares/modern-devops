@@ -4477,6 +4477,11 @@ backstage:
     # note below.
     repository: shop/portal
     tag: "dev"
+    # Secrets do not cross namespaces: §7's nexus-pull lives in `shop`, so the
+    # backstage namespace needs its own (created by backstage-secrets.yaml).
+    # Without this the kubelet says `no basic auth credentials`.
+    pullSecrets:
+      - nexus-pull
   extraEnvVarsSecrets:
     - backstage
 

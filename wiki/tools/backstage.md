@@ -77,6 +77,25 @@ Two paved paths (§14.6–14.7):
 - New catalog files in an existing repo are **not** auto-discovered without a location entry or the
   GitHub discovery provider. This is the one seam the paved path leaves for a human (§14.7).
 
+> [!warning] The `backstage` namespace needs its own pull secret. Hit 2026-08-16
+> ```
+> Failed to pull image "nexus:8082/shop/portal:dev": pull access denied,
+> repository does not exist or may require authorization:
+> authorization failed: no basic auth credentials
+> ```
+>
+> **Secrets do not cross namespaces.** §7's `nexus-pull` lives in `shop` and is invisible from
+> `backstage`, and §14.8's `backstage-secrets.yaml` only created `GITHUB_TOKEN`. Two things were
+> missing: a second [[external-secrets-operator]] `ExternalSecret` rendering a
+> `kubernetes.io/dockerconfigjson` in this namespace, and `backstage.image.pullSecrets` in the values
+> — the chart exposes it and defaults it to `[]`.
+>
+> Read the error carefully, because it conflates two different failures. *"repository does not exist
+> **or** may require authorization"* is the registry declining to say which. Once the pull secret is
+> attached the message changes to a plain `NotFound`, which is the **authenticated** answer and means
+> the image genuinely isn't there. `no basic auth credentials` → missing Secret; `not found` → missing
+> image. Confirmed by watching it flip from one to the other.
+
 > [!warning] Don't set `POSTGRES_*` in `extraEnvVars` — the chart already does. Hit 2026-08-16
 > With `postgresql.enabled: true`, chart 2.10.0 wires the backend to its own Postgres subchart and
 > emits `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER` and `POSTGRES_PASSWORD`. Adding the same
