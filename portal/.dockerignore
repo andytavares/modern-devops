@@ -2,7 +2,12 @@
 .yarn/cache
 .yarn/install-state.gz
 node_modules
-packages/*/src
+# NOT excluded: portal/Dockerfile is a multi-stage build that compiles from
+# source inside the image, so `yarn tsc` needs packages/*/src. create-app writes
+# this file for the *host* build, where dist/ is prebuilt and the sources are
+# dead weight. Excluding them fails with TS18003 "No inputs were found in config
+# file", which names tsconfig.json and never mentions Docker.
+# packages/*/src
 packages/*/node_modules
 plugins
 *.local.yaml

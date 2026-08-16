@@ -203,7 +203,7 @@ cat <<YAML
                     set -euo pipefail
                     buildah bud \\
                       --tls-verify=false \\
-                      --file portal/packages/backend/Dockerfile \\
+                      --file portal/Dockerfile \\
                       --tag "$REGISTRY/shop/portal:$SHA" \\
                       portal
 
