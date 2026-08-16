@@ -370,9 +370,72 @@ for a `py.typed` under `grpc/` — there isn't one.
 
 ### 19.1 `pricing`, deliberately synchronous
 
-`services/pricing` serves `shop.v1.Pricing/PriceOrder` on port 50051, plus a small stdlib HTTP server
-on 9090 for `/healthz`, `/readyz` and `/metrics` — Kubernetes probes and Prometheus both want HTTP,
-and gRPC health checking is a bigger dependency than this needs.
+`services/pricing` serves `shop.v1.Pricing/PriceOrder` on port 50051. On that same port it also
+registers two first-party gRPC services: the **health checking protocol** (`grpc.health.v1`) and
+**server reflection**. Port 9090 carries Prometheus metrics and nothing else, from
+`prometheus_client.start_http_server()`.
+
+There is no hand-rolled HTTP server here and there must not be one. A gRPC server that answers probes
+over a second protocol on a second port is asserting that the HTTP listener and the gRPC listener fail
+together, which is not true — a saturated gRPC thread pool leaves the HTTP thread answering `200` for a
+server that cannot serve an RPC. The kubelet speaks the health checking protocol itself
+([§19.3](#193-a-pex-needs-somewhere-to-write-and-readonlyrootfilesystem-gives-it-nowhere)), so the
+probe and the traffic take the same path. Reflection is what lets `grpcurl` call the server without a
+local copy of the `.proto`.
+
+**`services/pricing/pricing/main.py`**
+
+```python
+def build_server() -> tuple[grpc.Server, health.HealthServicer]:
+    """Assemble the gRPC server: pricing, health checking and reflection.
+
+    Nothing here binds a port or starts a thread, so tests can build the exact
+    server the process runs and drive it on an ephemeral port.
+    """
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    pricing_pb2_grpc.add_PricingServicer_to_server(PricingServicer(), server)
+
+    health_servicer = health.HealthServicer(
+        experimental_non_blocking=True,
+        experimental_thread_pool=futures.ThreadPoolExecutor(max_workers=10),
+    )
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    for service_name in ("", PRICING_SERVICE_NAME):
+        health_servicer.set(service_name, health_pb2.HealthCheckResponse.SERVING)
+
+    reflection.enable_server_reflection(
+        (PRICING_SERVICE_NAME, HEALTH_SERVICE_NAME, reflection.SERVICE_NAME),
+        server,
+    )
+    return server, health_servicer
+```
+
+Three things are load-bearing:
+
+- **Every service name is registered explicitly, including the empty one.** The empty name carries the
+  server's overall health and is what a `grpc:` probe with no `service:` field asks for. A name that
+  was never registered answers `NOT_FOUND`, not `NOT_SERVING`, so anything a probe may ask for has to
+  be `set()` here.
+- **Service names come off the generated descriptors**, `pricing_pb2.DESCRIPTOR.services_by_name[...]`,
+  not string literals. Renaming a service in the `.proto` then cannot leave a stale name registered.
+- **Reflection needs its own name in its own list.** Python's reflection has no automatic discovery;
+  every service the server exposes is named by hand, `reflection.SERVICE_NAME` included.
+
+`build_server` binds no port and starts no thread, which is what lets the tests stand up the exact
+server the process runs on an ephemeral port. Health checking and reflection are wire protocols —
+asserting on them in-process would prove nothing about what a kubelet or `grpcurl` sees.
+
+On `SIGTERM`, `health_servicer.enter_graceful_shutdown()` flips every registered service to
+`NOT_SERVING` before `server.stop()` closes the listener, so readiness sees the pod leaving while it
+can still answer. The main thread then parks on `server.wait_for_termination()`.
+
+`PriceOrder` rejects bad input with `context.abort(grpc.StatusCode.INVALID_ARGUMENT, ...)`. `abort()`
+raises, so it ends the RPC in one call; `set_code`/`set_details` followed by a `return` arrives at the
+caller as a *successful* empty response.
+
+Config is `pydantic-settings` with `env_prefix="PRICING_"`, so `PRICING_GRPC_PORT`, `PRICING_HTTP_PORT`
+and `PRICING_VERSION` are parsed, cast and validated by the library rather than by hand, and a
+non-numeric port fails at startup naming the field.
 
 Its behaviour is switched by `PRICING_VERSION` and echoed back in `served_by`:
 
@@ -383,8 +446,9 @@ That difference is chosen so an Istio weight change is *observable*. Two version
 identically make a canary a matter of faith.
 
 `order-api` calls it on the order path with a **2 second deadline**, using `grpc.aio` so a slow
-pricing service cannot block the event loop. On timeout or `UNAVAILABLE` it returns **HTTP 502** and
-increments `pricing_calls_total{result,served_by}`.
+pricing service cannot block the event loop. Failures are translated one gRPC status at a time —
+`DEADLINE_EXCEEDED` → 504, `UNAVAILABLE` → 503, `INVALID_ARGUMENT` → 400, `RESOURCE_EXHAUSTED` → 429,
+anything else → 502 — and every outcome increments `pricing_calls_total{result,served_by}`.
 
 > **It does not fall back to a locally computed price, and that is a deliberate choice you should
 > argue with.** A fallback is the kinder production design: the customer gets an order instead of an
@@ -409,24 +473,76 @@ the caller side: the address, the client, the metric, the call, and the tests. D
 downstream ([§19.4](#194-the-frontend-vite-and-a-live-tally),
 [§9.8](phase-4-service-mesh.md#98-canary-two-versions-of-pricing-behind-one-service)) depends on it.
 
-**Address and deadline.** Two settings, appended to `Settings.__init__`:
+**Address and deadlines.** `order-api`'s settings module is now a `pydantic-settings` `BaseSettings`
+subclass. Hand-rolled environment parsing is the job that library exists to do, and it is the approach
+FastAPI documents. Replace [§3.1](phase-1-the-application.md#31-order-api-python--fastapi)'s version
+with this, and add `pydantic-settings` to `3rdparty/python/requirements.txt`:
 
 **`services/order-api/order_api/settings.py`**
 
 ```python
-        self.pricing_addr = os.getenv(
-            "PRICING_ADDR", "pricing.shop.svc.cluster.local:50051"
-        )
-        self.pricing_timeout_seconds = float(
-            os.getenv("PRICING_TIMEOUT_SECONDS", "2.0")
-        )
+"""Config from the environment, validated once at import.
+
+pydantic-settings' `BaseSettings` is the approach FastAPI documents for this
+(https://fastapi.tiangolo.com/advanced/settings/, and
+https://docs.pydantic.dev/latest/concepts/pydantic_settings/). A field with no
+default is required: if it is missing the process refuses to start, and pydantic
+reports *every* missing or malformed variable at once rather than only the first.
+Types are declared, not cast by hand.
+
+Environment variable names match field names case-insensitively, so `kafka_topic`
+reads `KAFKA_TOPIC`. Where the variable a field must read is not the upper-cased
+field name, `validation_alias` pins the real name.
+"""
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    kafka_brokers: str
+    kafka_topic: str = "orders"
+
+    s3_bucket: str
+    aws_region: str = Field(default="us-east-1", validation_alias="AWS_DEFAULT_REGION")
+    aws_endpoint_url: str | None = None
+
+    signing_key: str = Field(validation_alias="ORDER_SIGNING_KEY")
+
+    service_version: str = "dev"
+    order_api_port: int = 8000
+
+    pricing_addr: str = "pricing.shop.svc.cluster.local:50051"
+    pricing_timeout_seconds: float = 2.0
+    pricing_health_timeout_seconds: float = 1.0
+
+
+settings = Settings()  # type: ignore[call-arg]
 ```
 
-The default matches the `Service` the chart creates in [§19.3](#193-a-pex-needs-somewhere-to-write-and-readonlyrootfilesystem-gives-it-nowhere)
+A field with no default is required: the process refuses to start without it, which is the same
+crash-loop-rather-than-degrade behaviour [§3.1](phase-1-the-application.md#31-order-api-python--fastapi)
+argued for, now with every missing variable reported at once instead of only the first.
+
+Three details are not guessable:
+
+- **`validation_alias` is what binds a field to a variable name it does not derive.** `aws_region`
+  would otherwise read `AWS_REGION`; boto3 and every AWS tool use `AWS_DEFAULT_REGION`, so the alias
+  pins it. `signing_key` reads `ORDER_SIGNING_KEY` for the same reason — the variable stays namespaced
+  to the service while the field stays generic.
+- **`# type: ignore[call-arg]` on the instantiation is required, not sloppiness.** pydantic's metaclass
+  is a PEP 681 `dataclass_transform`, so mypy synthesises an `__init__` taking every field and reports
+  the required ones as missing arguments. They are not arguments; `BaseSettings` reads them from the
+  environment, which is the whole point of the class.
+- **The comparison is against the field name, not the variable name.** Matching is
+  case-insensitive, so `kafka_topic` reads `KAFKA_TOPIC` with nothing declared.
+
+`pricing_addr`'s default matches the `Service` the chart creates in [§19.3](#193-a-pex-needs-somewhere-to-write-and-readonlyrootfilesystem-gives-it-nowhere)
 (`pricing`, namespace `shop`, port 50051), so `order-api.yaml` needs no new env entry. The timeout is
 a setting rather than a constant because it is the number you tune when
 [§9.8](phase-4-service-mesh.md#98-canary-two-versions-of-pricing-behind-one-service) starts injecting
-delays.
+delays. `pricing_health_timeout_seconds` is separate and shorter: readiness must answer on the probe's
+schedule, not on the order path's.
 
 **The client.** Add the imports and the metric to `main.py`:
 
@@ -434,9 +550,16 @@ delays.
 
 ```python
 import grpc
-
+from fastapi.concurrency import run_in_threadpool
+from grpc_health.v1 import health_pb2, health_pb2_grpc  # type: ignore[import-untyped]
+from prometheus_client import Counter, Histogram, make_asgi_app
 from shop.v1 import pricing_pb2, pricing_pb2_grpc
 ```
+
+`grpcio-health-checking` ships no `py.typed` marker, so the ignore goes on the import rather than in a
+global `ignore_missing_imports` — which would silence real typos in every other module too. Add
+`grpcio-health-checking` and `grpcio-reflection` to `3rdparty/python/requirements.txt`; they are
+first-party gRPC add-ons shipped as separate packages.
 
 ```python
 PRICING_CALLS = Counter(
@@ -449,6 +572,27 @@ PRICING_CALLS = Counter(
 `served_by` as a metric label is safe here only because its cardinality is bounded by the number of
 deployed pricing versions. Do not label metrics with anything a caller controls.
 
+Two module-level constants, because both are facts that must not be written twice:
+
+```python
+PRICING_SERVICE_NAME = pricing_pb2.DESCRIPTOR.services_by_name["Pricing"].full_name
+
+GRPC_TO_HTTP_STATUS: dict[grpc.StatusCode, int] = {
+    grpc.StatusCode.DEADLINE_EXCEEDED: 504,
+    grpc.StatusCode.UNAVAILABLE: 503,
+    grpc.StatusCode.INVALID_ARGUMENT: 400,
+    grpc.StatusCode.RESOURCE_EXHAUSTED: 429,
+}
+
+HEALTH_NOT_PUBLISHED = (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED)
+```
+
+The service name is read off the descriptor for the same reason the server registers it that way — the
+two sides cannot drift when the `.proto` is renamed. Collapsing every upstream status to 502 tells the
+caller nothing: a deadline, an overload and a malformed order are three different problems with three
+different correct responses, and only the unlisted ones are genuine upstream faults, which is what 502
+means.
+
 ```python
 class PricingClient:
     """Thin async wrapper around the generated Pricing stub.
@@ -458,10 +602,14 @@ class PricingClient:
     order, not a locally guessed one.
     """
 
-    def __init__(self, address: str, timeout_seconds: float) -> None:
+    def __init__(
+        self, address: str, timeout_seconds: float, health_timeout_seconds: float
+    ) -> None:
         self._channel = grpc.aio.insecure_channel(address)
         self._stub = pricing_pb2_grpc.PricingStub(self._channel)
+        self._health_stub = health_pb2_grpc.HealthStub(self._channel)
         self._timeout_seconds = timeout_seconds
+        self._health_timeout_seconds = health_timeout_seconds
 
     async def price_order(
         self, *, sku: str, quantity: int, unit_amount_cents: int, customer: str
@@ -474,16 +622,40 @@ class PricingClient:
         )
         return await self._stub.PriceOrder(request, timeout=self._timeout_seconds)
 
-    def is_ready(self) -> bool:
-        state = self._channel.get_state(try_to_connect=True)
-        return state not in (
-            grpc.ChannelConnectivity.TRANSIENT_FAILURE,
-            grpc.ChannelConnectivity.SHUTDOWN,
-        )
+    async def is_ready(self) -> bool:
+        """Ask pricing whether it is serving, over grpc.health.v1.
+
+        This is a real RPC with a deadline, which is the only thing that proves
+        the dependency is answering. Channel connectivity state does not: a
+        channel that has never reached anything is IDLE or CONNECTING, both of
+        which look fine and neither of which means a call would succeed.
+        https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+        """
+        request = health_pb2.HealthCheckRequest(service=PRICING_SERVICE_NAME)
+        try:
+            response = await self._health_stub.Check(
+                request, timeout=self._health_timeout_seconds
+            )
+        except grpc.aio.AioRpcError as exc:
+            if exc.code() in HEALTH_NOT_PUBLISHED:
+                return True
+            log.warning("pricing health check failed code=%s", exc.code())
+            return False
+        return response.status == health_pb2.HealthCheckResponse.SERVING
 
     async def close(self) -> None:
         await self._channel.close()
 ```
+
+**Readiness asks over `grpc.health.v1`; it does not read channel state.** `get_state()` reports what
+the local channel object believes about its own connectivity, and a channel that has never reached
+anything is `IDLE` or `CONNECTING` — both of which look fine, neither of which means a call would
+succeed. A backend that does not exist at all reads as ready. `Check` is a real RPC: it either comes
+back `SERVING` inside the deadline or it does not.
+
+`NOT_FOUND` and `UNIMPLEMENTED` are treated as ready on purpose. gRPC's own documentation requires
+clients to cope with a server that does not publish health, and a server that answered with a status
+is by definition reachable — that is "health unknown", not "health failing".
 
 `insecure_channel` is correct in this platform: the sidecar terminates mTLS, so TLS in the
 application would be a second, redundant layer
@@ -501,7 +673,9 @@ state: dict = {"producer": None, "s3": None, "pricing": None, "ready": False}
 
 ```python
     state["pricing"] = PricingClient(
-        settings.pricing_addr, settings.pricing_timeout_seconds
+        settings.pricing_addr,
+        settings.pricing_timeout_seconds,
+        settings.pricing_health_timeout_seconds,
     )
     state["ready"] = True
     log.info("order-api started version=%s", settings.service_version)
@@ -518,31 +692,35 @@ A gRPC channel is a long-lived, multiplexing object that manages its own connect
 reconnection. Creating one per request throws away the connection and pays a TCP and HTTP/2 handshake
 on every order.
 
-**Readiness gets a second condition.** If the channel cannot connect, this pod cannot serve orders and
-should be pulled out of the Service rather than answering 502s:
+**Readiness gets a second condition.** If pricing is not serving, this pod cannot serve orders and
+should be pulled out of the Service rather than answering errors:
 
 ```python
 @app.get("/readyz")
-def readyz() -> dict:
-    """Readiness: dependencies are up. Kubernetes pulls us out of the Service if this fails."""
+async def readyz() -> dict:
+    """Readiness: dependencies are up. Kubernetes pulls us out of the Service if this fails.
+
+    Async because the pricing health check is a real RPC and must be awaited.
+    """
     if not state["ready"]:
         raise HTTPException(status_code=503, detail="dependencies not ready")
     pricing = state["pricing"]
-    if pricing is None or not pricing.is_ready():
-        raise HTTPException(status_code=503, detail="pricing channel not ready")
+    if pricing is None or not await pricing.is_ready():
+        raise HTTPException(status_code=503, detail="pricing not serving")
     return {"status": "ready"}
 ```
 
-`get_state(try_to_connect=True)` both reads the channel state and nudges an idle channel into
-connecting, so readiness is what recovers a pod after `pricing` comes back.
+The handler is `async def` because `is_ready()` is now an awaited RPC. The health deadline is what
+keeps that from being a liability: without one, a probe against a hung backend hangs with it, and the
+kubelet's own probe timeout becomes the only thing that ends the request.
 
 **The call.** One helper, so there is exactly one place that decides what a pricing failure means:
 
 ```python
 async def _price_order(order: OrderIn) -> pricing_pb2.PriceOrderResponse:
-    """Call shop.v1.Pricing/PriceOrder. Raises HTTPException(502) on any failure —
-    never falls back to a locally computed price, so a pricing outage is a visible
-    order failure rather than a silently wrong total."""
+    """Call shop.v1.Pricing/PriceOrder. Any failure is an HTTPException carrying the
+    gRPC status translated to its HTTP equivalent — never a locally computed price,
+    so a pricing outage is a visible order failure rather than a silently wrong total."""
     pricing = state["pricing"]
     try:
         response = await pricing.price_order(
@@ -556,13 +734,17 @@ async def _price_order(order: OrderIn) -> pricing_pb2.PriceOrderResponse:
         result = "timeout" if code == grpc.StatusCode.DEADLINE_EXCEEDED else "error"
         PRICING_CALLS.labels(result=result, served_by="unknown").inc()
         log.warning("pricing call failed sku=%s code=%s", order.sku, code)
-        raise HTTPException(status_code=502, detail="pricing unavailable") from exc
+        raise HTTPException(
+            status_code=GRPC_TO_HTTP_STATUS.get(code, 502),
+            detail=f"pricing call failed: {code.name if code else 'UNKNOWN'}",
+        ) from exc
     PRICING_CALLS.labels(result="ok", served_by=response.served_by).inc()
     return response
 ```
 
-`DEADLINE_EXCEEDED` is split out from every other status because "we were too slow" and "it was
-broken" have different fixes, and a single `result="error"` bucket hides which one you have.
+`DEADLINE_EXCEEDED` is split out in the *metric* too, not just the status code, because "we were too
+slow" and "it was broken" have different fixes and a single `result="error"` bucket hides which one you
+have.
 
 **In `create_order`**, price first, then persist. The price is part of the record, so an order that
 cannot be priced must not reach S3 or Kafka at all:
@@ -580,6 +762,35 @@ cannot be priced must not reach S3 or Kafka at all:
         body = json.dumps(payload, separators=(",", ":")).encode()
 ```
 
+**The S3 write goes to the threadpool.** boto3 is synchronous, and a synchronous call inside an
+`async def` path operation blocks the event loop for the whole round trip — every other in-flight
+request and both probes stall with it. FastAPI's answer for blocking I/O inside an async endpoint is
+`run_in_threadpool`:
+
+```python
+        await run_in_threadpool(
+            state["s3"].put_object,
+            Bucket=settings.s3_bucket,
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+            Metadata={"signature": signature},
+        )
+```
+
+This is the rule that decides whether a handler is `async def` at all: an `async def` endpoint may
+only `await`. A handler that has blocking work and no threadpool should be a plain `def`, which
+FastAPI then runs in the threadpool itself.
+
+**`/metrics` is mounted, not routed.** `prometheus_client` ships an ASGI app for this and its docs
+prescribe mounting it. It negotiates content type and compression, and a mount is not a route, so
+`/metrics` stays out of the OpenAPI document Backstage renders
+([§19.6](#196-two-checks-nothing-else-would-catch)):
+
+```python
+app.mount("/metrics", make_asgi_app())
+```
+
 The exception handling needs a clause it did not have before, and its order matters:
 
 ```python
@@ -592,9 +803,9 @@ The exception handling needs a clause it did not have before, and its order matt
         raise HTTPException(status_code=502, detail="downstream failure")
 ```
 
-Without the first clause the bare `except Exception` swallows the 502 from `_price_order` and
-re-raises a generic one, losing `detail="pricing unavailable"` and logging a stack trace for a
-downstream failure that was already handled and counted.
+Without the first clause the bare `except Exception` swallows the `HTTPException` from `_price_order`
+and re-raises a flat 502, throwing away the status the gRPC code was translated to and logging a stack
+trace for a downstream failure that was already handled and counted.
 
 Finally, the response carries the pricing result through:
 
@@ -626,7 +837,7 @@ pants dependencies --transitive services/order-api:bin | grep protos
 # protos/shop/v1/pricing.proto:protos
 ```
 
-**The tests.** A fake client, so the suite never opens a socket:
+**The tests.** Fakes, so the suite never opens a socket:
 
 **`services/order-api/tests/test_api.py`**
 
@@ -634,14 +845,20 @@ pants dependencies --transitive services/order-api:bin | grep protos
 class _FakePricingClient:
     """Stands in for PricingClient so tests never touch the network."""
 
-    def __init__(self, *, response=None, error: grpc.RpcError | None = None):
+    def __init__(
+        self, *, response=None, error: grpc.RpcError | None = None, ready=True
+    ):
         self._response = response
         self._error = error
+        self._ready = ready
 
     async def price_order(self, **kwargs):
         if self._error is not None:
             raise self._error
         return self._response
+
+    async def is_ready(self) -> bool:
+        return self._ready
 
 
 class _FakeRpcError(grpc.RpcError):
@@ -650,17 +867,32 @@ class _FakeRpcError(grpc.RpcError):
 
     def code(self) -> grpc.StatusCode:
         return self._code
+
+
+class _FakeHealthStub:
+    """Answers grpc.health.v1 Check the way a real server would."""
+
+    def __init__(self, *, status=None, error: grpc.aio.AioRpcError | None = None):
+        self._status = status
+        self._error = error
+
+    async def Check(self, request, timeout=None):  # noqa: N802  (gRPC method name)
+        assert request.service == "shop.v1.Pricing"
+        if self._error is not None:
+            raise self._error
+        return health_pb2.HealthCheckResponse(status=self._status)
 ```
 
 `grpc.RpcError` is a bare `Exception` subclass with no constructor of its own, so a real one cannot be
-raised with a chosen status code — `_FakeRpcError` exists only to make `code()` answer.
+raised with a chosen status code — `_FakeRpcError` exists only to make `code()` answer. `_FakeHealthStub`
+is substituted onto a real `PricingClient`, so `is_ready()` runs its actual branching over every
+health status and every error code.
 
 The happy path asserts the response actually carries the price through:
 
 ```python
 def test_order_response_includes_pricing_result():
-    state["s3"] = _FakeS3()
-    state["producer"] = _FakeProducer()
+    _priced_state()
     state["pricing"] = _FakePricingClient(
         response=pricing_pb2.PriceOrderResponse(
             total_amount_cents=4499,
@@ -679,43 +911,77 @@ def test_order_response_includes_pricing_result():
     assert result["priced_by"] == "pricing-v1"
 ```
 
-And both failure modes get their own test, because they take different branches through
-`_price_order`:
+The status mapping gets one parametrised test, so adding a status to the table without a case here is
+visible:
 
 ```python
-def test_pricing_timeout_returns_502():
-    from fastapi import HTTPException
-
-    state["s3"] = _FakeS3()
-    state["producer"] = _FakeProducer()
-    state["pricing"] = _FakePricingClient(
-        error=_FakeRpcError(grpc.StatusCode.DEADLINE_EXCEEDED)
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(create_order(_order()))
-
-    assert exc_info.value.status_code == 502
-
-
-def test_pricing_unavailable_returns_502():
-    from fastapi import HTTPException
-
-    state["s3"] = _FakeS3()
-    state["producer"] = _FakeProducer()
-    state["pricing"] = _FakePricingClient(
-        error=_FakeRpcError(grpc.StatusCode.UNAVAILABLE)
-    )
+@pytest.mark.parametrize(
+    "code,expected_status",
+    [
+        (grpc.StatusCode.DEADLINE_EXCEEDED, 504),
+        (grpc.StatusCode.UNAVAILABLE, 503),
+        (grpc.StatusCode.INVALID_ARGUMENT, 400),
+        (grpc.StatusCode.RESOURCE_EXHAUSTED, 429),
+        (grpc.StatusCode.INTERNAL, 502),
+        (grpc.StatusCode.UNKNOWN, 502),
+    ],
+)
+def test_pricing_failures_map_to_their_http_equivalent(code, expected_status):
+    """One gRPC status, one HTTP status. Collapsing them all to 502 tells the
+    caller a timeout, an overload and a malformed order are the same thing."""
+    _priced_state()
+    state["pricing"] = _FakePricingClient(error=_FakeRpcError(code))
 
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(create_order(_order()))
 
-    assert exc_info.value.status_code == 502
+    assert exc_info.value.status_code == expected_status
 ```
 
 These are the tests that keep the no-fallback decision from being quietly reversed later. A fallback
-added without touching them would leave both passing only if it still returned 502, which is the
-point.
+would have to change every expected status here, which is the point.
+
+Two more assert things that are otherwise invisible. The first catches a blocking call sneaking back
+onto the event loop; it works because `_FakeS3` records the thread it ran on:
+
+```python
+def test_s3_put_does_not_run_on_the_event_loop_thread():
+    """boto3 is synchronous. Called directly from this `async def` endpoint it
+    would stall the loop — and every other request with it — for the whole S3
+    round trip, so it has to go to the threadpool."""
+    s3 = _priced_state()
+    state["pricing"] = _FakePricingClient(
+        response=pricing_pb2.PriceOrderResponse(total_amount_cents=1)
+    )
+
+    asyncio.run(create_order(_order()))
+
+    assert s3.thread_name is not None
+    assert s3.thread_name != threading.current_thread().name
+```
+
+The second pins readiness to the health protocol rather than to channel state — a backend that has
+never existed must not read as ready:
+
+```python
+@pytest.mark.parametrize(
+    "status",
+    [
+        health_pb2.HealthCheckResponse.NOT_SERVING,
+        health_pb2.HealthCheckResponse.SERVICE_UNKNOWN,
+        health_pb2.HealthCheckResponse.UNKNOWN,
+    ],
+)
+def test_health_check_not_serving_is_not_ready(status):
+    """Only SERVING means ready. Channel connectivity would report every one of
+    these as fine, which is why readiness asks over grpc.health.v1 instead."""
+    assert asyncio.run(_health_result(status=status)) is False
+```
+
+`services/pricing/tests/test_pricing.py` takes the other side of both protocols the same way: it builds
+the real server with `build_server()`, binds `[::]:0`, and drives health checking, reflection and
+`PriceOrder` over a real channel. Health and reflection are wire protocols; an in-process assertion
+would prove nothing about what a kubelet or `grpcurl` sees.
 
 ```bash
 pants test services/order-api:tests
@@ -764,12 +1030,17 @@ file(
 ```python
 pex_binary(
     name="bin",
+    tags=["deployable"],
     entry_point="pricing/main.py:main",
     dependencies=[":lib"],
     complete_platforms=["3rdparty/python:linux-platform"],
     output_path="pricing.pex",
 )
 ```
+
+`tags=["deployable"]` is what CI selects on ([§19.5](#195-one-ci-step-instead-of-two)). Every target
+that ships an artifact declares it — `services/order-api:bin`, `services/order-worker:bin`, and the one
+the Backstage skeleton emits.
 
 `complete_platforms` goes on **every** `pex_binary` in the repo, including the one the Backstage
 skeleton emits. The cluster is `linux/aarch64`; the laptop is not, and `grpcio`, `pydantic-core`,
@@ -809,7 +1080,8 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 USER 10001
-# 50051 gRPC, 9090 the health/metrics HTTP server.
+# 50051 gRPC (application, health checking and reflection), 9090 Prometheus
+# metrics. Probes speak the gRPC health protocol on 50051, not HTTP.
 EXPOSE 50051 9090
 ENTRYPOINT ["python", "/app/pricing.pex"]
 ```
@@ -848,6 +1120,30 @@ Set `PEX_ROOT` rather than relying on `/tmp` being writable by default — the f
 implementation detail, and an explicit path is a thing a reader can find. **Every service packaged as
 a PEX needs both halves** — `order-api.yaml`, `pricing.yaml` and `scaffolded.yaml` all carry them, so
 a service that arrives through the paved path gets them without anyone remembering to ask.
+
+**The probes are gRPC, not HTTP.** The kubelet speaks the health checking protocol itself, so the app
+needs no HTTP endpoint for probes and the image needs no `grpc_health_probe` binary:
+
+```yaml
+          livenessProbe:
+            grpc: { port: 50051 }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            grpc: { port: 50051, service: shop.v1.Pricing }
+            periodSeconds: 5
+            failureThreshold: 2
+```
+
+Liveness asks for the empty service name — the server's overall health, which is what a `grpc:` probe
+with no `service:` field requests. Readiness names `shop.v1.Pricing`, the one service that has to work
+for this pod to be worth routing to. `GRPCAction.port` is an `int32`, not an `IntOrString`, so a port
+*name* is rejected by the API server; it must be the number.
+
+One more line in that file is not cosmetic: the metrics port is named **`http-metrics`**, not
+`metrics`. Istio reads the protocol off the port name (`protocol[-suffix]`) or off `appProtocol`. A
+port named `metrics` matches no protocol, Istio falls back to plain TCP, and `istioctl analyze`
+reports `IST0118`.
 
 It is the same class of problem as `nginx-unprivileged` needing writable `/tmp`, `/var/cache/nginx`
 and `/var/run`: both render perfectly under `helm template`, pass `kubectl apply --dry-run=server`,
@@ -945,18 +1241,33 @@ The Python step and the Go step are gone. In their place, one step in `.buildkit
 
                     pants lint check test ::
 
-                    pants package $(ls -d services/*/BUILD | sed 's#/BUILD#:bin#')
+                    python3 checks/verify_doc_listings.py .
+
+                    pants --tag=deployable package ::
 
                     ls -la dist/
 ```
 
-Four things about this are load-bearing:
+Six things about this are load-bearing:
 
 **The step runs a prebuilt Pants image out of Nexus**, `.buildkite/pants-ci.Dockerfile`, rather than
 installing Pants per build. It carries the checksum-verified `scie-pants` launcher from
 [§17.3](#173-pantstoml), a Go toolchain matching `services/order-worker/go.mod` (Pants *searches* for
 `go`, it does not download one), and `unzip`/`zip`/`xz`, which Pants needs to unpack the tools it does
 download — protoc, ruff, the Go SDK.
+
+**`--tag=deployable` is how the package set is selected.** `::` is every target in the repo; the tag
+narrows it to the ones that ship an artifact, and tags are Pants' documented mechanism for exactly
+that. The alternative — globbing `services/*/BUILD` into a list of `:bin` targets — encodes a naming
+convention in a shell pipeline, outside the build system, where nothing checks it: a target named
+anything else is silently not packaged, and a `BUILD` file with no `pex_binary` at all fails the whole
+step. With the tag, a target declares itself deployable in the one file that already describes it, so
+the Backstage paved path ([§14.6](phase-5-developer-portal.md#146-paved-path-1--a-new-service)) adds a
+service that CI packages without CI knowing it exists.
+
+**`checks/verify_doc_listings.py` runs here rather than as a Pants test.** It reads the whole checkout;
+a Pants sandbox holds only declared dependencies, so every file listing in `docs/` would read as
+missing inside one.
 
 **`pants package` runs here, not in the image build.** The Buildah pods below it contain Buildah and
 nothing else — no Python, no Go, no Node, no compiler. They `buildkite-agent artifact download` the
@@ -968,7 +1279,6 @@ buildah bud \
   --tls-verify=false \
   --file services/$SVC/Dockerfile \
   --tag "$REGISTRY/shop/$SVC:$SHA" \
-  --tag "$REGISTRY/shop/$SVC:latest" \
   dist
 ```
 
@@ -994,7 +1304,8 @@ not preserve file modes** — the bit is lost between the two pods and the conta
 with `exec: "/order-worker": permission denied`, with no application output at all. The PEX services
 are immune only because they are invoked as `python /app/x.pex` rather than executed directly.
 
-**Both the package targets and the build steps are discovered, not listed.** A directory under
+**The build steps are discovered too, by a different mechanism.** Packaging selects on a tag inside
+Pants; the image builds cannot, because Buildah knows nothing about targets. A directory under
 `services/` with a `BUILD` file and a `Dockerfile` is a service, and that is the whole contract:
 
 ```sh

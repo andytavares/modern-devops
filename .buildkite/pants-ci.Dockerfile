@@ -21,6 +21,14 @@ FROM docker.io/library/python:3.13-slim
 ARG SCIE_PANTS_VERSION=0.13.2
 ARG SCIE_PANTS_SHA256=b40b60e50e9cb69e13029e100be995fbfdb3b3799ef1ccff60a81177f78e6b82
 
+# Helm is here so CI can validate the chart. `helm lint --strict` and
+# `helm template` are the two commands Helm documents for exactly that, and
+# without them nothing in the build ever renders the chart — a template that
+# fails to render, or a probe naming a port no container declares, reaches the
+# cluster before anyone finds out.
+ARG HELM_VERSION=4.2.4
+ARG HELM_SHA256=564de2191b881e9f71b5606b25345821ea1682f06ab90499d3ab22b530176da1
+
 # unzip/zip/xz are here because Pants unpacks the tools it downloads (protoc,
 # ruff, the Go SDK) and fails with a bare BinaryNotFoundError without them.
 # gcc/g++ are here because confluent-kafka-go wraps librdkafka, which needs
@@ -45,6 +53,20 @@ RUN curl -fsSL -o /usr/local/bin/pants \
       "https://github.com/pantsbuild/scie-pants/releases/download/v${SCIE_PANTS_VERSION}/scie-pants-linux-aarch64" \
  && echo "${SCIE_PANTS_SHA256}  /usr/local/bin/pants" | sha256sum -c - \
  && chmod 755 /usr/local/bin/pants
+
+RUN curl -fsSL -o /tmp/helm.tgz \
+      "https://get.helm.sh/helm-v${HELM_VERSION}-linux-arm64.tar.gz" \
+ && echo "${HELM_SHA256}  /tmp/helm.tgz" | sha256sum -c - \
+ && tar -xzf /tmp/helm.tgz -C /tmp \
+ && install -m 0755 /tmp/linux-arm64/helm /usr/local/bin/helm \
+ && rm -rf /tmp/helm.tgz /tmp/linux-arm64
+
+# pyyaml is for checks/verify_chart.py, which parses the rendered chart. It
+# comes from the Nexus proxy like everything else — see §5.1.
+RUN pip install --no-cache-dir \
+      --index-url http://nexus:8081/repository/pypi-proxy/simple \
+      --trusted-host nexus \
+      pyyaml==6.0.2
 
 # Pants resolves its own Python and tools at runtime; give it a writable home.
 ENV HOME=/tmp

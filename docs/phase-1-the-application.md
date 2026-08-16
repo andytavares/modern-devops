@@ -50,6 +50,7 @@ dependencies = [
     "boto3==1.40.11",
     "prometheus-client==0.23.1",
     "pydantic==2.11.7",
+    "pydantic-settings==2.7.1",
 ]
 
 [dependency-groups]
@@ -114,34 +115,52 @@ package name collides with every other service's the moment they share a source 
 **`services/order-api/order_api/settings.py`**
 
 ```python
-import os
+"""Config from the environment, validated once at import.
+
+pydantic-settings' `BaseSettings` is the approach FastAPI documents for this
+(https://fastapi.tiangolo.com/advanced/settings/, and
+https://docs.pydantic.dev/latest/concepts/pydantic_settings/). A field with no
+default is required: if it is missing the process refuses to start, and pydantic
+reports *every* missing or malformed variable at once rather than only the first.
+Types are declared, not cast by hand.
+
+Environment variable names match field names case-insensitively, so `kafka_topic`
+reads `KAFKA_TOPIC`. Where the variable a field must read is not the upper-cased
+field name, `validation_alias` pins the real name.
+"""
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
-class Settings:
-    """Config from environment only. Fail loudly at import if something required is missing."""
+class Settings(BaseSettings):
+    kafka_brokers: str
+    kafka_topic: str = "orders"
 
-    def __init__(self) -> None:
-        self.kafka_brokers = _req("KAFKA_BROKERS")
-        self.kafka_topic = os.getenv("KAFKA_TOPIC", "orders")
-        self.s3_bucket = _req("S3_BUCKET")
-        self.aws_endpoint_url = os.getenv("AWS_ENDPOINT_URL") or None
-        self.aws_region = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-        # Injected by External Secrets Operator from OpenBao. See §7.
-        self.signing_key = _req("ORDER_SIGNING_KEY")
-        self.service_version = os.getenv("SERVICE_VERSION", "dev")
+    s3_bucket: str
+    # boto3 owns the name AWS_DEFAULT_REGION, so the field cannot simply be
+    # called `default_region`; the alias binds the field to the variable boto3
+    # and every AWS tool already expect.
+    aws_region: str = Field(default="us-east-1", validation_alias="AWS_DEFAULT_REGION")
+    aws_endpoint_url: str | None = None
 
+    # Injected by External Secrets Operator from OpenBao. See §7. The alias keeps
+    # the variable namespaced to this service while the field stays generic.
+    signing_key: str = Field(validation_alias="ORDER_SIGNING_KEY")
 
-def _req(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"required environment variable {name} is not set")
-    return value
+    service_version: str = "dev"
 
 
-settings = Settings()
+# pydantic's metaclass is a PEP 681 `dataclass_transform`, so mypy synthesises an
+# `__init__` taking every field and reports the three required ones as missing
+# arguments. They are not passed as arguments — BaseSettings reads them from the
+# environment, which is the entire point of the class.
+settings = Settings()  # type: ignore[call-arg]
 ```
 
-> **Why fail at import.** A pod that starts successfully and then 500s on every request is much harder to diagnose than one that crash-loops with `required environment variable KAFKA_BROKERS is not set`. Crash-loop is a *good* failure mode: `kubectl get pods` shows it, Argo CD shows it degraded, and the alert fires immediately. Degrading quietly is the bad one.
+> **Why fail at import.** A pod that starts successfully and then 500s on every request is much harder to diagnose than one that crash-loops with `1 validation error for Settings / kafka_brokers / Field required`. Crash-loop is a *good* failure mode: `kubectl get pods` shows it, Argo CD shows it degraded, and the alert fires immediately. Degrading quietly is the bad one. A hand-rolled loader can do this too — what it cannot do for free is report *all* the missing variables in one message, coerce `PRICING_TIMEOUT_SECONDS` to a float and reject `"soon"`, or stay honest about types as the class grows. Config parsing is validation, and you already have a validation library in the image.
+
+> **`validation_alias` and why two fields need it.** Field name → variable name is a mechanical upper-casing, which is right until the variable is owned by someone else. `AWS_DEFAULT_REGION` belongs to the AWS SDKs — every tool in the container reads it — so the field takes the alias rather than the variable taking our name. `ORDER_SIGNING_KEY` is the reverse case: the *variable* is namespaced per service (it comes from an `ExternalSecret` in a shared namespace, §7.6) while the field stays `signing_key`. Note that `validation_alias` replaces the default name; it does not add an alternative to it.
 
 **`services/order-api/order_api/main.py`**
 
@@ -159,8 +178,9 @@ from datetime import datetime, timezone
 import boto3
 from aiokafka import AIOKafkaProducer
 from botocore.config import Config as BotoConfig
-from fastapi import FastAPI, HTTPException, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
+from prometheus_client import Counter, Histogram, make_asgi_app
 from pydantic import BaseModel, Field
 
 from .settings import settings
@@ -237,9 +257,10 @@ def readyz() -> dict:
     return {"status": "ready"}
 
 
-@app.get("/metrics")
-def metrics() -> Response:
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+# prometheus_client ships an ASGI app for this; mounting it is what its docs
+# prescribe for FastAPI. Mounting also keeps /metrics out of the OpenAPI schema,
+# where a scrape endpoint has no business being.
+app.mount("/metrics", make_asgi_app())
 
 
 @app.post("/orders", status_code=202)
@@ -258,7 +279,14 @@ async def create_order(order: OrderIn) -> dict:
 
     key = f"orders/{created_at[:10]}/{order_id}.json"
     try:
-        state["s3"].put_object(
+        # boto3 is synchronous. Calling it directly from an `async def` would
+        # block the event loop for the whole S3 round trip — every other
+        # in-flight request, and the liveness probe with them. FastAPI runs
+        # plain `def` endpoints in a threadpool for exactly this reason; this
+        # handler needs `await` for Kafka, so it reaches for the same threadpool
+        # explicitly.
+        await run_in_threadpool(
+            state["s3"].put_object,
             Bucket=settings.s3_bucket,
             Key=key,
             Body=body,
@@ -423,12 +451,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -459,6 +489,26 @@ var (
 		Help: "Age of the most recently processed event, from created_at to write time.",
 	})
 )
+
+// putItemAPI is the part of *dynamodb.Client that this service uses. Depending
+// on the interface rather than the concrete client is what lets the commit
+// tests drive a failing write.
+type putItemAPI interface {
+	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
+}
+
+// recordMarker is the part of *kgo.Client that this service uses to checkpoint
+// progress. See AutoCommitMarks in main for why marking, not committing, is the
+// per-record operation.
+type recordMarker interface {
+	MarkCommitRecords(rs ...*kgo.Record)
+}
+
+// partitionKey identifies one topic partition.
+type partitionKey struct {
+	topic     string
+	partition int32
+}
 
 type orderEvent struct {
 	OrderID     string `json:"order_id"`
@@ -512,83 +562,155 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
+	if err := run(); err != nil {
+		slog.Error("order-worker exiting", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfg, err := loadConfig()
 	if err != nil {
-		slog.Error("configuration error", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("configuration error: %w", err)
 	}
 
 	// SIGTERM is what Kubernetes sends first on pod deletion. Handling it is the
 	// difference between a graceful rolling update and dropped in-flight work.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// A fatal error in a background goroutine cancels the same context the
+	// consume loop runs on, and context.Cause carries the reason back out to
+	// main so the process exits non-zero instead of consuming forever.
+	ctx, cancel := context.WithCancelCause(sigCtx)
+	defer cancel(nil)
 
 	// AWS_ENDPOINT_URL is honoured natively by aws-sdk-go-v2, so pointing at Floci
 	// needs no code change at all — the same binary runs against real AWS.
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.region))
 	if err != nil {
-		slog.Error("failed to load aws config", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("load aws config: %w", err)
 	}
 	ddb := dynamodb.NewFromConfig(awsCfg)
 
+	// blocked holds the partitions whose commit is pinned behind a record that
+	// failed to write. It is read and written only between PollFetches and
+	// AllowRebalance, and in the revoke callback, which BlockRebalanceOnPoll
+	// documents as mutually exclusive — so it needs no lock.
+	blocked := make(map[partitionKey]bool)
+
+	// Commit strategy, per franz-go's group_committing example ("marks" style):
+	//
+	//   - AutoCommitMarks: autocommitting commits only records handed to
+	//     MarkCommitRecords, so an offset is committed only after its DynamoDB
+	//     write returned success.
+	//   - BlockRebalanceOnPoll: a non-empty poll blocks rebalances until
+	//     AllowRebalance, so a commit can never land on a partition this member
+	//     has already lost.
+	//   - OnPartitionsRevoked: flush marked offsets before losing partitions.
+	//     franz-go calls this on group leave too, which is what makes
+	//     client.Close() commit on SIGTERM.
+	//
+	// Autocommitting stays on, so a marked offset is checkpointed even if the
+	// synchronous commit below fails. Delivery is at-least-once: a crash between
+	// the DynamoDB write and the commit replays the record, and PutItem on the
+	// same order_id is idempotent, so replay is harmless.
 	client, err := kgo.NewClient(
 		kgo.SeedBrokers(cfg.brokers...),
 		kgo.ConsumerGroup(cfg.group),
 		kgo.ConsumeTopics(cfg.topic),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
-		kgo.DisableAutoCommit(), // we commit only after a successful DynamoDB write
+		kgo.AutoCommitMarks(),
+		kgo.BlockRebalanceOnPoll(),
+		kgo.OnPartitionsRevoked(func(revokeCtx context.Context, cl *kgo.Client, revoked map[string][]int32) {
+			if err := cl.CommitMarkedOffsets(revokeCtx); err != nil {
+				slog.Error("revoke commit failed", "err", err)
+			}
+			// A revoked partition starts clean if this member is assigned it
+			// again: the next owner resumes from the offset just committed.
+			for topic, partitions := range revoked {
+				for _, p := range partitions {
+					delete(blocked, partitionKey{topic: topic, partition: p})
+				}
+			}
+		}),
 		kgo.SessionTimeout(30*time.Second),
 	)
 	if err != nil {
-		slog.Error("failed to create kafka client", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("create kafka client: %w", err)
 	}
 	defer client.Close()
 
-	ready := &atomicBool{}
-	go serveHTTP(ctx, cfg, ready)
+	var ready atomic.Bool
+	go func() {
+		if err := serveHTTP(ctx, cfg, &ready); err != nil {
+			cancel(fmt.Errorf("metrics server: %w", err))
+		}
+	}()
 
 	if err := client.Ping(ctx); err != nil {
-		slog.Error("kafka not reachable", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("kafka not reachable: %w", err)
 	}
-	ready.set(true)
+	ready.Store(true)
 	slog.Info("order-worker started", "version", cfg.version, "topic", cfg.topic, "table", cfg.table)
 
 	for {
 		fetches := client.PollFetches(ctx)
 		if ctx.Err() != nil {
+			if cause := context.Cause(ctx); !errors.Is(cause, context.Canceled) {
+				return cause
+			}
 			slog.Info("shutting down")
-			return
+			return nil
 		}
 		if errs := fetches.Errors(); len(errs) > 0 {
 			for _, e := range errs {
 				slog.Error("fetch error", "topic", e.Topic, "partition", e.Partition, "err", e.Err)
 			}
+			client.AllowRebalance()
 			continue
 		}
 
-		fetches.EachRecord(func(r *kgo.Record) {
-			if err := handle(ctx, ddb, cfg.table, r); err != nil {
-				processed.WithLabelValues("error").Inc()
-				slog.Error("failed to process record", "offset", r.Offset, "err", err)
-				return
-			}
-			processed.WithLabelValues("ok").Inc()
+		fetches.EachPartition(func(p kgo.FetchTopicPartition) {
+			processPartition(ctx, ddb, cfg.table, client, blocked, p)
 		})
 
-		// Commit after the batch. At-least-once delivery: a crash between the
-		// DynamoDB write and this commit replays the record. PutItem on the same
-		// order_id is idempotent, so replay is harmless. That is the trade we
-		// chose — see the note below.
-		if err := client.CommitUncommittedOffsets(ctx); err != nil {
+		// CommitMarkedOffsets commits the marks made above and nothing else.
+		// It runs before AllowRebalance so the commit cannot cross a rebalance.
+		if err := client.CommitMarkedOffsets(ctx); err != nil {
 			slog.Error("commit failed", "err", err)
 		}
+		client.AllowRebalance()
 	}
 }
 
-func handle(ctx context.Context, ddb *dynamodb.Client, table string, r *kgo.Record) error {
+// processPartition writes one partition's records to DynamoDB in offset order
+// and marks a record for commit only once its write has succeeded.
+//
+// A Kafka commit is a single per-partition offset, so marking any later offset
+// would commit past every earlier one. The first failed write therefore blocks
+// the partition: nothing at or after that offset is ever marked, the committed
+// offset stays behind the failed record, and a restart replays from there.
+// Blocking persists across polls because marks cannot rewind — a mark made on a
+// later batch would commit the record that was never written.
+func processPartition(ctx context.Context, ddb putItemAPI, table string, m recordMarker, blocked map[partitionKey]bool, p kgo.FetchTopicPartition) {
+	key := partitionKey{topic: p.Topic, partition: p.Partition}
+	if blocked[key] {
+		return
+	}
+	for _, r := range p.Records {
+		if err := handle(ctx, ddb, table, r); err != nil {
+			processed.WithLabelValues("error").Inc()
+			slog.Error("failed to process record", "topic", r.Topic, "partition", r.Partition, "offset", r.Offset, "err", err)
+			blocked[key] = true
+			return
+		}
+		processed.WithLabelValues("ok").Inc()
+		m.MarkCommitRecords(r)
+	}
+}
+
+func handle(ctx context.Context, ddb putItemAPI, table string, r *kgo.Record) error {
 	start := time.Now()
 	defer func() { processDuration.Observe(time.Since(start).Seconds()) }()
 
@@ -622,13 +744,16 @@ func handle(ctx context.Context, ddb *dynamodb.Client, table string, r *kgo.Reco
 		},
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("put item order_id=%s: %w", ev.OrderID, err)
 	}
 	slog.Info("persisted order", "order_id", ev.OrderID, "offset", r.Offset)
 	return nil
 }
 
-func serveHTTP(ctx context.Context, cfg config, ready *atomicBool) {
+// serveHTTP runs the metrics and probe endpoints until ctx is cancelled. It
+// returns nil on a clean shutdown and an error otherwise; failing to bind the
+// metrics port is fatal to the process, not something to log and ignore.
+func serveHTTP(ctx context.Context, cfg config, ready *atomic.Bool) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -636,7 +761,7 @@ func serveHTTP(ctx context.Context, cfg config, ready *atomicBool) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if !ready.get() {
+		if !ready.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"status":"not-ready"}`))
 			return
@@ -653,23 +778,35 @@ func serveHTTP(ctx context.Context, cfg config, ready *atomicBool) {
 		_ = srv.Shutdown(shutCtx)
 	}()
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("metrics server failed", "err", err)
+		return fmt.Errorf("listen on %s: %w", cfg.addr, err)
 	}
+	return nil
 }
 ```
 
-**`services/order-worker/atomic.go`**
+> **Why marks, and not “commit what succeeded”.** A Kafka commit is **one offset per
+> partition**, not a set of offsets. So marking any later record commits past every earlier one,
+> including a record whose DynamoDB write failed — marking only on success is necessary and not
+> sufficient. The first failed write has to stop the partition dead, and it has to *stay* stopped
+> across polls, because a mark made on the next batch would commit the record that was never
+> written. That is what the `blocked` map buys.
+>
+> The three client options work as a set, and this is the shape franz-go documents — see
+> [producing-and-consuming.md](https://github.com/twmb/franz-go/blob/master/docs/producing-and-consuming.md)
+> on offset management, and the `goroutine_per_partition_consuming`
+> [example](https://github.com/twmb/franz-go/tree/master/examples/goroutine_per_partition_consuming),
+> whose third strategy is this pairing. `AutoCommitMarks` narrows autocommitting to marked records,
+> `BlockRebalanceOnPoll` stops a commit landing on a partition this member has already lost, and
+> `OnPartitionsRevoked` flushes marks before the partitions go. franz-go calls the revoke hook on
+> group leave as well, which is what makes `client.Close()` commit on SIGTERM — and what
+> `terminationGracePeriodSeconds: 45` in §10.1 exists to allow time for.
 
-```go
-package main
-
-import "sync/atomic"
-
-type atomicBool struct{ v atomic.Bool }
-
-func (a *atomicBool) set(b bool) { a.v.Store(b) }
-func (a *atomicBool) get() bool  { return a.v.Load() }
-```
+> **`run() error`, not a `main` full of `os.Exit(1)`.** `os.Exit` skips every deferred call, so a
+> `main` that exits inline never runs `client.Close()` and never commits. Pushing the work into
+> `run()` means one exit point, after the defers. The metrics server gets the same treatment through
+> `context.WithCancelCause`: a failure to bind `:9090` cancels the consume loop and the cause carries
+> the reason out to `main`, instead of being logged by a goroutine nobody is watching while the pod
+> stays happily ready.
 
 **`services/order-worker/main_test.go`**
 
@@ -709,7 +846,110 @@ func TestLoadConfigDefaults(t *testing.T) {
 }
 ```
 
-> **At-least-once vs exactly-once.** We commit Kafka offsets *after* the DynamoDB write. A crash in between replays the record. Because `PutItem` with the same `order_id` overwrites rather than duplicates, replay is a no-op — the write is idempotent, so at-least-once delivery gives us effectively-once *results*. Exactly-once across Kafka and DynamoDB would need transactional coordination the two systems don't share. **The general lesson: don't buy exactly-once delivery; make your writes idempotent and buy at-least-once, which is cheap.**
+Config tests are cheap and prove little. The commit boundary is the part of this service that can
+lose data silently, so it gets tests that fail if anyone reintroduces the naive version. `handle` and
+`processPartition` take the two narrow interfaces declared at the top of `main.go` — `putItemAPI` and
+`recordMarker` — which is the whole reason a fake can drive a failing write.
+
+**`services/order-worker/main_test.go`**
+
+```go
+var errWriteFailed = errors.New("dynamodb is having a day")
+
+// fakeDDB records every PutItem it is asked to make and fails the ones whose
+// order_id is listed in failOn.
+type fakeDDB struct {
+	failOn map[string]bool
+	puts   []string
+}
+
+func (f *fakeDDB) PutItem(_ context.Context, params *dynamodb.PutItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error) {
+	id := params.Item["order_id"].(*ddbtypes.AttributeValueMemberS).Value
+	f.puts = append(f.puts, id)
+	if f.failOn[id] {
+		return nil, errWriteFailed
+	}
+	return &dynamodb.PutItemOutput{}, nil
+}
+
+// fakeMarker records the offsets handed to MarkCommitRecords. Those offsets are
+// exactly what franz-go would commit, so asserting on them asserts on the
+// commit boundary.
+type fakeMarker struct{ marked []int64 }
+
+func (m *fakeMarker) MarkCommitRecords(rs ...*kgo.Record) {
+	for _, r := range rs {
+		m.marked = append(m.marked, r.Offset)
+	}
+}
+
+// partitionOf builds a one-partition fetch result holding one record per
+// order_id, at consecutive offsets starting from 0.
+func partitionOf(orderIDs ...string) kgo.FetchTopicPartition {
+	p := kgo.FetchTopicPartition{Topic: "orders"}
+	p.Partition = 3
+	for i, id := range orderIDs {
+		p.Records = append(p.Records, &kgo.Record{
+			Topic:     "orders",
+			Partition: 3,
+			Offset:    int64(i),
+			Value:     []byte(`{"order_id":"` + id + `","quantity":1,"amount_cents":100}`),
+		})
+	}
+	return p
+}
+
+// ...
+
+// This is the regression test for the commit semantics: a failed DynamoDB write
+// must stop the commit boundary dead. If someone reintroduces marking (and so
+// committing) records at or past a failed offset, this fails.
+func TestProcessPartitionNeverMarksAtOrPastAFailedWrite(t *testing.T) {
+	ddb := &fakeDDB{failOn: map[string]bool{"b": true}}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+	key := partitionKey{topic: "orders", partition: 3}
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("a", "b", "c"))
+
+	if !equalOffsets(m.marked, []int64{0}) {
+		t.Fatalf("only offset 0 was written successfully, but offsets %v were marked for commit", m.marked)
+	}
+	if !blocked[key] {
+		t.Fatal("expected the partition to be blocked after a failed write")
+	}
+}
+
+// Marks cannot rewind, so once a partition is blocked a later batch must not
+// mark it either — that would commit past the record that was never written.
+func TestProcessPartitionStaysBlockedOnLaterBatches(t *testing.T) {
+	ddb := &fakeDDB{failOn: map[string]bool{"a": true}}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("a"))
+	if len(m.marked) != 0 {
+		t.Fatalf("expected nothing marked, got %v", m.marked)
+	}
+
+	ddb.failOn = nil
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("d", "e"))
+
+	if len(m.marked) != 0 {
+		t.Fatalf("a blocked partition must not be marked on a later batch, got %v", m.marked)
+	}
+	if len(ddb.puts) != 1 {
+		t.Fatalf("a blocked partition must not be written again, got puts %v", ddb.puts)
+	}
+}
+```
+
+The repo file carries three more: the happy path (`equalOffsets(m.marked, []int64{0, 1, 2})`), one
+that a malformed record is still marked — otherwise one bad message pins the partition's commit
+forever — and one that `handle` wraps the `PutItem` error with the `order_id`. The imports and the
+`equalOffsets` helper are there too.
+
+> **At-least-once vs exactly-once.** An offset is marked, and so committed, only *after* the DynamoDB write returns success. A crash in between replays the record. Because `PutItem` with the same `order_id` overwrites rather than duplicates, replay is a no-op — the write is idempotent, so at-least-once delivery gives us effectively-once *results*. Exactly-once across Kafka and DynamoDB would need transactional coordination the two systems don't share. **The general lesson: don't buy exactly-once delivery; make your writes idempotent and buy at-least-once, which is cheap.**
 
 **`services/order-worker/Dockerfile`**
 
@@ -1539,7 +1779,9 @@ scaffolded:
 
 ```yaml
 {{- define "op.labels" -}}
+helm.sh/chart: {{ printf "%s-%s" .root.Chart.Name .root.Chart.Version | replace "+" "_" }}
 app.kubernetes.io/name: {{ .name }}
+app.kubernetes.io/instance: {{ .root.Release.Name }}
 app.kubernetes.io/part-of: order-platform
 app.kubernetes.io/managed-by: {{ .root.Release.Service }}
 app.kubernetes.io/version: {{ .root.Chart.AppVersion | quote }}
@@ -1568,6 +1810,15 @@ reason we wrote a chart instead of two YAML files.
   value: "test"
 {{- end -}}
 ```
+
+> **The label set is Helm's recommended one, and the selector is deliberately not.** `helm.sh/chart`
+> tells you which chart version produced a live object, which is the first thing you want in an
+> incident; `app.kubernetes.io/instance` is what stops two releases of this chart in one namespace
+> colliding on every resource. Both belong on the object. Neither belongs in
+> `selector.matchLabels`, which stays `app.kubernetes.io/name` alone — a Deployment's selector is
+> **immutable**, so a label added there can never be changed without deleting and recreating the
+> workload, and `helm.sh/chart` changes on every chart bump. Put in a selector only what you will
+> never need to edit.
 
 > The static `AWS_ACCESS_KEY_ID: test` is a Floci-ism: the emulator ignores credentials but the AWS SDKs refuse to sign a request without them. In a real cluster these two lines disappear entirely and the pod gets credentials from IRSA / Workload Identity via the ServiceAccount. **That is the one place where "same binary everywhere" leaks** — worth knowing so it doesn't surprise you at promotion time.
 
@@ -1745,7 +1996,9 @@ spec:
           image: {{ include "op.image" (dict "root" $ "img" .Values.orderWorker.image) }}
           imagePullPolicy: IfNotPresent
           ports:
-            - { name: metrics, containerPort: {{ .Values.orderWorker.metricsPort }} }
+            # http-metrics, not metrics. Istio reads the protocol off the port
+            # name, and a name it does not recognise is treated as plain TCP.
+            - { name: http-metrics, containerPort: {{ .Values.orderWorker.metricsPort }} }
           env:
             {{- include "op.commonEnv" . | nindent 12 }}
             - name: DDB_TABLE
@@ -1755,15 +2008,15 @@ spec:
             - name: SERVICE_VERSION
               value: {{ .Values.orderWorker.image.tag | quote }}
           startupProbe:
-            httpGet: { path: /healthz, port: metrics }
+            httpGet: { path: /healthz, port: http-metrics }
             failureThreshold: 30
             periodSeconds: 2
           livenessProbe:
-            httpGet: { path: /healthz, port: metrics }
+            httpGet: { path: /healthz, port: http-metrics }
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
-            httpGet: { path: /readyz, port: metrics }
+            httpGet: { path: /readyz, port: http-metrics }
             periodSeconds: 5
           resources: {{- toYaml .Values.orderWorker.resources | nindent 12 }}
           securityContext:
@@ -1780,9 +2033,22 @@ spec:
   selector:
     app.kubernetes.io/name: order-worker
   ports:
-    - { name: metrics, port: 9090, targetPort: metrics }
+    - { name: http-metrics, port: 9090, targetPort: http-metrics }
 {{- end }}
 ```
+
+> **Port names are an Istio interface, so `http-metrics` and not `metrics`.** Istio picks a port's
+> protocol from the Service port name, whose expected syntax is `<protocol>[-<suffix>]` — `http`,
+> `http-metrics`, `grpc-pricing`. A name outside that convention falls back to automatic protocol
+> detection, which is best-effort and which `istioctl analyze` flags as
+> [IST0118](https://istio.io/latest/docs/reference/config/analysis/ist0118). Lose HTTP and you lose
+> the L7 features that are the reason you installed a mesh: per-route routing, retries, and
+> `istio_requests_total` with a response code in it. `appProtocol` does the same job explicitly and
+> wins over the name where both are set. The container port carries the same name so the probes and
+> the Service refer to one thing; nothing in Istio reads the container port name.
+>
+> This bites at [Phase 4](phase-4-service-mesh.md), not here — which is exactly why it goes in now.
+> Renaming a port later means editing the Service, the probes and every monitor that selects by name.
 
 **`deploy/charts/order-platform/templates/podmonitor.yaml`**
 
@@ -1820,7 +2086,7 @@ spec:
 {{- end }}
 ```
 
-> **Why a PodMonitor and not a ServiceMonitor.** A `ServiceMonitor` selects *Services* and scrapes their endpoints by port name — which is exactly what we did before Istio, with one entry for order-api's `http` port and one for order-worker's `metrics`. Under STRICT mTLS ([§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created)) both of those scrapes get a connection reset, because Prometheus has no sidecar and no certificate. The merged endpoint lives on the *pod*, on the sidecar's own port, and is not fronted by a Service — so a `PodMonitor` is the only monitor kind that can reach it. `http-envoy-prom` is the port name Istio gives 15090 on every injected pod; `/stats/prometheus` there serves Envoy's metrics with the application's merged in.
+> **Why a PodMonitor and not a ServiceMonitor.** A `ServiceMonitor` selects *Services* and scrapes their endpoints by port name — which is exactly what we did before Istio, with one entry for order-api's `http` port and one for order-worker's `http-metrics`. Under STRICT mTLS ([§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created)) both of those scrapes get a connection reset, because Prometheus has no sidecar and no certificate. The merged endpoint lives on the *pod*, on the sidecar's own port, and is not fronted by a Service — so a `PodMonitor` is the only monitor kind that can reach it. `http-envoy-prom` is the port name Istio gives 15090 on every injected pod; `/stats/prometheus` there serves Envoy's metrics with the application's merged in.
 
 > **The trap in this swap:** if a pod has no sidecar, it has no `http-envoy-prom` port, so the PodMonitor silently matches nothing and that workload vanishes from Prometheus with no error. A workload that leaves the mesh loses its metrics. Worth an alert of its own — `absent(up{job="order-platform"})` — which is precisely the kind of "the monitoring stopped" condition [§13.5](phase-2-observability.md#135-an-alert-that-means-something) argues you should page on.
 

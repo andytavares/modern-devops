@@ -224,6 +224,10 @@ The first command runs in `default`, which has no injection, so its traffic arri
 
 mTLS answers *who is calling*. It does not answer *whether they should be*. Any meshed workload can still call Floci with a valid certificate.
 
+**Deny-by-default is a property of a namespace, not of the workloads you wrote a policy for.** Istio's rule: a workload that **no** `ALLOW` policy selects accepts traffic from anything in the mesh. So a file containing nothing but per-workload `ALLOW` policies is not default-deny — it is default-deny for the workloads you remembered, and wide open for the rest. The empty-spec `deny-all` per namespace is what makes the phrase true, and it has to exist in `shop` for the same reason it exists in `floci`.
+
+The file below is that pattern twice: a `deny-all` for `floci` and a `deny-all` for `shop`, then one `ALLOW` per real caller relationship. `frontend` is a browser-facing page, so its only caller is the ingress; `order-api` is reachable from the ingress too. `order-worker` gets no policy at all and that is the correct answer — it takes no inbound traffic, and Prometheus reaches the sidecar's merged endpoint ([§9.6](#96-the-metrics-problem-you-just-created)) rather than the application, so there is nothing left to allow.
+
 **`deploy/platform/istio/authorization-policy.yaml`**
 
 ```yaml
@@ -251,7 +255,30 @@ spec:
               - "cluster.local/ns/shop/sa/order-api"
               - "cluster.local/ns/shop/sa/order-worker"
 ---
-# 3. order-api is reachable from the edge, and from nowhere else.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: shop
+spec:
+  {}
+---
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-ingress-to-frontend
+  namespace: shop
+spec:
+  action: ALLOW
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -414,15 +441,39 @@ spec:
     app.kubernetes.io/name: pricing
   ports:
     - { name: grpc, port: 50051, targetPort: grpc }
-    - { name: metrics, port: 9090, targetPort: metrics }
+    - { name: http-metrics, port: 9090, targetPort: http-metrics }
 ```
 
 **The port must be named `grpc`.** There is no `grpc:` stanza in a `VirtualService` — gRPC rides
 HTTP/2 and is routed by the ordinary `http:` block, and what tells Istio to treat this Service's
 traffic as HTTP/2 with gRPC semantics is the port name: Istio's protocol selection maps the `grpc` /
-`grpc-*` prefix to HTTP/2. Name it anything else and Istio falls back to plain TCP passthrough, where
-weights, retries, timeouts and gRPC-status-aware outlier detection — all L7 features — simply do not
-apply, while the manifests still apply cleanly and traffic still flows round-robin.
+`grpc-*` prefix to HTTP/2. Name it anything else and Istio has to guess (below), and on a guess that
+goes wrong weights, retries, timeouts and gRPC-status-aware outlier detection — all L7 features —
+simply do not apply, while the manifests still apply cleanly and traffic still flows round-robin.
+
+**The same rule applies to every other port, which is why the metrics port is `http-metrics` and not
+`metrics`.** Istio's name grammar is `protocol[-suffix]`: the part before the first hyphen must be a
+protocol it recognises — `http`, `http2`, `https`, `grpc`, `grpc-web`, `tcp`, `tls`, plus experimental
+`mongo`/`mysql`/`redis` — and the suffix after it is yours to choose. Note the order: `http-metrics`
+is valid, `metrics-http` is not.
+
+A name Istio does not recognise does not fail; it falls back to **automatic protocol detection**,
+which sniffs the opening bytes of each connection. That is a guess, made per connection, and it is
+wrong for anything server-speaks-first, adds a detection step to connection setup, and gives you no
+declared protocol to reason about when telemetry looks off. `istioctl analyze` flags it as
+**IST0118, "Port name is not under naming convention. Protocol detection is applied to the port."** —
+which is why that command is in this tutorial rather than decoration. `appProtocol: http` on the port
+is the equivalent declaration and takes precedence over the name where both are set.
+
+Rename in every place at once: the `containerPort`, the Service `port` name, its `targetPort`, and
+any probe addressing the port by name. A half-rename compiles and deploys — Kubernetes only fails the
+probe at runtime.
+
+> **A `ServiceMonitor` selects by port *name*, and silently skips a name that does not exist.** Rename
+> a port and forget the monitor and the target does not error — it disappears. `deploy/charts/order-platform/templates/servicemonitor.yaml`
+> lists one endpoint per port name in use (`http` for `order-api`, `http-metrics` for `order-worker`
+> and `pricing`) for exactly this reason. Same failure mode as [§9.6](#96-the-metrics-problem-you-just-created),
+> different cause.
 
 Confirm with `kubectl -n shop get svc pricing -o jsonpath='{.spec.ports[*].name}'`, or
 `istioctl analyze -n shop`.

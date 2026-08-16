@@ -118,6 +118,19 @@ steps:
                     # read as missing there.
                     python3 checks/verify_doc_listings.py .
 
+                    # The chart is otherwise never rendered by the build. `helm
+                    # lint --strict` and `helm template` are the two commands
+                    # Helm documents for validating one, and verify_chart.py
+                    # checks what neither can see: a probe or a Service
+                    # targetPort naming a port no container declares. Both
+                    # halves are valid YAML on their own, so that defect renders
+                    # clean, lints clean, and crash-loops the pod.
+                    helm lint --strict deploy/charts/order-platform \
+                      -f deploy/env/local/values.yaml
+                    helm template order-platform deploy/charts/order-platform \
+                      -f deploy/env/local/values.yaml -n shop \
+                      | python3 checks/verify_chart.py -
+
                     # `--tag` is Pants' documented way to select a subset of
                     # targets. Every deployable target declares `deployable` in
                     # its BUILD file, so a service the Backstage paved path
@@ -177,7 +190,7 @@ for SVC in $SERVICES; do
                 # set, which Buildah hands to each RUN step and therefore has to
                 # hold itself. Naming those capabilities is the point — the pod
                 # cannot load kernel modules, ptrace, or touch host devices, all
-                # of which `privileged: true` grants.
+                # of which a privileged pod grants.
                 securityContext:
                   privileged: false
                   allowPrivilegeEscalation: true

@@ -559,12 +559,11 @@ env:
   PIP_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
   PIP_TRUSTED_HOST: "nexus"
   GOPROXY: "http://nexus:8081/repository/go-proxy"
-  # The public checksum database is unreachable through a private proxy, so
-  # verification must be turned off for modules the proxy serves. In production
-  # you run an internal sumdb or vendor dependencies instead of disabling this.
-  GOSUMDB: "off"
-  GONOSUMDB: "*"
-  GOFLAGS: "-mod=mod"
+  # Nothing disables checksum verification. go.sum records a hash for every
+  # module in the build list, so the go command verifies against it locally and
+  # never reaches for the checksum database. GOSUMDB=off would not help here —
+  # it would only disarm verification for the next dependency added.
+  GOFLAGS: "-mod=readonly"
 
 steps:
   # ── 1. Tests, in parallel ────────────────────────────────────────────────
@@ -644,12 +643,42 @@ for SVC in $SERVICES; do
                 secret: { secretName: nexus-push }
             containers:
               - image: quay.io/buildah/stable:v1.40.1
-                # See the securityContext note below. This is a real trade.
+                # Not privileged. Buildah documents chroot isolation plus the
+                # vfs storage driver for running inside an unprivileged
+                # container: chroot avoids CLONE_NEWUSER, and vfs avoids the
+                # overlayfs mknod. What remains is the default OCI capability
+                # set, which Buildah hands to each RUN step and therefore has to
+                # hold itself. Naming those capabilities is the point — the pod
+                # cannot load kernel modules, ptrace, or touch host devices, all
+                # of which full privilege grants.
                 securityContext:
-                  privileged: true
+                  privileged: false
+                  allowPrivilegeEscalation: true
+                  capabilities:
+                    drop: ["ALL"]
+                    add:
+                      - SYS_ADMIN          # mount(2) for the build root
+                      - SYS_CHROOT         # chroot isolation
+                      - SETUID
+                      - SETGID
+                      - SETPCAP
+                      - SETFCAP
+                      - CHOWN
+                      - DAC_OVERRIDE
+                      - FOWNER
+                      - FSETID
+                      - MKNOD
+                      - KILL
+                      - NET_RAW
+                      - NET_BIND_SERVICE
+                      - AUDIT_WRITE
+                  seccompProfile:
+                    type: Unconfined
                 env:
                   - name: STORAGE_DRIVER
                     value: vfs
+                  - name: BUILDAH_ISOLATION
+                    value: chroot
                   - name: BUILDAH_FORMAT
                     value: docker
                   - name: REGISTRY_AUTH_FILE
@@ -662,15 +691,18 @@ for SVC in $SERVICES; do
                   - |
                     set -euo pipefail
 
+                    # --tls-verify=false exists only because §5.8 runs Nexus
+                    # on plain HTTP. It disables certificate verification on a
+                    # connection that carries push credentials. Behind real TLS
+                    # you delete the flag and mount the CA instead — it is not
+                    # a Buildah setting you keep.
                     buildah bud \\
                       --tls-verify=false \\
                       ${BUILD_ARGS}--file services/$SVC/Dockerfile \\
                       --tag "$REGISTRY/shop/$SVC:$SHA" \\
-                      --tag "$REGISTRY/shop/$SVC:latest" \\
                       services/$SVC
 
                     buildah push --tls-verify=false "$REGISTRY/shop/$SVC:$SHA"
-                    buildah push --tls-verify=false "$REGISTRY/shop/$SVC:latest"
 
                     echo "pushed $REGISTRY/shop/$SVC:$SHA"
 YAML
@@ -768,11 +800,22 @@ BUILDKITE_COMMIT="$(git rev-parse HEAD)" .buildkite/pipeline.sh
 
 Five things in there deserve explanation.
 
-**The image tag is the commit SHA, never `latest`.** `latest` is a mutable pointer: two clusters can run different code while both claim to run `latest`, and rollback is undefined. The SHA makes "what is running" and "what is in git" the same question. We also push `latest` as a convenience pointer for humans — nothing in the deployment path reads it.
+**The image tag is the commit SHA, never `latest`.** `latest` is a mutable pointer: two clusters can run different code while both claim to run `latest`, and rollback is undefined. The SHA makes "what is running" and "what is in git" the same question. The pipeline pushes exactly one tag per image and it is that SHA. A convenience `latest` alongside it is not free: it is a second, mutable name for the same digest, and it is the one a human reaches for at 3am. It also contradicts the guard at the top of the script, which refuses to build at all when `BUILDKITE_COMMIT` is not a SHA — for exactly the reason that a mutable tag must never be produced here. Either the rule holds for every tag the pipeline writes or it is not a rule. If you want a human-readable pointer, resolve it at read time — `git log`, the Argo CD UI — rather than minting one in the registry.
 
 **CI never touches the cluster.** The final step's total privilege is: push a commit to one repo. It has no kubeconfig, no cluster token, no `helm` binary. If this pipeline is compromised, the attacker gets a commit — which is reviewable and revertible — not cluster admin. Compare that to `helm upgrade` in CI.
 
-**`privileged: true` on the Buildah containers is the ugliest line in this tutorial.** Building OCI images needs mount and user-namespace operations that a default-restricted container cannot perform. The honest options: (a) privileged, which is what we do, and which means a malicious `Dockerfile` can escape to the node; (b) rootless Buildah with correct `/etc/subuid` mapping and a `seccomp: unconfined` annotation — fiddly and version-sensitive; (c) a remote BuildKit daemon on dedicated hardware, so build pods hold no privilege at all — the correct production answer; (d) user namespaces, which make this genuinely safe and are still stabilising in Kubernetes. **If you take one thing into production from this section, take: builds run on isolated node pools, never alongside workloads.**
+**The Buildah containers are not privileged, and the capability list is the lesson.** Building an OCI image needs real kernel operations, so a default-restricted container cannot do it. `privileged: true` is the one-word answer, and it is the wrong one: it grants *every* capability, an unconfined seccomp and AppArmor profile, and unmasked access to host devices under `/dev` — so a malicious `Dockerfile` can load a kernel module or write the host's disk. Almost none of that is what Buildah wanted.
+
+What Buildah actually documents for running inside an unprivileged container is two settings, both of which the step sets as environment variables:
+
+| Setting | What it avoids |
+|---|---|
+| `BUILDAH_ISOLATION=chroot` | `chroot(2)` instead of a user namespace, so the pod never needs `CLONE_NEWUSER` or a `/etc/subuid` mapping |
+| `STORAGE_DRIVER=vfs` | plain directory copies instead of overlayfs, so no `mknod` of an overlay device and no nested-mount problem |
+
+With those two, the step drops `ALL` and names what is left — SYS_ADMIN, SYS_CHROOT, SETUID, SETGID, SETPCAP, SETFCAP, CHOWN, DAC_OVERRIDE, FOWNER, FSETID, MKNOD, KILL, NET_RAW, NET_BIND_SERVICE, AUDIT_WRITE. That is the **default OCI capability set**, and it is not an arbitrary shopping list: Buildah hands exactly this set to every `RUN` step inside the build, so the Buildah process has to hold it in order to grant it. Ask for less and a `RUN apt-get install` fails on `chown`; ask for more and you are back to privileged by increments. `seccompProfile: Unconfined` goes with it: Buildah's own guidance for a container build is `--cap-add=SYS_ADMIN --security-opt seccomp=unconfined`, because the default seccomp profile filters the mount-family syscalls that SYS_ADMIN exists to permit. `allowPrivilegeEscalation: true` stays because setting it false also sets `no_new_privs`, which stops the setuid helpers Buildah shells out to from picking up their capabilities.
+
+The trade that remains, stated plainly: **SYS_ADMIN is potent.** It covers `mount(2)`, and mount is close enough to arbitrary filesystem control that a determined escape is not out of the question. This is a smaller hole than privileged — the pod cannot load kernel modules, cannot `ptrace` outside its own namespace, and cannot see host devices — but it is a hole. The production answer is not a shorter capability list; it is **not building in the workload cluster at all**: a remote BuildKit daemon on dedicated, isolated nodes, so build pods hold no privilege whatsoever. Kubernetes user namespaces (`hostUsers: false`) will eventually make the in-cluster version genuinely safe; they are not there yet for this workload. **If you take one thing into production from this section, take: builds run on isolated node pools, never alongside workloads.**
 
 **The loop guard exists because we chose a mono-repo.** CI commits to the repo CI builds from, so without a guard every deploy triggers a build that triggers a deploy, forever. We break it two ways, belt and braces: the commit subject carries `[skip ci]`, and `pipeline.sh` emits a no-op pipeline when `HEAD` is already a `chore(deploy):` commit. With split app/config repos this problem simply does not exist — which is the strongest practical argument for splitting them, and worth more than the convenience the mono-repo bought us.
 

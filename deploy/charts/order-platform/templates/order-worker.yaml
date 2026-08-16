@@ -52,7 +52,7 @@ spec:
           image: {{ include "op.image" (dict "root" $ "img" .Values.orderWorker.image) }}
           imagePullPolicy: IfNotPresent
           ports:
-            - { name: metrics, containerPort: {{ .Values.orderWorker.metricsPort }} }
+            - { name: http-metrics, containerPort: {{ .Values.orderWorker.metricsPort }} }
           env:
             {{- include "op.commonEnv" . | nindent 12 }}
             - name: DDB_TABLE
@@ -87,5 +87,5 @@ spec:
   selector:
     app.kubernetes.io/name: order-worker
   ports:
-    - { name: metrics, port: 9090, targetPort: metrics }
+    - { name: http-metrics, port: 9090, targetPort: http-metrics }
 {{- end }}
