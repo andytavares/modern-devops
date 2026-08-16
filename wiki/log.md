@@ -37,3 +37,23 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   `Kafka` CR hosting the topic operator was deleted first. Pages: [[sonatype-nexus]], [[buildkite]],
   [[uv]], [[go]], [[argo-cd]], [[strimzi]], [[floci]], [[ingress-nginx]], [[index]],
   [[open-questions]].
+- **2026-08-16** — Eighth tutorial defect, found when `order-platform` would not deploy: the chart
+  shipped `podMonitor.enabled: true`, but `monitoring.coreos.com` CRDs only arrive with
+  kube-prometheus-stack in §13.2 — two sections after Argo CD begins syncing the app in §11.4.
+  Argo CD fails an Application sync **as a unit**, so every workload in `shop` stayed `Missing` while
+  only the `PodMonitor` row carried an error message. §11.4–§12.6 were unreachable as written.
+  Defaulted the flag `false` in the chart's own `values.yaml` (not the `env/local` overlay, which
+  Buildkite rewrites wholesale) and moved the flip into §13.3, where it doubles as the tutorial's
+  first change delivered to the cluster purely through git. Verified: `helm template` renders 0
+  PodMonitors by default and 1 with `--set podMonitor.enabled=true`, with the other seven resources
+  unchanged. Pages: [[argo-cd]], [[prometheus]].
+- **2026-08-16** — Contradiction found and resolved while fixing the PodMonitor gate: [[prometheus]]
+  said Istio's merged metrics endpoint was *"port 15020 (`http-envoy-prom`)"*, attaching the port name
+  to the wrong port. Settled against a live injected pod (`ingress-nginx-controller`): the name
+  `http-envoy-prom` belongs to **15090** (Envoy only), while the **merged** endpoint is **15020**,
+  unnamed and advertised only through `prometheus.io/port`. The tutorial (§10.1) was already correct;
+  the wiki was wrong and now says so explicitly rather than being quietly overwritten.
+  This raises a live question about the chart itself — its `PodMonitor` selects `port:
+  http-envoy-prom`, i.e. 15090, which may mean application metrics are never scraped at all. Recorded
+  in [[open-questions]] rather than acted on: settling it needs a meshed `order-api` pod and a real
+  scrape, neither of which exists yet. Pages: [[prometheus]], [[open-questions]].

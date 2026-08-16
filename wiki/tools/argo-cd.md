@@ -63,6 +63,28 @@ path work with no extra wiring — a new manifest in a subdirectory is picked up
 > `kubectl logs deploy/argocd-server`. **Always use `https://argocd.localtest.me`** and accept the
 > self-signed certificate.
 
+> [!warning] An Application syncs as a unit — one bad resource strands all of them
+> Hit 2026-08-16. `order-platform` rendered a `PodMonitor` before kube-prometheus-stack had installed
+> the `monitoring.coreos.com` CRDs (§13.2). Argo CD does **not** skip the unrenderable resource; the
+> sync fails as a whole and every *other* resource stays `Missing`:
+>
+> ```
+> Deployment shop/order-api      OutOfSync  Missing
+> Deployment shop/order-worker   OutOfSync  Missing
+> Service    shop/order-api      OutOfSync  Missing
+> PodMonitor shop/order-platform OutOfSync  Missing  The Kubernetes API could not find
+>                                                    monitoring.coreos.com/PodMonitor …
+> ```
+>
+> `kubectl -n shop get pods` returns nothing, which reads like a scheduling or image-pull problem and
+> is neither. `status.operationState` says `one or more synchronization tasks are not valid`, and only
+> the *offending* resource carries a message — so read every row, not just the failing one.
+>
+> The general rule: **CRD-dependent resources must be gated behind a values flag until the operator
+> that owns the CRD is installed.** Ours is `podMonitor.enabled`, defaulted `false` and flipped in
+> §13.3. `SkipDryRunOnMissingResource=true` is the other lever, but it defers the error to apply time
+> rather than removing the ordering problem. See [[prometheus]].
+
 > [!warning] `PermissionDenied` usually means "does not exist"
 > `argocd app get <name>` returns `rpc error: code = PermissionDenied` for an application that is
 > simply absent — deliberate, so the API doesn't leak which app names exist. Check

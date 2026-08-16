@@ -40,6 +40,15 @@ answers and add ones it hits. An empty list here means we stopped being curious,
 
 ## Platform-wide
 
+- **Does the chart's `PodMonitor` actually reach the merged metrics endpoint?** It selects
+  `port: http-envoy-prom`, which a live injected pod shows is **15090 — Envoy's own metrics only**.
+  Istio's *merged* endpoint (application + Envoy) is **15020**, advertised via `prometheus.io/port`
+  and **unnamed** in the pod spec, so a `port:` selector cannot address it; `targetPort: 15020` would
+  be needed. If that reading is right, §13.3's check that `orders_received_total` is non-zero cannot
+  pass. *To settle:* deploy `order-api` into the mesh, install kube-prometheus-stack, enable the
+  PodMonitor and query both `orders_received_total` and `istio_requests_total`. If only the Istio
+  metric returns rows, the selector is wrong. See [[prometheus]], [[istio]].
+
 - ~~**Nothing in this wiki has been executed end to end.**~~ **Superseded 2026-08-16.** The platform
   has been built on a live kind cluster through §13: Nexus, Floci, OpenBao + ESO, Kafka/Strimzi, Istio
   with STRICT mTLS, Argo CD app-of-apps and Buildkite CI all ran. **Still unobserved:** Kiali,

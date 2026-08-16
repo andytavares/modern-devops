@@ -2322,9 +2322,33 @@ orderWorker:
     limits:   { memory: 128Mi }
 
 podMonitor:
-  enabled: true
+  # false until §13.2 installs kube-prometheus-stack and with it the
+  # monitoring.coreos.com CRDs. Argo CD does not skip a resource whose CRD is
+  # missing — it fails the whole sync, so leaving this true strands every
+  # workload in `shop` as Missing. Flip to true in §13.3 and commit.
+  enabled: false
   interval: 15s
 ```
+
+> [!warning] **A missing CRD fails the whole Application, not just the one resource.**
+> This is the ordering trap in this chart, and it is worth internalising because it generalises. The
+> `PodMonitor` needs `monitoring.coreos.com/v1`, which arrives with kube-prometheus-stack in
+> [§13.2](#132-install) — two whole sections after Argo CD starts syncing this app in
+> [§11.4](#114-the-app-of-apps). If `podMonitor.enabled` is `true` before then, the sync fails with:
+>
+> ```
+> The Kubernetes API could not find monitoring.coreos.com/PodMonitor for requested
+> resource shop/order-platform. Make sure the "PodMonitor" CRD is installed.
+> ```
+>
+> and **`order-api`, `order-worker`, both Services, both ServiceAccounts and the Ingress all stay
+> `Missing`.** Argo CD syncs an Application as a unit: one invalid task and none of them are applied.
+> `kubectl -n shop get pods` returns nothing, which reads like a scheduling or image problem and is
+> neither. Sections §11.4 to §12.6 simply cannot work with this left on.
+>
+> Note the flag belongs in the **chart's** `values.yaml`, not in `deploy/env/local/values.yaml` —
+> Buildkite rewrites that overlay wholesale on every deploy ([§12.5](#125-the-pipeline)) and anything
+> else you put there is lost on the next green build.
 
 **`deploy/charts/order-platform/templates/_helpers.tpl`**
 
@@ -3459,10 +3483,24 @@ Grafana is now at <http://grafana.localtest.me> (`admin` / `admin`).
 
 ### 13.3 Confirm your app is being scraped
 
-The `PodMonitor` is already deployed by Argo CD (the CRD exists now, so re-sync if it was skipped earlier):
+The CRDs exist now, so turn the `PodMonitor` on. It has been off since [§10.1](#101-one-chart-two-workloads) precisely because this CRD didn't exist yet:
 
 ```bash
-argocd app sync order-platform
+# In deploy/charts/order-platform/values.yaml — NOT the env/local overlay,
+# which Buildkite rewrites on every deploy.
+podMonitor:
+  enabled: true
+  interval: 15s
+```
+
+Commit it and let Argo CD pick it up — this is the first change in the tutorial that reaches the cluster purely through git, which is the whole point of §11:
+
+```bash
+git add deploy/charts/order-platform/values.yaml
+git commit -m "feat(monitoring): enable the order-platform PodMonitor"
+git push
+
+argocd app sync order-platform      # or wait up to 3 minutes for the poll
 kubectl -n shop get podmonitor
 ```
 
