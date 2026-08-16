@@ -1,0 +1,43 @@
+wiki/concepts/immutable-image-tags.md
+  s_a10aebdc52be9f::t_f39c0cb92d48f3 6
+  s_a10aebdc52be9f::t_135036be3f5e95 29-43
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_33a01e5c7e3847 3167-3173,3176-3178
+  s_a10aebdc52be9f::t_adc64070f6a4fe 935-964,966-968
+  s_a10aebdc52be9f::t_818138704c1f62 535,556,909
+  s_a10aebdc52be9f::t_a1275d24432a16 965
+  s_a10aebdc52be9f::t_171f05bff45088 3179
+wiki/log.md
+  s_a10aebdc52be9f::t_f39c0cb92d48f3 76-88
+wiki/tools/buildah.md
+  s_a10aebdc52be9f::t_f39c0cb92d48f3 8
+  s_a10aebdc52be9f::t_cc4fa39d63cefe 47-82
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_142e688e731cce 10-16,19-21
+  s_a10aebdc52be9f::t_5d4ef7f03c370f 22
+services/order-api/Dockerfile
+  s_a10aebdc52be9f::t_818138704c1f62 2,23
+services/order-worker/Dockerfile
+  s_a10aebdc52be9f::t_818138704c1f62 2
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "aceac3c606836e52705e3c54b9daf88e94539260",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
