@@ -160,3 +160,20 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   `FROM node:24-trixie-slim` lines were fully qualified — Buildah resolved `node` only via its
   shortname alias list, the same luck that `python` had and `golang` did not (see [[buildah]]).
   Pages: [[backstage]], [[buildah]].
+- **2026-08-16** — Full audit of the repo against `modern-devops-tutorial.md`, mechanically rather
+  than by reading. Extracted all 51 ``**`path`** + fenced block`` listings and diffed each against the
+  real file. Result: **0 missing files**, 47 exact matches, and 4 declared partials that were proven
+  correct rather than waved through — the two `.buildkite/pipeline.sh` halves (§12.5 + §14.8) were
+  shown to reconstruct the file byte-for-byte, and every line of the `portal/.yarnrc.yml` and
+  `packages/backend/src/index.ts` fragments was confirmed present in the real file.
+  Seven drifts found and fixed, all of them cases where a fix had landed in a file but only half in
+  the tutorial: the `pyproject.toml` uv-index comment, the `values.yaml` `scaffolded:` block, the
+  PodMonitor 15020 rationale, the `nexus-pull` ExternalSecret in `backstage-secrets.yaml`, a
+  `golang:1.26` rationale block that existed only in the tutorial and not in `pipeline.sh`, and two
+  files CI depends on that the tutorial never listed at all — `portal/Dockerfile` and
+  `portal/.dockerignore`. §14.8 also still claimed `packages/backend/Dockerfile` "already contains"
+  the multi-stage build, which is the false statement that produced the exit-125 failure; corrected.
+  Also swept 50 internal `§` anchors (one broken: `#12-buildkite-ci`) and re-verified the version
+  matrix by reading versions back off the **live cluster** — two were wrong: Yarn (4.4.1 → 4.18.0,
+  the value removed as a defect) and kube-prometheus-stack (82.14.1 → 88.3.0, which is what is
+  actually installed and what §13 was validated on). Pages: [[log]].
