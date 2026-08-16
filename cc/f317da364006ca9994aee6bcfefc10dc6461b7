@@ -1,0 +1,33 @@
+protos/shop/v1/pricing.proto
+  s_a10aebdc52be9f::t_07cfaaa45ad15f 1-35
+pants.toml
+  s_a10aebdc52be9f::t_496ee233072d72 1-10,12,15-48,58-83
+  s_a10aebdc52be9f::t_f5fac1ffe2cc6e 11,13-14
+  s_a10aebdc52be9f::t_4146d17ea0158c 49-57
+protos/shop/v1/BUILD
+  s_a10aebdc52be9f::t_07cfaaa45ad15f 1-8
+3rdparty/python/requirements.txt
+  s_a10aebdc52be9f::t_b9b87875c71b37 1-25
+.gitignore
+  s_a10aebdc52be9f::t_2e89f0d16be8e2 6-11
+3rdparty/python/BUILD
+  s_a10aebdc52be9f::t_b9b87875c71b37 1-4
+locks/python-default.lock
+  s_a10aebdc52be9f::t_c185f7e25f7c3e 1-2475
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "ccf317da364006ca9994aee6bcfefc10dc6461b7",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
