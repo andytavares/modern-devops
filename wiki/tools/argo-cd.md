@@ -63,6 +63,35 @@ path work with no extra wiring — a new manifest in a subdirectory is picked up
 > `kubectl logs deploy/argocd-server`. **Always use `https://argocd.localtest.me`** and accept the
 > self-signed certificate.
 
+> [!warning] Permanently `OutOfSync` while `argocd app diff` shows nothing — hit 2026-08-16
+> `platform` sat `OutOfSync` on three `ExternalSecret`s. `argocd app diff` printed nothing, and
+> `kubectl diff` against the same files reported **no difference at all**. The synced revision was
+> exactly `origin/main` and auto-sync was running every reconcile.
+>
+> Cause: the CRD **defaults fields the API server injects** and git does not contain —
+> `deletionPolicy`, `engineVersion`, `mergePolicy`, `conversionStrategy`, `decodingStrategy`,
+> `metadataPolicy`, `nullBytePolicy`. Argo CD's default diff is **client-side**: it compares the
+> rendered manifest against the live object and reads every defaulted field as drift. `kubectl diff`
+> misses it because it is already a dry-run server-side apply — which is exactly the fix.
+>
+> ```yaml
+> metadata:
+>   annotations:
+>     argocd.argoproj.io/compare-options: ServerSideDiff=true
+> ```
+>
+> > *"Apply the `ServerSideDiff=true` annotation to the Application resource. This enables the dry-run
+> > Server-Side Apply strategy for diffing."* — [diff strategies](https://argo-cd.readthedocs.io/en/stable/user-guide/diff-strategies)
+>
+> It is an **annotation**, not a `syncOptions` entry, and it needs a refresh to take effect — the
+> status does not flip on its own. `ServerSideApply=true` in `syncOptions` is a prerequisite and is
+> *not* sufficient by itself: applying server-side while diffing client-side is what produces the
+> permanent false positive. Add `IncludeMutationWebhook=true` alongside it if a mutating webhook is
+> also rewriting your objects.
+>
+> Rule of thumb: **a resource that is `OutOfSync` with an empty diff is a diff-strategy problem, not
+> drift.** Reach for `ServerSideDiff` before `ignoreDifferences`.
+
 > [!warning] An Application syncs as a unit — one bad resource strands all of them
 > Hit 2026-08-16. `order-platform` rendered a `PodMonitor` before kube-prometheus-stack had installed
 > the `monitoring.coreos.com` CRDs (§13.2). Argo CD does **not** skip the unrenderable resource; the

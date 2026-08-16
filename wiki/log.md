@@ -86,3 +86,14 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   [[immutable-image-tags]] forbids. `pipeline.sh` now resolves it with `git rev-parse` and refuses to
   build on any non-hex value. Verified all three cases (`HEAD`, a real SHA, garbage → exit 1).
   Pages: [[buildah]], [[immutable-image-tags]].
+- **2026-08-16** — `platform` reported `OutOfSync` on three ExternalSecrets while `argocd app diff`
+  and `kubectl diff` both showed **no difference**, on the exact revision Argo had synced. Cause: the
+  ExternalSecrets CRD defaults seven fields the API server injects and git does not carry
+  (`deletionPolicy`, `engineVersion`, `mergePolicy`, `conversionStrategy`, `decodingStrategy`,
+  `metadataPolicy`, `nullBytePolicy`). [[argo-cd]] diffs **client-side** by default and reads every
+  one of them as drift; `kubectl diff` misses it because it is already a dry-run server-side apply —
+  which is the fix. Added `argocd.argoproj.io/compare-options: ServerSideDiff=true` to the `platform`
+  Application. It is an annotation, not a syncOption, and `ServerSideApply=true` alone is not enough:
+  applying server-side while diffing client-side is what creates the permanent false positive.
+  Verified live — `Synced` after a hard refresh. General rule recorded: an `OutOfSync` resource with
+  an empty diff is a diff-strategy problem, not drift. Pages: [[argo-cd]].

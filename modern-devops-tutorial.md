@@ -2922,6 +2922,16 @@ kind: Application
 metadata:
   name: platform
   namespace: argocd
+  annotations:
+    # Diff by dry-run server-side apply instead of comparing the rendered
+    # manifest to the live object. The ExternalSecrets CRD defaults a pile of
+    # fields the API server injects — deletionPolicy, engineVersion,
+    # mergePolicy, conversionStrategy, decodingStrategy, metadataPolicy,
+    # nullBytePolicy — none of which are in git. A client-side diff sees them
+    # as drift and parks this Application on OutOfSync forever, while
+    # `kubectl diff` (which is already server-side) reports no difference at
+    # all. Requires ServerSideApply, which is set below.
+    argocd.argoproj.io/compare-options: ServerSideDiff=true
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
