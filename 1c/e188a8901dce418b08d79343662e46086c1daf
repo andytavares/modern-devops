@@ -1,0 +1,18 @@
+deploy/platform/grafana-dashboard.yaml
+  h_16ba00fe96244d 1-64
+deploy/platform/alerts.yaml
+  h_16ba00fe96244d 1-40
+infra/monitoring-values.yaml
+  h_16ba00fe96244d 1-41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "1ce188a8901dce418b08d79343662e46086c1daf",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
