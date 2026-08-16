@@ -71,6 +71,14 @@ subprocess_env_vars = [
   "PATH",
 ]
 
+[python-protobuf]
+# protoc also emits .pyi stubs for each generated file. Without this, mypy sees
+# pricing_pb2.py building its message classes dynamically via
+# _builder.BuildTopDescriptorsAndMessages(...) into globals() and reports
+# "PriceOrderRequest is not defined" — the classes genuinely do not exist
+# statically. Pants' help prefers this over the older mypy_plugin option.
+generate_type_stubs = true
+
 [mypy]
 install_from_resolve = "python-default"
 
