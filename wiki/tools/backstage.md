@@ -107,6 +107,26 @@ is the point.
 > `no items matching glob "/src/plugins" copied (1 filtered out using /src/.dockerignore)`.
 > The two facts compound: even the README wouldn't have saved it.
 
+> [!warning] The Helm chart discards the image's `CMD` — hit 2026-08-16
+> Chart 2.10.0 sets `command: ["node","packages/backend"]` and `args: []`, replacing the Dockerfile's
+> `CMD` and silently dropping its `--config` flags. Backstage then loads only `app-config.yaml`, the
+> *development* config, whose database is `better-sqlite3` in `:memory:`. The production image has no
+> compiled SQLite binding, so every plugin fails with `Failed to instantiate service 'core.auth'` and
+> `Could not locate the bindings file ... better_sqlite3.node` — naming neither the config nor the
+> database, for a database the deployment does not use.
+>
+> The tell is the first log line: `MergedConfigSource{...}` lists exactly which files were read. If
+> `app-config.production.yaml` is missing from it, stop and fix `args` before debugging anything else.
+>
+> Liveness passes while readiness returns `{"message":"Backend has not started yet"}`, so the pod sits
+> `0/1 Running` instead of crash-looping — a state that invites waiting rather than investigating.
+
+> [!warning] `backend.listen` takes an object, not a string — hit 2026-08-16
+> `listen: ':7007'` was valid in older Backstage and is now rejected:
+> `Invalid type in config for key 'backend.listen', got string, wanted object`. Use the object form,
+> and set `host: 0.0.0.0` — the `127.0.0.1` default binds to loopback, where the kubelet's probes
+> cannot reach it.
+
 > [!warning] The `backstage` namespace needs its own pull secret. Hit 2026-08-16
 > ```
 > Failed to pull image "nexus:8082/shop/portal:dev": pull access denied,

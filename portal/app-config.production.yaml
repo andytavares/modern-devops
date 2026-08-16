@@ -3,7 +3,14 @@ app:
 
 backend:
   baseUrl: http://backstage.localtest.me
-  listen: ':7007'
+  listen:
+    # Object form. The string shorthand (`listen: ':7007'`) was valid in older
+    # Backstage and is now rejected outright:
+    #   Invalid type in config for key 'backend.listen', got string, wanted object
+    # host must be 0.0.0.0, not the 127.0.0.1 default, or the container binds to
+    # loopback and the kubelet's probes never reach it.
+    host: 0.0.0.0
+    port: 7007
   cors:
     origin: http://backstage.localtest.me
   database:

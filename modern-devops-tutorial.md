@@ -4104,7 +4104,14 @@ app:
 
 backend:
   baseUrl: http://backstage.localtest.me
-  listen: ':7007'
+  listen:
+    # Object form. The string shorthand (`listen: ':7007'`) was valid in older
+    # Backstage and is now rejected outright:
+    #   Invalid type in config for key 'backend.listen', got string, wanted object
+    # host must be 0.0.0.0, not the 127.0.0.1 default, or the container binds to
+    # loopback and the kubelet's probes never reach it.
+    host: 0.0.0.0
+    port: 7007
   cors:
     origin: http://backstage.localtest.me
   database:
@@ -4890,6 +4897,31 @@ postgresql:
     username: bn_backstage
     password: backstage-change-me
 ```
+
+> [!warning] **The chart throws away your image's `CMD`, and the failure lands three layers away.**
+> Chart 2.10.0 defaults to `command: ["node", "packages/backend"]` with `args: []`. That *replaces*
+> the Dockerfile's `CMD`, and the Dockerfile's `CMD` is where the `--config` flags live. Nothing warns
+> you. Backstage starts, binds its port, answers liveness — and loads only `app-config.yaml`:
+>
+> ```
+> Loading config from MergedConfigSource{FileConfigSource{path="/app/app-config.yaml"}, EnvConfigSource{count=1}}
+> ```
+>
+> That is the *development* config, whose database block is
+> `client: better-sqlite3, connection: ':memory:'`. The production image has no compiled SQLite
+> binding, so every plugin dies with:
+>
+> ```
+> Failed to instantiate service 'core.auth' for 'app' ...
+> Could not locate the bindings file ... better_sqlite3.node
+> ```
+>
+> An error naming neither the config file nor the database — for a database you are not using. The
+> tell is that first log line: `MergedConfigSource{...}` lists exactly which files were read. If
+> `app-config.production.yaml` is not in it, fix `args` before debugging anything else.
+>
+> Liveness stays green while readiness returns `{"message":"Backend has not started yet"}`, so the pod
+> sits `0/1 Running` rather than crash-looping — a state people wait out instead of investigating.
 
 > [!warning] **Do not set `POSTGRES_*` in `extraEnvVars` — the chart already does.**
 > With `postgresql.enabled: true` the chart wires the backend to its own Postgres subchart, emitting

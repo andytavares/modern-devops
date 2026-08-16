@@ -179,9 +179,9 @@
   "active": "4cd2b162c4b02842",
   "lastOpenFiles": [
     "tools/vite.md",
-    "tools/grpc.md",
     "tools/pex.md",
     "tools/pants.md",
+    "tools/grpc.md",
     "index.md",
     "tools/prometheus.md.tmp.59249.ddb574f3e863",
     "open-questions.md"
