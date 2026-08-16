@@ -84,6 +84,31 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: frontend
+  annotations:
+    # Both annotations exist for one reason: this Ingress terminates outside the
+    # mesh and its backend is inside it, with PeerAuthentication STRICT (§9.4).
+    #
+    # `service-upstream` stops NGINX load-balancing across raw pod IPs and sends
+    # everything to the Service ClusterIP instead. Istio cannot identify a
+    # service from a bare endpoint IP, so without this the sidecar has nothing
+    # to originate mTLS *to*.
+    #
+    # `upstream-vhost` is the half that actually fixes it. NGINX preserves the
+    # browser's `Host:` — `{{ .Values.frontend.ingress.host }}` — and Envoy routes HTTP by authority, not by
+    # address. That hostname matches no service in the mesh, so the request
+    # falls through to PassthroughCluster and leaves as plaintext, which the
+    # destination sidecar resets. What you see at the edge is:
+    #
+    #   upstream connect error or disconnect/reset before headers.
+    #   reset reason: connection termination
+    #
+    # …which reads like the backend is down. It is not; it is refusing an
+    # unauthenticated connection, exactly as instructed. Rewriting the upstream
+    # Host to the service FQDN lets Envoy match the real cluster and issue a
+    # proper mTLS connection. Confirmed by
+    # `connection_security_policy.mutual_tls` at the destination reporter.
+    nginx.ingress.kubernetes.io/service-upstream: "true"
+    nginx.ingress.kubernetes.io/upstream-vhost: "frontend.{{ .Release.Namespace }}.svc.cluster.local"
 spec:
   ingressClassName: {{ .Values.frontend.ingress.className }}
   rules:
