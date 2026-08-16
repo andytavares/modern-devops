@@ -1,0 +1,30 @@
+deploy/argocd/apps/platform.yaml
+  s_a10aebdc52be9f::t_94cc9f50945c98 6-15
+wiki/tools/argo-cd.md
+  s_a10aebdc52be9f::t_7cafccbd856c1b 66-94
+wiki/log.md
+  s_a10aebdc52be9f::t_4df867271b7734 89-99
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_ac02fe1d51b7e4 2925-2934
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "97e5caf2a70948233f0d609017a9da07f3bc665c",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
