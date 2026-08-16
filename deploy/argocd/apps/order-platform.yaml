@@ -8,7 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    repoURL: https://github.com/andytavares/modern-devops.git
     targetRevision: main
     path: deploy/charts/order-platform
     helm:
