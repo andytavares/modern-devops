@@ -24,9 +24,9 @@ esac
 # BUILD file in it is a service, and that is the entire contract. This is what
 # lets the Backstage paved path (§14.6) add a service without touching CI.
 #
-# It used to key off Dockerfile, which is still there — but BUILD is the more
-# honest signal now: a directory Pants does not know about cannot be built,
-# tested or packaged, so it is not a service this pipeline can deliver.
+# BUILD is the signal rather than Dockerfile alone: a directory Pants does not
+# know about cannot be built, tested or packaged, so it is not a service this
+# pipeline can deliver.
 SERVICES="$(cd services && ls -d */ 2>/dev/null | sed 's#/##' | while read -r s; do
   [ -f "$s/BUILD" ] && [ -f "$s/Dockerfile" ] && echo "$s"
 done | sort | tr '\n' ' ')"
@@ -75,10 +75,8 @@ env:
 
 steps:
   # ── 1. One step, every language ──────────────────────────────────────────
-  # This used to be two steps — a Python one running uv/ruff/pytest and a Go
-  # one running go vet/test — which had to be edited by hand every time a
-  # service was added, in a language-specific way. Pants replaces both with
-  # one invocation that discovers what changed and what it depends on.
+  # One invocation covers every language, and it discovers what changed and
+  # what depends on it. Adding a service does not mean editing this step.
   #
   # `pants package` runs here too, rather than in the image build, because the
   # build steps below are daemonless Buildah pods with no toolchain: no Python,
@@ -113,12 +111,23 @@ steps:
 
                     pants lint check test ::
 
+                    # Runs here rather than as a Pants test because it reads
+                    # the whole checkout: every file listing in docs/ must
+                    # still name a real path, and a listing that shows an
+                    # entire file must show the current one. A Pants sandbox
+                    # only holds declared dependencies, so every listing would
+                    # read as missing there.
+                    python3 checks/verify_doc_listings.py .
+
                     # Only the deployable artifacts. `::` would also build the
                     # frontend bundle, which the frontend image rebuilds itself.
-                    pants package \
-                      services/order-api:bin \
-                      services/order-worker:bin \
-                      services/pricing:bin
+                    #
+                    # Discovered, not listed, for the same reason the build
+                    # steps below are: a hand-written list omits every service
+                    # the Backstage paved path (§14.6) adds, and the omission
+                    # surfaces as `COPY: no such file` in that service's image
+                    # build rather than as a missing package step.
+                    pants package $(ls -d services/*/BUILD | sed 's#/BUILD#:bin#')
 
                     ls -la dist/
 
@@ -148,11 +157,8 @@ YAML
 # pricing.pex, order-worker), which is what the `output_path` on each Pants
 # target exists to guarantee.
 for SVC in $SERVICES; do
-  # No build args. The old pipeline passed --build-arg VERSION=$SHA into
-  # `-ldflags "-X main.version=..."`, but main.go has no such package-level
-  # symbol — it reads SERVICE_VERSION from the environment, which the Helm
-  # chart sets. Go's -X is a silent no-op when the symbol is absent, so that
-  # machinery never did anything. Removed rather than carried forward.
+  # No build args. Version reaches the binary through SERVICE_VERSION in the
+  # environment, which the Helm chart sets — not through the linker.
 
   cat <<YAML
 
@@ -337,10 +343,9 @@ cat <<YAML
                     orderWorker:
                       image:
                         tag: "$SHA"
-                    # pricing and frontend were added later and were missed
-                    # here, so they fell back to the chart default tag "dev" —
-                    # an image CI never builds. The pods then sat in
-                    # ImagePullBackOff while every other service deployed fine.
+                    # Every service the chart can deploy needs a tag here. One
+                    # that is missing falls back to the chart default "dev" —
+                    # an image CI never builds — and only that service fails.
                     pricing:
                       v1:
                         image:

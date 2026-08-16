@@ -34,8 +34,10 @@ pants_ignore.add = [
   "/portal",          # Backstage owns its own Yarn workspace; not ours to build
   "/wiki",
   "/raw",
-  "/docs",
 ]
+# `/docs` is deliberately NOT ignored: `checks/` reads the phase files to
+# assemble the single-file edition and to verify every listing still matches
+# the file it names, so Pants has to be able to see them.
 
 [source]
 # Import roots. `protos` is listed so generated code is importable as
