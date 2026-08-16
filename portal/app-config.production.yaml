@@ -39,10 +39,10 @@ catalog:
     - allow: [Component, System, API, Resource, Location, Template, Group, User]
   locations:
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/catalog-info.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/catalog-info.yaml
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/deploy/backstage/templates/new-service/template.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/deploy/backstage/templates/new-service/template.yaml
       rules: [{ allow: [Template] }]
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/deploy/backstage/templates/new-bucket/template.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/deploy/backstage/templates/new-bucket/template.yaml
       rules: [{ allow: [Template] }]

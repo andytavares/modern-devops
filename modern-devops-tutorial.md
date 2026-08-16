@@ -4898,6 +4898,28 @@ postgresql:
     password: backstage-change-me
 ```
 
+> [!warning] **`https`, not `http` — Backstage cannot run in an insecure context.**
+> Same trap as Argo CD in [§11.2](#112-install), for a different reason, and this one is worse because
+> it fails *after* the page loads. Over `http://backstage.localtest.me` you get a **white screen**: the
+> HTML arrives, the backend logs nothing wrong, readiness is green, and React never mounts.
+>
+> Two things go wrong, and fixing only the first is a trap:
+>
+> 1. Backstage's default CSP includes `upgrade-insecure-requests`, so the browser rewrites every
+>    `/static/*.js` request to `https://` — where ingress-nginx answers with its self-signed
+>    *"Kubernetes Ingress Controller Fake Certificate"*, which the browser rejects. No scripts, blank
+>    page. You can suppress the directive, and then you hit:
+> 2. ```
+>    TypeError: globalThis.crypto.randomUUID is not a function
+>    ```
+>    `crypto.randomUUID` exists only in a **secure context** — HTTPS, or `localhost`. `localtest.me`
+>    resolves to 127.0.0.1 but is *not* `localhost`, so the browser does not grant it. Backstage calls
+>    it during sign-in. There is no config for this; the only fix is to serve the app over TLS.
+>
+> So use `https://` and click through the certificate warning, exactly as you did for Argo CD. Both
+> problems disappear at once: the CSP upgrade becomes a no-op because you are already on HTTPS, and
+> `crypto.randomUUID` exists because the context is now secure.
+
 > [!warning] **The chart throws away your image's `CMD`, and the failure lands three layers away.**
 > Chart 2.10.0 defaults to `command: ["node", "packages/backend"]` with `args: []`. That *replaces*
 > the Dockerfile's `CMD`, and the Dockerfile's `CMD` is where the `--config` flags live. Nothing warns
@@ -4959,7 +4981,7 @@ helm upgrade --install backstage backstage/backstage \
   --values infra/backstage-values.yaml --wait
 ```
 
-Open <http://backstage.localtest.me>, sign in as Guest, and you should see the catalogue from §14.5 and both templates under **Create**.
+Open <https://backstage.localtest.me>, accept the certificate warning, and sign in as Guest, and you should see the catalogue from §14.5 and both templates under **Create**.
 
 > **The portal is the one thing here still deployed by `helm install` from your laptop** — imperatively, outside GitOps, with a tag you set by hand. That is a deliberate stopping point, not an oversight: making it an Argo CD `Application` and teaching CI to bump its tag is exactly the work of [§11.4](#114-the-app-of-apps) and [§12.5](#125-the-pipeline) applied one more time, and doing it yourself is a better test of whether those two sections landed than reading a third worked example. Note the irony while you're at it — **the tool whose entire job is paving paths for other people is, right now, the least paved thing in the cluster.** That is how platforms usually look.
 
