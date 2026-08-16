@@ -1,0 +1,56 @@
+wiki/tools/floci.md
+  s_a10aebdc52be9f::t_29235e17bc26b2 37-61
+wiki/open-questions.md
+  s_a10aebdc52be9f::t_8d831d0982fa73 31-36
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_383bd7ad6dd4cd 93-96
+  s_a10aebdc52be9f::t_7a453457f6005a 98-103
+docs/phase-1-the-application.md
+  s_a10aebdc52be9f::t_fc96c0cb800909 1046-1050
+  s_a10aebdc52be9f::t_8f25dc991f3b4d 841-847
+docs/README.md
+  s_a10aebdc52be9f::t_67d596437bca42 10-24
+wiki/tools/sonatype-nexus.md
+  s_a10aebdc52be9f::t_b70ac62684e262 48-83
+wiki/tools/openbao.md
+  s_a10aebdc52be9f::t_dcf72ce19ed1cb 38-66
+frontend/tsconfig.json
+  s_a10aebdc52be9f::t_039470cad6b6d3 3-6
+wiki/log.md
+  s_a10aebdc52be9f::t_8902a683439eb7 233-268
+.buildkite/pants-ci.Dockerfile
+  s_a10aebdc52be9f::t_b896b9f91fc818 1-24,31,35-52
+  s_a10aebdc52be9f::t_ae6697694c6de9 25-26,34
+  s_a10aebdc52be9f::t_7313ab973445c9 27-30,32-33
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_fa22d4fc990bac 1695-1699
+  s_a10aebdc52be9f::t_ffb91c27743c8a 111-113
+  s_a10aebdc52be9f::t_cdcba60a86801b 1178-1183
+  s_a10aebdc52be9f::t_a9b7ef104298bb 27-28
+  s_a10aebdc52be9f::t_7ba3116f62882c 1490-1496
+docs/phase-0-foundations.md
+  s_a10aebdc52be9f::t_4c07064e358a9c 271-276
+deploy/platform/buildkite-secrets.yaml
+  s_a10aebdc52be9f::t_076e0fae867491 31-69
+services/order-api/order_api/main.py
+  s_a10aebdc52be9f::t_542efd53db2a95 13,15
+wiki/index.md
+  s_a10aebdc52be9f::t_024689c1fe7f4c 21-28
+  s_a10aebdc52be9f::t_3a2a90a7cc6013 67-68,71
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "d1646508f2b775b5465145cd292f5f3b4b0268b9",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
