@@ -1,0 +1,14 @@
+deploy/platform/kiali-ingress.yaml
+  h_16ba00fe96244d 1-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "9ea026dfcce9c8c31068c2d8f87caa2fe9b7fa31",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
