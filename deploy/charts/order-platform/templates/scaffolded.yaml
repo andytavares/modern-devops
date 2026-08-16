@@ -1,0 +1,82 @@
+{{- range $path, $_ := .Files.Glob "services/*.yaml" }}
+{{- $svc := $.Files.Get $path | fromYaml }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $svc.name }}
+  labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $svc.name }}
+  labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 4 }}
+spec:
+  replicas: {{ $svc.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $svc.name }}
+  template:
+    metadata:
+      labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: {{ $svc.port | quote }}
+    spec:
+      serviceAccountName: {{ $svc.name }}
+      imagePullSecrets:
+        - name: {{ $.Values.global.imagePullSecret }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: {{ $svc.name }}
+          # Every scaffolded service is built from the same commit, so they all
+          # carry the same tag. CI writes it once, in deploy/env/local/values.yaml.
+          image: "{{ $.Values.global.registry }}/shop/{{ $svc.name }}:{{ $.Values.scaffolded.tag }}"
+          ports:
+            - { name: http, containerPort: {{ $svc.port }} }
+          env:
+            {{- include "op.commonEnv" $ | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $svc.name }}
+  labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ $svc.name }}
+  ports:
+    - { name: http, port: 80, targetPort: http }
+{{- if $svc.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $svc.name }}
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: {{ $svc.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $svc.name }}
+                port: { name: http }
+{{- end }}
+{{- end }}

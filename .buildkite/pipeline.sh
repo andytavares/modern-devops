@@ -167,6 +167,49 @@ for SVC in $SERVICES; do
 YAML
 done
 
+# The portal is not a service and does not fit the services template: a
+# different Dockerfile path, a different context, and a build measured in
+# double-digit minutes.
+cat <<YAML
+
+  - label: ":backstage: build portal ($SHA)"
+    key: build-portal
+    branches: "main"
+    agents: { queue: kubernetes }
+    timeout_in_minutes: 45
+    plugins:
+      - kubernetes:
+          podSpec:
+            volumes:
+              - name: nexus-auth
+                secret: { secretName: nexus-push }
+            containers:
+              - image: quay.io/buildah/stable:v1.40.1
+                securityContext:
+                  privileged: true
+                env:
+                  - name: STORAGE_DRIVER
+                    value: vfs
+                  - name: BUILDAH_FORMAT
+                    value: docker
+                  - name: REGISTRY_AUTH_FILE
+                    value: /auth/config.json
+                volumeMounts:
+                  - name: nexus-auth
+                    mountPath: /auth
+                    readOnly: true
+                command:
+                  - |
+                    set -euo pipefail
+                    buildah bud \\
+                      --tls-verify=false \\
+                      --file portal/packages/backend/Dockerfile \\
+                      --tag "$REGISTRY/shop/portal:$SHA" \\
+                      portal
+
+                    buildah push --tls-verify=false "$REGISTRY/shop/portal:$SHA"
+YAML
+
 # ── 3. The handoff to CD: write the tag into git ───────────────────────────
 cat <<YAML
 

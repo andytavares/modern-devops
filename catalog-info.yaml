@@ -1,0 +1,52 @@
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: order-platform
+  description: Order intake and persistence
+spec:
+  owner: group:default/platform
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: order-api
+  description: FastAPI order intake
+  annotations:
+    github.com/project-slug: <your-github-user>/modern-devops
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/platform
+  system: order-platform
+  providesApis: [orders]
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: order-worker
+  description: Go consumer, writes to S3 and DynamoDB
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/platform
+  system: order-platform
+  consumesApis: [orders]
+  dependsOn: [resource:default/orders-raw]
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: orders-raw
+  description: S3 bucket holding raw order payloads
+spec:
+  type: s3-bucket
+  owner: group:default/platform
+  system: order-platform
+---
+apiVersion: backstage.io/v1alpha1
+kind: Group
+metadata:
+  name: platform
+spec:
+  type: team
+  children: []

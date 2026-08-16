@@ -1,0 +1,41 @@
+app:
+  baseUrl: http://backstage.localtest.me
+
+backend:
+  baseUrl: http://backstage.localtest.me
+  listen: ':7007'
+  cors:
+    origin: http://backstage.localtest.me
+  database:
+    client: pg
+    connection:
+      host: ${POSTGRES_HOST}
+      port: ${POSTGRES_PORT}
+      user: ${POSTGRES_USER}
+      password: ${POSTGRES_PASSWORD}
+
+integrations:
+  github:
+    - host: github.com
+      # Fine-grained PAT, this repository only, Contents + Pull requests: RW.
+      token: ${GITHUB_TOKEN}
+
+auth:
+  providers:
+    guest:
+      # Backstage refuses guest sign-in outside development unless you say this
+      # out loud. Read §14.7 before you copy this line anywhere real.
+      dangerouslyAllowOutsideDevelopment: true
+
+catalog:
+  rules:
+    - allow: [Component, System, API, Resource, Location, Template, Group, User]
+  locations:
+    - type: url
+      target: https://github.com/<your-github-user>/modern-devops/blob/main/catalog-info.yaml
+    - type: url
+      target: https://github.com/<your-github-user>/modern-devops/blob/main/deploy/backstage/templates/new-service/template.yaml
+      rules: [{ allow: [Template] }]
+    - type: url
+      target: https://github.com/<your-github-user>/modern-devops/blob/main/deploy/backstage/templates/new-bucket/template.yaml
+      rules: [{ allow: [Template] }]
