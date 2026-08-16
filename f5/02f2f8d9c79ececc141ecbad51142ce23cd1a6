@@ -1,0 +1,67 @@
+wiki/index.md
+  s_a10aebdc52be9f::t_bf4c38b36ea85e 9-15
+wiki/tools/go.md
+  s_a10aebdc52be9f::t_b0477ddf12d50d 8
+  s_a10aebdc52be9f::t_d8532a41157e8a 35-56
+wiki/tools/argo-cd.md
+  s_a10aebdc52be9f::t_b0477ddf12d50d 8
+  s_a10aebdc52be9f::t_208cc653c95af4 57-81
+wiki/tools/floci.md
+  s_a10aebdc52be9f::t_083d687ccd9d16 52-70
+  s_a10aebdc52be9f::t_b0477ddf12d50d 8
+wiki/tools/strimzi.md
+  s_a10aebdc52be9f::t_1557fc3feedbd5 47-66
+  s_a10aebdc52be9f::t_b0477ddf12d50d 8
+wiki/tools/ingress-nginx.md
+  s_a10aebdc52be9f::t_5766fc6a7f16c2 47-51
+  s_a10aebdc52be9f::t_b0477ddf12d50d 8
+wiki/open-questions.md
+  s_a10aebdc52be9f::t_de6a4da4af5a1a 43-59
+wiki/tools/uv.md
+  s_a10aebdc52be9f::t_b0477ddf12d50d 8
+  s_a10aebdc52be9f::t_237e6cba4568e1 24-74
+wiki/log.md
+  s_a10aebdc52be9f::t_7d1ba7637d2746 17-39
+wiki/tools/sonatype-nexus.md
+  s_a10aebdc52be9f::t_b0477ddf12d50d 8
+  s_a10aebdc52be9f::t_15bc3eed86f008 59-89,94-95
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_f482ce18d2a530 46-50
+wiki/tools/buildkite.md
+  s_a10aebdc52be9f::t_7edf6de996f3d7 60-83,87
+  s_a10aebdc52be9f::t_b0477ddf12d50d 8
+  s_a10aebdc52be9f::t_a3f226345530a0 47-53
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_5071c19e665209 4680
+  s_a10aebdc52be9f::t_44467a1c520cea 3118-3122
+  s_a10aebdc52be9f::t_7a45031cbde37d 3173-3180,3182-3184
+  s_a10aebdc52be9f::t_23e03fd3b8478d 3159-3162
+  s_a10aebdc52be9f::t_e5ad1db393317f 3181
+  s_a10aebdc52be9f::t_e7ed1dc609b33b 4679,4681-4683
+  s_a10aebdc52be9f::t_2547b9f4acd917 2924-2945
+  s_a10aebdc52be9f::t_c5984148328af1 258-267,279-296
+  s_a10aebdc52be9f::t_36746edb52b080 2907
+  s_a10aebdc52be9f::t_550f0cecd09451 1150-1173
+  s_a10aebdc52be9f::t_01593ada59964e 297
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "f502f2f8d9c79ececc141ecbad51142ce23cd1a6",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
