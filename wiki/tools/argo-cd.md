@@ -5,7 +5,7 @@ role: Continuous delivery — the cluster pulls from git
 version: v3.4.7
 docs: https://argo-cd.readthedocs.io/en/stable/
 date_added: 2026-08-15
-date_updated: 2026-08-15
+date_updated: 2026-08-16
 status: in-use
 ---
 
@@ -53,6 +53,31 @@ path work with no extra wiring — a new manifest in a subdirectory is picked up
 - Argo would otherwise try to own the Ingress it is served from; the tutorial excludes
   `argocd-ingress.yaml` to avoid a self-referential sync.
 - The initial admin secret is a static credential with no expiry — delete it after changing the password.
+
+> [!warning] Endless login redirect on `http://` — hit 2026-08-15
+> `argocd-server` runs in default TLS mode (no `--insecure`, `server.insecure` unset in
+> `argocd-cmd-params-cm`) and the Ingress sets `backend-protocol: HTTPS`, so the `argocd.token` cookie
+> carries the `Secure` flag. Over plain `http://` the login page renders and the password is accepted,
+> but the browser **silently discards** a `Secure` cookie — the next request is unauthenticated and
+> bounces to `/login`, forever, with nothing logged in the browser or in
+> `kubectl logs deploy/argocd-server`. **Always use `https://argocd.localtest.me`** and accept the
+> self-signed certificate.
+
+> [!warning] `PermissionDenied` usually means "does not exist"
+> `argocd app get <name>` returns `rpc error: code = PermissionDenied` for an application that is
+> simply absent — deliberate, so the API doesn't leak which app names exist. Check
+> `argocd account get-user-info` before assuming an RBAC problem; if it says
+> `Logged In: true, Username: admin`, the token is fine and the app is missing.
+
+> [!warning] Deleting an Application cascades — and can wedge
+> The `resources-finalizer.argocd.argoproj.io` finalizer deletes **every resource the Application
+> manages**. If any managed object cannot finish deleting, the Application sits in `deleting` forever,
+> logging `1 objects remaining for deletion` on a loop, and `argocd app sync` refuses with
+> `FailedPrecondition: application is deleting`. Seen 2026-08-15: an app-of-apps hung ~80 minutes on a
+> single [[apache-kafka]] `KafkaTopic` whose finalizer could never be satisfied — see [[strimzi]].
+> Find the blocker with
+> `kubectl -n argocd get app <name> -o jsonpath='{.status.resources[*]}'`, then clear the dead
+> finalizer. Re-applying `root.yaml` afterwards rebuilt the whole platform from git in under a minute.
 
 ## Official docs
 

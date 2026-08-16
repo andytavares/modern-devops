@@ -40,7 +40,20 @@ answers and add ones it hits. An empty list here means we stopped being curious,
 
 ## Platform-wide
 
-- **Nothing in this wiki has been executed end to end.** The Buildkite pipeline generator and the Helm
-  chart templates were run and verified; the Istio, Kiali and Backstage manifests were assembled from
-  current vendor docs but never applied to a live cluster. Treat runtime claims about those three as
-  *documented*, not *observed*, until someone builds the cluster.
+- ~~**Nothing in this wiki has been executed end to end.**~~ **Superseded 2026-08-16.** The platform
+  has been built on a live kind cluster through §13: Nexus, Floci, OpenBao + ESO, Kafka/Strimzi, Istio
+  with STRICT mTLS, Argo CD app-of-apps and Buildkite CI all ran. **Still unobserved:** Kiali,
+  Backstage and the Prometheus/Grafana stack (§14–§16) — those manifests remain *documented*, not
+  *observed*.
+- **The Buildah build-and-push steps have never completed.** CI reached them only after the test steps
+  were fixed on 2026-08-16. The `nexus-push` credential itself is verified working (HTTP 200 against
+  `/v2/_catalog`), but `buildah bud` under `vfs` in a privileged pod, and the push to `nexus:8082`,
+  are unexercised. *To settle:* one green build.
+- **Does trimming `nx-anonymous` to the two proxy view privileges actually hold?** The reasoning is
+  from Sonatype's docs and the per-repository Docker switch, and enabling global anonymous access was
+  verified to fix CI — but the *narrowed* role has not been applied and re-tested. *To settle:* trim
+  the role, then re-run a build and confirm `docker pull` still demands credentials. See
+  [[sonatype-nexus]].
+- **What deleted the Argo CD `root` Application on 2026-08-15?** The cascade delete that tore down the
+  platform was traced precisely (see [[argo-cd]], [[strimzi]]), but the originating command was not.
+  No audit log was available. *To settle:* enable Argo CD audit logging, or shell history discipline.

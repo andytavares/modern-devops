@@ -5,7 +5,7 @@ role: Runs and reconciles Kafka on Kubernetes
 version: 0.50.1 (Kafka 4.1.0)
 docs: https://strimzi.io/docs/operators/latest/overview
 date_added: 2026-08-15
-date_updated: 2026-08-15
+date_updated: 2026-08-16
 status: in-use
 ---
 
@@ -43,6 +43,26 @@ quorum, brokers join.
 - Do **not** inject Istio sidecars into broker pods (§9.3). Strimzi has its own TLS and listener
   story; use that instead.
 - Pods `Pending` is usually PVC/disk, not Kafka.
+
+> [!warning] Deleting the `Kafka` CR before its `KafkaTopic`s deadlocks them permanently
+> Hit 2026-08-15. `KafkaTopic` carries the finalizer `strimzi.io/topic-operator`, and only the **topic
+> operator** can remove it. The topic operator runs inside the entity-operator, which is part of the
+> `Kafka` cluster — so deleting the `Kafka` CR first destroys the only party able to release the
+> finalizer. The topic then hangs in `Terminating` forever. The **cluster operator** does not help;
+> it doesn't own topic finalizers.
+>
+> This wedged an [[argo-cd]] cascade delete for ~80 minutes: `KafkaTopic/orders` was the lone
+> "1 objects remaining for deletion" blocking two Applications, which in turn blocked everything else
+> in the platform from being recreated.
+>
+> Unblock by clearing the unsatisfiable finalizer — not a hack, since its owner no longer exists:
+>
+> ```bash
+> kubectl -n kafka patch kafkatopic orders --type=merge -p '{"metadata":{"finalizers":[]}}'
+> ```
+>
+> Both Applications finished terminating within ten seconds. **Order matters on teardown: topics
+> before cluster.**
 
 ## Official docs
 

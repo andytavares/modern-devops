@@ -6,6 +6,13 @@ Ask a question with `/wiki-ask`; add a source with `/wiki-ingest`; check for rot
 The rules live in [`CLAUDE.md`](../CLAUDE.md). The primary source is `modern-devops-tutorial.md`,
 whose sections are cited throughout as `§N.M`.
 
+> [!info] Status as of 2026-08-16
+> The platform has now been **built and run on a live kind cluster** through §13, and CI executes real
+> jobs in-cluster. Seven defects in the tutorial were found by running it and have been fixed; each is
+> recorded on the relevant tool page as a `> [!warning]` with the exact symptom. The pages carrying
+> observed-in-anger failures are [[sonatype-nexus]], [[buildkite]], [[uv]], [[go]], [[argo-cd]],
+> [[strimzi]], [[floci]] and [[ingress-nginx]]. See [[log]] for the sequence.
+
 ## How to read this
 
 Each tool page separates **what it is** (vendor capability, rots slowly) from **what it does here**

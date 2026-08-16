@@ -5,7 +5,7 @@ role: Local AWS — S3 and DynamoDB without an AWS account
 version: floci/floci:1.5.11
 docs: https://github.com/floci-io/floci
 date_added: 2026-08-15
-date_updated: 2026-08-15
+date_updated: 2026-08-16
 status: in-use
 ---
 
@@ -48,6 +48,25 @@ endpoint, so existing tooling and Testcontainers wait strategies keep working.
   in a Pod inside the mesh instead.
 - An emulator is not AWS: IAM semantics, consistency and throttling behaviour all differ. Good enough
   to build against, not good enough to certify against.
+
+> [!warning] Needs `enableServiceLinks: false` — hit 2026-08-15
+> The `floci` Service shares its namespace with the `floci` pod, so kubelet injects Docker-link-style
+> env vars including `FLOCI_PORT=tcp://<clusterIP>:4566`. Floci is a **Quarkus** application, and
+> SmallRye Config maps `FLOCI_PORT` to the `floci.port` property (with `quarkus.http.port` derived
+> from it) — both of which must be integers:
+>
+> ```
+> SRCFG00029: Expected an integer value, got "tcp://10.96.167.40:4566"
+> ```
+>
+> Environment variables outrank every other SmallRye config source, so the app cannot override it and
+> crash-loops. Service links are only injected for Services that **predate** the pod, so this appears
+> on a rollout rather than on first deploy — which makes it look like a regression in something else.
+>
+> The general rule: **any Quarkus/SmallRye service whose Kubernetes Service name matches its config
+> prefix will collide this way** (`FOO_PORT` → `foo.port`). Service links are a Docker-links
+> compatibility relic; nothing in this platform uses them, so `enableServiceLinks: false` is a safe
+> default for any workload here.
 
 ## Official docs
 

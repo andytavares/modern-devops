@@ -5,7 +5,7 @@ role: The artifact choke point — registry, and proxy for every dependency
 version: sonatype/nexus3:3.95.0
 docs: https://help.sonatype.com/en/sonatype-nexus-repository.html
 date_added: 2026-08-15
-date_updated: 2026-08-15
+date_updated: 2026-08-16
 status: in-use
 ---
 
@@ -56,10 +56,43 @@ the *good* answer (reachable, demanding auth).
 - Plain HTTP here is TLS termination by fiat. Production means a certificate the nodes trust; the
   *shape* of what's configured — per-registry client trust policy — is identical either way.
 
+## Anonymous access: two switches, not one
+
+Nexus gates unauthenticated reads at **two independent levels**, and conflating them breaks CI.
+
+1. **Global** — ⚙ → Security → Anonymous Access. Off means *everything* 401s, including the language
+   proxies.
+2. **Per Docker repository** — *"Allow anonymous docker pull"* on the repository itself.
+
+Sonatype is explicit that both are required for anonymous Docker pulls: *"enabling global anonymous
+access is necessary, but you also need to enable a repository-level setting on each individual Docker
+repository for anonymous pulls to function correctly"*
+([anonymous access](https://help.sonatype.com/en/anonymous-access.html)).
+
+**So global anonymous access does not give away `docker pull`.** Our `docker-hosted` leaves the
+per-repository switch unchecked (§5.4), so the registry still demands credentials and the
+[[openbao]] → [[external-secrets-operator]] → `imagePullSecret` chain in §7 keeps its whole point.
+
+Scope it properly by trimming the default `nx-anonymous` role to
+`nx-repository-view-pypi-pypi-proxy-*` and `nx-repository-view-go-go-proxy-*` — which is Sonatype's
+own advice: *"modify the default anonymous role (`nx-anonymous`) to restrict access to only necessary
+content"* ([users](https://help.sonatype.com/en/users.html)).
+
+> [!warning] This was a real failure, 2026-08-15
+> The tutorial said **Disable anonymous access** (§5.3) while §12.5's build steps fetch from the
+> proxies with **no credentials** — `PIP_INDEX_URL` and `GOPROXY` are bare URLs. Two instructions that
+> cannot both be followed. Symptoms: Go failed loudly with
+> `reading http://nexus:8081/repository/go-proxy/...zip: 401 Unauthorized`, while [[uv]] **hung**
+> instead of failing. Fixed by enabling global anonymous access; the tutorial now says so.
+> Verify with `curl -o /dev/null -w '%{http_code}' http://nexus:8081/repository/pypi-proxy/simple/`
+> → `200`.
+
 ## Gotchas
 
 - The container's IP changes across Docker restarts → pods stop resolving `nexus` → re-run §5.10.
 - The tutorial uses the `nx-admin` role for the CI user; scoping it down is an open question.
+- A `404` (not `401`) on `/repository/<name>/…` means the repository does not exist yet, not that
+  auth failed. Easy to misread while §5.6 is still pending.
 
 ## Official docs
 
