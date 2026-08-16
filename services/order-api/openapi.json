@@ -118,22 +118,6 @@
         "summary": "Healthz"
       }
     },
-    "/metrics": {
-      "get": {
-        "operationId": "metrics_metrics_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Metrics"
-      }
-    },
     "/orders": {
       "post": {
         "operationId": "create_order_orders_post",
@@ -176,7 +160,7 @@
     },
     "/readyz": {
       "get": {
-        "description": "Readiness: dependencies are up. Kubernetes pulls us out of the Service if this fails.",
+        "description": "Readiness: dependencies are up. Kubernetes pulls us out of the Service if this fails.\n\nAsync because the pricing health check is a real RPC and must be awaited.",
         "operationId": "readyz_readyz_get",
         "responses": {
           "200": {

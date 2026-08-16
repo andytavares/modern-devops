@@ -62,15 +62,15 @@ spec:
             - name: SERVICE_VERSION
               value: {{ .Values.orderWorker.image.tag | quote }}
           startupProbe:
-            httpGet: { path: /healthz, port: metrics }
+            httpGet: { path: /healthz, port: http-metrics }
             failureThreshold: 30
             periodSeconds: 2
           livenessProbe:
-            httpGet: { path: /healthz, port: metrics }
+            httpGet: { path: /healthz, port: http-metrics }
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
-            httpGet: { path: /readyz, port: metrics }
+            httpGet: { path: /readyz, port: http-metrics }
             periodSeconds: 5
           resources: {{- toYaml .Values.orderWorker.resources | nindent 12 }}
           securityContext:

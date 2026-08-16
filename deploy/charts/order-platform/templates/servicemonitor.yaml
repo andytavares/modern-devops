@@ -23,14 +23,16 @@ spec:
     matchLabels:
       app.kubernetes.io/part-of: order-platform
   endpoints:
-    # Two entries because the two services name their ports differently:
-    # order-api serves the app and its metrics on `http`, order-worker exposes
-    # `metrics` separately. A ServiceMonitor selects by port *name*, so a port
-    # that does not exist on a given Service is simply skipped.
+    # One entry per port name in use, because a ServiceMonitor selects by port
+    # *name* and silently skips a name that does not exist on a given Service.
+    # order-api serves the app and its metrics on `http`; order-worker and
+    # pricing expose `http-metrics` separately. The `http-` prefix is not
+    # decoration — Istio reads the protocol off the port name, and a name it
+    # does not recognise is treated as plain TCP.
     - port: http
       path: /metrics
       interval: {{ .Values.serviceMonitor.interval }}
-    - port: metrics
+    - port: http-metrics
       path: /metrics
       interval: {{ .Values.serviceMonitor.interval }}
 {{- end }}

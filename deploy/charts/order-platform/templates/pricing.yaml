@@ -53,7 +53,7 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - { name: grpc, containerPort: {{ $.Values.pricing.grpcPort }} }
-            - { name: metrics, containerPort: {{ $.Values.pricing.httpPort }} }
+            - { name: http-metrics, containerPort: {{ $.Values.pricing.httpPort }} }
           env:
             - name: PRICING_VERSION
               value: {{ $version | quote }}
@@ -66,12 +66,21 @@ spec:
               value: "/tmp/pex"
             - name: SERVICE_VERSION
               value: {{ $cfg.image.tag | quote }}
+          # The kubelet speaks the gRPC health checking protocol itself, so the
+          # app needs no HTTP endpoint and no grpc_health_probe binary in the
+          # image. GRPCAction.port is an int32, not an IntOrString — a port
+          # NAME is rejected by the API server, so this must be the number.
+          #
+          # Liveness asks for the empty service (overall server health);
+          # readiness asks for the one service that has to work for this pod to
+          # be worth routing to. SIGTERM flips both to NOT_SERVING before the
+          # listener closes.
           livenessProbe:
-            httpGet: { path: /healthz, port: metrics }
+            grpc: { port: {{ $.Values.pricing.grpcPort }} }
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
-            httpGet: { path: /readyz, port: metrics }
+            grpc: { port: {{ $.Values.pricing.grpcPort }}, service: shop.v1.Pricing }
             periodSeconds: 5
             failureThreshold: 2
           resources: {{- toYaml $.Values.pricing.resources | nindent 12 }}
@@ -103,6 +112,9 @@ spec:
   selector:
     app.kubernetes.io/name: pricing
   ports:
+    # Istio reads the protocol off the port name (`protocol[-suffix]`) or off
+    # appProtocol. A port named `metrics` matches no protocol, so Istio falls
+    # back to plain TCP and istioctl analyze reports IST0118.
     - { name: grpc, port: 50051, targetPort: grpc }
-    - { name: metrics, port: 9090, targetPort: metrics }
+    - { name: http-metrics, port: 9090, targetPort: http-metrics }
 {{- end }}

@@ -13,8 +13,14 @@ import grpc
 import uvicorn  # pants: no-infer-dep  (via fastapi[standard])
 from aiokafka import AIOKafkaProducer
 from botocore.config import Config as BotoConfig  # pants: no-infer-dep  (via boto3)
-from fastapi import FastAPI, HTTPException, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
+
+# grpcio-health-checking ships no py.typed marker, so mypy cannot see the
+# generated health stubs. Declared at the import rather than behind a global
+# ignore_missing_imports, which would silence real typos as well.
+from grpc_health.v1 import health_pb2, health_pb2_grpc  # type: ignore[import-untyped]
+from prometheus_client import Counter, Histogram, make_asgi_app
 from pydantic import BaseModel, Field
 
 from shop.v1 import pricing_pb2, pricing_pb2_grpc
@@ -42,6 +48,30 @@ PRICING_CALLS = Counter(
     ["result", "served_by"],
 )
 
+# The key pricing registers itself under with the health checking protocol is its
+# fully-qualified proto service name. Read off the descriptor rather than written
+# as a literal, so the two sides cannot drift when the .proto is renamed. An empty
+# string would ask for the server's overall health; we want the one service we
+# depend on. https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+PRICING_SERVICE_NAME = pricing_pb2.DESCRIPTOR.services_by_name["Pricing"].full_name
+
+# The standard gRPC → HTTP status mapping. Collapsing every upstream failure to
+# 502 tells the caller nothing: a deadline, an overload and a malformed order are
+# three different problems with three different correct responses. Anything not
+# listed is a genuine upstream fault, which is what 502 means.
+GRPC_TO_HTTP_STATUS: dict[grpc.StatusCode, int] = {
+    grpc.StatusCode.DEADLINE_EXCEEDED: 504,
+    grpc.StatusCode.UNAVAILABLE: 503,
+    grpc.StatusCode.INVALID_ARGUMENT: 400,
+    grpc.StatusCode.RESOURCE_EXHAUSTED: 429,
+}
+
+# A server that answers Check with one of these is demonstrably reachable and
+# responsive; it simply does not publish health for this service name. gRPC's own
+# documentation requires clients to handle a server without the Health service,
+# so this is "reachable, health unknown" — not a readiness failure.
+HEALTH_NOT_PUBLISHED = (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED)
+
 
 class PricingClient:
     """Thin async wrapper around the generated Pricing stub.
@@ -51,10 +81,14 @@ class PricingClient:
     order, not a locally guessed one.
     """
 
-    def __init__(self, address: str, timeout_seconds: float) -> None:
+    def __init__(
+        self, address: str, timeout_seconds: float, health_timeout_seconds: float
+    ) -> None:
         self._channel = grpc.aio.insecure_channel(address)
         self._stub = pricing_pb2_grpc.PricingStub(self._channel)
+        self._health_stub = health_pb2_grpc.HealthStub(self._channel)
         self._timeout_seconds = timeout_seconds
+        self._health_timeout_seconds = health_timeout_seconds
 
     async def price_order(
         self, *, sku: str, quantity: int, unit_amount_cents: int, customer: str
@@ -67,12 +101,32 @@ class PricingClient:
         )
         return await self._stub.PriceOrder(request, timeout=self._timeout_seconds)
 
-    def is_ready(self) -> bool:
-        state = self._channel.get_state(try_to_connect=True)
-        return state not in (
-            grpc.ChannelConnectivity.TRANSIENT_FAILURE,
-            grpc.ChannelConnectivity.SHUTDOWN,
-        )
+    async def is_ready(self) -> bool:
+        """Ask pricing whether it is serving, over grpc.health.v1.
+
+        This is a real RPC with a deadline, which is the only thing that proves
+        the dependency is answering. Channel connectivity state does not: a
+        channel that has never reached anything is IDLE or CONNECTING, both of
+        which look fine and neither of which means a call would succeed.
+        https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+        """
+        request = health_pb2.HealthCheckRequest(service=PRICING_SERVICE_NAME)
+        try:
+            response = await self._health_stub.Check(
+                request, timeout=self._health_timeout_seconds
+            )
+        except grpc.aio.AioRpcError as exc:
+            if exc.code() in HEALTH_NOT_PUBLISHED:
+                log.warning(
+                    "pricing does not publish health for %s (code=%s); "
+                    "treating a live response as ready",
+                    PRICING_SERVICE_NAME,
+                    exc.code(),
+                )
+                return True
+            log.warning("pricing health check failed code=%s", exc.code())
+            return False
+        return response.status == health_pb2.HealthCheckResponse.SERVING
 
     async def close(self) -> None:
         await self._channel.close()
@@ -101,7 +155,9 @@ async def lifespan(_: FastAPI):
     await producer.start()
     state["producer"] = producer
     state["pricing"] = PricingClient(
-        settings.pricing_addr, settings.pricing_timeout_seconds
+        settings.pricing_addr,
+        settings.pricing_timeout_seconds,
+        settings.pricing_health_timeout_seconds,
     )
     state["ready"] = True
     log.info("order-api started version=%s", settings.service_version)
@@ -115,6 +171,12 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="order-api", version=settings.service_version, lifespan=lifespan)
+
+# prometheus_client ships an ASGI app for this; mounting it is what its docs
+# prescribe. It negotiates content type and compression, and a mount is not a
+# route, so /metrics stays out of the OpenAPI document Backstage renders.
+# https://prometheus.github.io/client_python/exporting/http/fastapi-gunicorn/
+app.mount("/metrics", make_asgi_app())
 
 
 class OrderIn(BaseModel):
@@ -131,25 +193,23 @@ def healthz() -> dict:
 
 
 @app.get("/readyz")
-def readyz() -> dict:
-    """Readiness: dependencies are up. Kubernetes pulls us out of the Service if this fails."""
+async def readyz() -> dict:
+    """Readiness: dependencies are up. Kubernetes pulls us out of the Service if this fails.
+
+    Async because the pricing health check is a real RPC and must be awaited.
+    """
     if not state["ready"]:
         raise HTTPException(status_code=503, detail="dependencies not ready")
     pricing = state["pricing"]
-    if pricing is None or not pricing.is_ready():
-        raise HTTPException(status_code=503, detail="pricing channel not ready")
+    if pricing is None or not await pricing.is_ready():
+        raise HTTPException(status_code=503, detail="pricing not serving")
     return {"status": "ready"}
 
 
-@app.get("/metrics")
-def metrics() -> Response:
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-
 async def _price_order(order: OrderIn) -> pricing_pb2.PriceOrderResponse:
-    """Call shop.v1.Pricing/PriceOrder. Raises HTTPException(502) on any failure —
-    never falls back to a locally computed price, so a pricing outage is a visible
-    order failure rather than a silently wrong total."""
+    """Call shop.v1.Pricing/PriceOrder. Any failure is an HTTPException carrying the
+    gRPC status translated to its HTTP equivalent — never a locally computed price,
+    so a pricing outage is a visible order failure rather than a silently wrong total."""
     pricing = state["pricing"]
     try:
         response = await pricing.price_order(
@@ -163,7 +223,10 @@ async def _price_order(order: OrderIn) -> pricing_pb2.PriceOrderResponse:
         result = "timeout" if code == grpc.StatusCode.DEADLINE_EXCEEDED else "error"
         PRICING_CALLS.labels(result=result, served_by="unknown").inc()
         log.warning("pricing call failed sku=%s code=%s", order.sku, code)
-        raise HTTPException(status_code=502, detail="pricing unavailable") from exc
+        raise HTTPException(
+            status_code=GRPC_TO_HTTP_STATUS.get(code, 502),
+            detail=f"pricing call failed: {code.name if code else 'UNKNOWN'}",
+        ) from exc
     PRICING_CALLS.labels(result="ok", served_by=response.served_by).inc()
     return response
 
@@ -191,7 +254,13 @@ async def create_order(order: OrderIn) -> dict:
         ).hexdigest()
 
         key = f"orders/{created_at[:10]}/{order_id}.json"
-        state["s3"].put_object(
+        # boto3 is synchronous. Calling it directly from an `async def` path
+        # operation blocks the event loop for the whole S3 round trip, which
+        # stalls every other in-flight request and both probes with it. FastAPI's
+        # answer for blocking I/O inside an async endpoint is to hand it to the
+        # threadpool. https://fastapi.tiangolo.com/async/
+        await run_in_threadpool(
+            state["s3"].put_object,
             Bucket=settings.s3_bucket,
             Key=key,
             Body=body,

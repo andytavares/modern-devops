@@ -1,15 +1,23 @@
-import json
 import logging
 import signal
 import sys
-import threading
 import time
 from concurrent import futures
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import FrameType
 
 import grpc
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+
+# typeshed publishes types-grpcio-health-checking and types-grpcio-reflection,
+# but neither is in 3rdparty/python/requirements.txt, so mypy has nothing to
+# read. The ignore is per-import and per-error-code: it silences these two
+# packages and nothing else.
+from grpc_health.v1 import (  # type: ignore[import-untyped]
+    health,
+    health_pb2,
+    health_pb2_grpc,
+)
+from grpc_reflection.v1alpha import reflection  # type: ignore[import-untyped]
+from prometheus_client import Counter, Histogram, start_http_server
 from shop.v1 import pricing_pb2, pricing_pb2_grpc
 
 from .settings import settings  # pants: no-infer-dep (already colocated in this target)
@@ -32,8 +40,14 @@ PRICING_DURATION = Histogram(
     "pricing_request_duration_seconds", "Time to price one order"
 )
 
-# ---------- readiness ----------
-ready_event = threading.Event()
+# Service names are read off the generated descriptors rather than written out
+# as string literals, so renaming a service in the .proto cannot leave a stale
+# name registered with health checking or reflection.
+PRICING_SERVICE_NAME = pricing_pb2.DESCRIPTOR.services_by_name["Pricing"].full_name
+HEALTH_SERVICE_NAME = health_pb2.DESCRIPTOR.services_by_name["Health"].full_name
+
+# Seconds in-flight RPCs get to finish after SIGTERM before they are aborted.
+SHUTDOWN_GRACE_SECONDS = 5
 
 
 def calculate_price(
@@ -71,9 +85,9 @@ class PricingServicer(pricing_pb2_grpc.PricingServicer):
         try:
             validate_request(request.sku, request.quantity, request.unit_amount_cents)
         except ValueError as exc:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(exc))
-            return pricing_pb2.PriceOrderResponse()
+            # abort() raises, so it terminates the RPC in one call and cannot be
+            # followed by an accidental successful return.
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
 
         total_amount_cents, discount_cents, rule_applied = calculate_price(
             request.quantity, request.unit_amount_cents, settings.version
@@ -96,70 +110,67 @@ class PricingServicer(pricing_pb2_grpc.PricingServicer):
         )
 
 
-class _HealthHandler(BaseHTTPRequestHandler):
-    def log_message(self, format: str, *args: object) -> None:
-        # Route access logging through our structured logger instead of stderr.
-        log.info("http %s", format % args)
+def build_server() -> tuple[grpc.Server, health.HealthServicer]:
+    """Assemble the gRPC server: pricing, health checking and reflection.
 
-    def _respond_json(self, status: int, payload: dict[str, str]) -> None:
-        body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    Nothing here binds a port or starts a thread, so tests can build the exact
+    server the process runs and drive it on an ephemeral port.
+    """
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    pricing_pb2_grpc.add_PricingServicer_to_server(PricingServicer(), server)
 
-    def do_GET(self) -> None:  # noqa: N802 - required BaseHTTPRequestHandler override name
-        if self.path == "/healthz":
-            self._respond_json(200, {"status": "ok"})
-        elif self.path == "/readyz":
-            if ready_event.is_set():
-                self._respond_json(200, {"status": "ready"})
-            else:
-                self._respond_json(503, {"status": "not-ready"})
-        elif self.path == "/metrics":
-            body = generate_latest()
-            self.send_response(200)
-            self.send_header("Content-Type", CONTENT_TYPE_LATEST)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        else:
-            self._respond_json(404, {"status": "not found"})
+    # The non-blocking servicer answers Watch from its own pool instead of
+    # parking a request thread per watcher, which is what the gRPC health
+    # example uses.
+    health_servicer = health.HealthServicer(
+        experimental_non_blocking=True,
+        experimental_thread_pool=futures.ThreadPoolExecutor(max_workers=10),
+    )
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    # The protocol requires the server to register every service explicitly,
+    # including the empty service name that carries overall server health. A
+    # name that is not registered gets NOT_FOUND, not NOT_SERVING, so anything
+    # a probe may ask for has to be set here.
+    for service_name in ("", PRICING_SERVICE_NAME):
+        health_servicer.set(service_name, health_pb2.HealthCheckResponse.SERVING)
+
+    # Python reflection has no automatic service discovery: every service the
+    # server exposes has to be named, including reflection itself. Without this,
+    # grpcurl needs a local copy of the .proto to call anything.
+    reflection.enable_server_reflection(
+        (PRICING_SERVICE_NAME, HEALTH_SERVICE_NAME, reflection.SERVICE_NAME),
+        server,
+    )
+    return server, health_servicer
 
 
 def serve() -> None:
-    grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    pricing_pb2_grpc.add_PricingServicer_to_server(PricingServicer(), grpc_server)
-    grpc_server.add_insecure_port(f"[::]:{settings.grpc_port}")
-    grpc_server.start()
-    ready_event.set()
+    server, health_servicer = build_server()
+    server.add_insecure_port(f"[::]:{settings.grpc_port}")
 
-    http_server = HTTPServer(("", settings.http_port), _HealthHandler)
-    http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
-    http_thread.start()
+    # prometheus_client's own server, in a daemon thread, is the documented way
+    # to expose metrics from a process that is not a web application.
+    start_http_server(settings.http_port)
+    server.start()
 
     log.info(
-        "pricing started version=%s grpc_port=%d http_port=%d",
+        "pricing started version=%s grpc_port=%d metrics_port=%d",
         settings.version,
         settings.grpc_port,
         settings.http_port,
     )
 
-    stop_event = threading.Event()
-
     def handle_sigterm(signum: int, frame: FrameType | None) -> None:
         log.info("received signal %d, shutting down", signum)
-        stop_event.set()
+        # Flips every registered service to NOT_SERVING and fails later Check
+        # calls, so readiness probes see the pod leaving before the listener
+        # disappears.
+        health_servicer.enter_graceful_shutdown()
+        server.stop(SHUTDOWN_GRACE_SECONDS)
 
     signal.signal(signal.SIGTERM, handle_sigterm)
-    signal.signal(signal.SIGINT, handle_sigterm)
 
-    stop_event.wait()
-
-    ready_event.clear()
-    grpc_server.stop(grace=5).wait()
-    http_server.shutdown()
+    server.wait_for_termination()
     log.info("pricing stopped")
 
 

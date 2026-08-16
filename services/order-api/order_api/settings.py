@@ -1,32 +1,48 @@
-import os
+"""Config from the environment, validated once at import.
+
+pydantic-settings' `BaseSettings` is the approach FastAPI documents for this
+(https://fastapi.tiangolo.com/advanced/settings/, and
+https://docs.pydantic.dev/latest/concepts/pydantic_settings/). A field with no
+default is required: if it is missing the process refuses to start, and pydantic
+reports *every* missing or malformed variable at once rather than only the first.
+Types are declared, not cast by hand.
+
+Environment variable names match field names case-insensitively, so `kafka_topic`
+reads `KAFKA_TOPIC`. Where the variable a field must read is not the upper-cased
+field name, `validation_alias` pins the real name.
+"""
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
-class Settings:
-    """Config from environment only. Fail loudly at import if something required is missing."""
+class Settings(BaseSettings):
+    kafka_brokers: str
+    kafka_topic: str = "orders"
 
-    def __init__(self) -> None:
-        self.kafka_brokers = _req("KAFKA_BROKERS")
-        self.kafka_topic = os.getenv("KAFKA_TOPIC", "orders")
-        self.s3_bucket = _req("S3_BUCKET")
-        self.aws_endpoint_url = os.getenv("AWS_ENDPOINT_URL") or None
-        self.aws_region = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-        # Injected by External Secrets Operator from OpenBao. See §7.
-        self.signing_key = _req("ORDER_SIGNING_KEY")
-        self.service_version = os.getenv("SERVICE_VERSION", "dev")
-        self.order_api_port = int(os.getenv("ORDER_API_PORT", "8000"))
-        self.pricing_addr = os.getenv(
-            "PRICING_ADDR", "pricing.shop.svc.cluster.local:50051"
-        )
-        self.pricing_timeout_seconds = float(
-            os.getenv("PRICING_TIMEOUT_SECONDS", "2.0")
-        )
+    s3_bucket: str
+    # boto3 owns the name AWS_DEFAULT_REGION, so the field cannot simply be
+    # called `default_region`; the alias binds the field to the variable boto3
+    # and every AWS tool already expect.
+    aws_region: str = Field(default="us-east-1", validation_alias="AWS_DEFAULT_REGION")
+    aws_endpoint_url: str | None = None
 
+    # Injected by External Secrets Operator from OpenBao. See §7. The alias keeps
+    # the variable namespaced to this service while the field stays generic.
+    signing_key: str = Field(validation_alias="ORDER_SIGNING_KEY")
 
-def _req(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"required environment variable {name} is not set")
-    return value
+    service_version: str = "dev"
+    order_api_port: int = 8000
+
+    pricing_addr: str = "pricing.shop.svc.cluster.local:50051"
+    pricing_timeout_seconds: float = 2.0
+    # Readiness must answer fast enough that a probe times out on the probe's
+    # terms, not ours. Kept well under the order-path timeout above.
+    pricing_health_timeout_seconds: float = 1.0
 
 
-settings = Settings()
+# pydantic's metaclass is a PEP 681 `dataclass_transform`, so mypy synthesises an
+# `__init__` taking every field and reports the three required ones as missing
+# arguments. They are not passed as arguments — BaseSettings reads them from the
+# environment, which is the entire point of the class.
+settings = Settings()  # type: ignore[call-arg]

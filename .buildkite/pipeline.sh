@@ -170,12 +170,42 @@ for SVC in $SERVICES; do
                 secret: { secretName: nexus-push }
             containers:
               - image: quay.io/buildah/stable:v1.40.1
-                # See the securityContext note below. This is a real trade.
+                # Not privileged. Buildah documents chroot isolation plus the
+                # vfs storage driver for running inside an unprivileged
+                # container: chroot avoids CLONE_NEWUSER, and vfs avoids the
+                # overlayfs mknod. What remains is the default OCI capability
+                # set, which Buildah hands to each RUN step and therefore has to
+                # hold itself. Naming those capabilities is the point — the pod
+                # cannot load kernel modules, ptrace, or touch host devices, all
+                # of which `privileged: true` grants.
                 securityContext:
-                  privileged: true
+                  privileged: false
+                  allowPrivilegeEscalation: true
+                  capabilities:
+                    drop: ["ALL"]
+                    add:
+                      - SYS_ADMIN          # mount(2) for the build root
+                      - SYS_CHROOT         # chroot isolation
+                      - SETUID
+                      - SETGID
+                      - SETPCAP
+                      - SETFCAP
+                      - CHOWN
+                      - DAC_OVERRIDE
+                      - FOWNER
+                      - FSETID
+                      - MKNOD
+                      - KILL
+                      - NET_RAW
+                      - NET_BIND_SERVICE
+                      - AUDIT_WRITE
+                  seccompProfile:
+                    type: Unconfined
                 env:
                   - name: STORAGE_DRIVER
                     value: vfs
+                  - name: BUILDAH_ISOLATION
+                    value: chroot
                   - name: BUILDAH_FORMAT
                     value: docker
                   - name: REGISTRY_AUTH_FILE
@@ -230,11 +260,35 @@ cat <<YAML
                 secret: { secretName: nexus-push }
             containers:
               - image: quay.io/buildah/stable:v1.40.1
+                # Same capability set as the service build step above.
                 securityContext:
-                  privileged: true
+                  privileged: false
+                  allowPrivilegeEscalation: true
+                  capabilities:
+                    drop: ["ALL"]
+                    add:
+                      - SYS_ADMIN          # mount(2) for the build root
+                      - SYS_CHROOT         # chroot isolation
+                      - SETUID
+                      - SETGID
+                      - SETPCAP
+                      - SETFCAP
+                      - CHOWN
+                      - DAC_OVERRIDE
+                      - FOWNER
+                      - FSETID
+                      - MKNOD
+                      - KILL
+                      - NET_RAW
+                      - NET_BIND_SERVICE
+                      - AUDIT_WRITE
+                  seccompProfile:
+                    type: Unconfined
                 env:
                   - name: STORAGE_DRIVER
                     value: vfs
+                  - name: BUILDAH_ISOLATION
+                    value: chroot
                   - name: BUILDAH_FORMAT
                     value: docker
                   - name: REGISTRY_AUTH_FILE
@@ -274,11 +328,35 @@ cat <<YAML
                 secret: { secretName: nexus-push }
             containers:
               - image: quay.io/buildah/stable:v1.40.1
+                # Same capability set as the service build step above.
                 securityContext:
-                  privileged: true
+                  privileged: false
+                  allowPrivilegeEscalation: true
+                  capabilities:
+                    drop: ["ALL"]
+                    add:
+                      - SYS_ADMIN          # mount(2) for the build root
+                      - SYS_CHROOT         # chroot isolation
+                      - SETUID
+                      - SETGID
+                      - SETPCAP
+                      - SETFCAP
+                      - CHOWN
+                      - DAC_OVERRIDE
+                      - FOWNER
+                      - FSETID
+                      - MKNOD
+                      - KILL
+                      - NET_RAW
+                      - NET_BIND_SERVICE
+                      - AUDIT_WRITE
+                  seccompProfile:
+                    type: Unconfined
                 env:
                   - name: STORAGE_DRIVER
                     value: vfs
+                  - name: BUILDAH_ISOLATION
+                    value: chroot
                   - name: BUILDAH_FORMAT
                     value: docker
                   - name: REGISTRY_AUTH_FILE

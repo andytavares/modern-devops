@@ -10,6 +10,12 @@
 grpcio
 grpcio-tools
 protobuf
+# The health checking protocol and server reflection are first-party gRPC
+# add-ons, shipped as separate packages by design. Health is what Kubernetes'
+# `grpc:` probe and grpc_health_probe speak; reflection is what lets grpcurl
+# talk to a server without a local copy of the .proto.
+grpcio-health-checking
+grpcio-reflection
 
 # --- order-api ---
 fastapi[standard]==0.139.2
@@ -17,6 +23,10 @@ aiokafka==0.12.0
 boto3==1.40.11
 prometheus-client==0.23.1
 pydantic==2.11.7
+# FastAPI documents pydantic-settings for exactly the job settings.py was doing
+# by hand: parse the environment, cast it, validate it, and report every missing
+# variable at once instead of only the first.
+pydantic-settings==2.7.1
 
 # --- test + typecheck ---
 pytest==8.4.1
