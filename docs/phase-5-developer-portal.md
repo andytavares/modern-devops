@@ -960,6 +960,19 @@ helm upgrade --install backstage backstage/backstage \
 
 Open <http://backstage.localtest.me>, sign in as Guest, and you should see the catalogue from §14.5 and both templates under **Create**.
 
+> **You just went back to deploying by hand, and you should notice.**
+> [Phase 1](phase-1-the-application.md#105-install-it) installed the application with `helm install`
+> from your laptop. [Phase 3](phase-3-delivery.md#114-the-app-of-apps) took that away and made git the
+> deploy button. And here you are, three phases later, typing `helm upgrade --install` again with a
+> tag you set by hand — for the one component whose entire job is paving paths for other people.
+>
+> That is not an oversight, it is the exercise: making the portal an Argo CD `Application` and
+> teaching CI to bump its tag is [§11.4](phase-3-delivery.md#114-the-app-of-apps) and
+> [§12.5](phase-3-delivery.md#125-the-pipeline) applied one more time, and doing it yourself is a far
+> better test of whether Phase 3 landed than reading a third worked example. Notice the irony while
+> you're at it — **the tool whose whole purpose is paving paths is currently the least paved thing in
+> the cluster.** That is also how platform teams usually look from the outside.
+
 > **The portal is the one thing here still deployed by `helm install` from your laptop** — imperatively, outside GitOps, with a tag you set by hand. That is a deliberate stopping point, not an oversight: making it an Argo CD `Application` and teaching CI to bump its tag is exactly the work of [§11.4](phase-3-delivery.md#114-the-app-of-apps) and [§12.5](phase-3-delivery.md#125-the-pipeline) applied one more time, and doing it yourself is a better test of whether those two sections landed than reading a third worked example. Note the irony while you're at it — **the tool whose entire job is paving paths for other people is, right now, the least paved thing in the cluster.** That is how platforms usually look.
 
 > **Guest sign-in means there is no such thing as "who did that".** Every scaffolder run, every PR the portal opens, is attributed to the one GitHub token — so the audit trail says "the portal did it" and stops. That is tolerable on a laptop and indefensible anywhere else, because the portal's token is more privileged than any individual's. The production shape is GitHub OAuth for user identity plus the scaffolder acting as a GitHub App, so the PR is opened *on behalf of* the person who filled in the form. Wire that up before a second person uses your portal, not after.

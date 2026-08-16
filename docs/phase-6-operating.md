@@ -16,6 +16,18 @@ around — and being careful is the opposite of what this is for.
 
 ## 15. End to end
 
+Everything below exercises the whole platform at once. When a step surprises you, the phase that
+built that piece is where to go back to:
+
+| What you're exercising | Built in |
+|---|---|
+| The request reaching the cluster at all | [Phase 0](phase-0-foundations.md) — kind port mappings + ingress-nginx |
+| `order-api` → S3 → Kafka → `order-worker` → DynamoDB | [Phase 1](phase-1-the-application.md) |
+| Seeing the order count move | [Phase 2](phase-2-observability.md) |
+| A code change reaching the cluster without you | [Phase 3](phase-3-delivery.md) |
+| The call being refused when identity is wrong | [Phase 4](phase-4-service-mesh.md) |
+| Adding a service without editing CI or the chart | [Phase 5](phase-5-developer-portal.md) |
+
 ### 15.1 Send an order
 
 ```bash
