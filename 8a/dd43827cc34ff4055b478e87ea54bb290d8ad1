@@ -1,0 +1,44 @@
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/tests/test_api.py"
+  s_a10aebdc52be9f::t_1a5c957e69e022 1-35
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_8b955c6a266e0d 4161-4184
+wiki/tools/backstage.md
+  s_a10aebdc52be9f::t_6a2ee4a7b15a84 56-67
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/pyproject.toml"
+  s_a10aebdc52be9f::t_47fbeefddd9a6b 1-38
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/app/settings.py"
+  s_a10aebdc52be9f::t_38e49bdfa41ec1 1-23
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/.python-version"
+  s_a10aebdc52be9f::t_5292d62265cbd9 1
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/Dockerfile"
+  s_a10aebdc52be9f::t_09feb9dde35814 1-35
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/catalog-info.yaml"
+  h_16ba00fe96244d 1-10
+wiki/log.md
+  s_a10aebdc52be9f::t_a583e54e8be6a3 113-125
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/app/main.py"
+  s_a10aebdc52be9f::t_561a25c7978b48 1-70
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/uv.lock"
+  s_a10aebdc52be9f::t_9044ec266a081b 1-767
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "8add43827cc34ff4055b478e87ea54bb290d8ad1",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
