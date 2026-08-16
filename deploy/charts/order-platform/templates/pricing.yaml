@@ -53,6 +53,9 @@ spec:
               value: {{ $.Values.pricing.grpcPort | quote }}
             - name: PRICING_HTTP_PORT
               value: {{ $.Values.pricing.httpPort | quote }}
+            # PEX unpacks its dependency closure here; see the volumeMount note.
+            - name: PEX_ROOT
+              value: "/tmp/pex"
             - name: SERVICE_VERSION
               value: {{ $cfg.image.tag | quote }}
           livenessProbe:
@@ -68,6 +71,19 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
+          # A PEX is a zip that unpacks its dependency closure on first run, so
+          # it needs somewhere writable. Under readOnlyRootFilesystem it has
+          # nowhere and dies before any of our code runs:
+          #   FileNotFoundError: [Errno 2] No usable temporary directory found
+          #   in ['/tmp', '/var/tmp', '/usr/tmp', '/app']
+          # Note the failure is in the PEX bootstrap, so no application log line
+          # ever appears — it looks like the image is broken rather than the
+          # pod spec. An emptyDir plus an explicit PEX_ROOT fixes it and keeps
+          # the root filesystem read-only, which is worth the four lines.
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
 ---
 {{- end }}
 apiVersion: v1
