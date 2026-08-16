@@ -77,6 +77,33 @@ Two paved paths (§14.6–14.7):
 - New catalog files in an existing repo are **not** auto-discovered without a location entry or the
   GitHub discovery provider. This is the one seam the paved path leaves for a human (§14.7).
 
+> [!warning] Don't set `POSTGRES_*` in `extraEnvVars` — the chart already does. Hit 2026-08-16
+> With `postgresql.enabled: true`, chart 2.10.0 wires the backend to its own Postgres subchart and
+> emits `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER` and `POSTGRES_PASSWORD`. Adding the same
+> four via `extraEnvVars` renders each key twice and the install dies before creating anything:
+>
+> ```
+> Error: server-side apply failed for object backstage/backstage apps/v1, Kind=Deployment:
+>   .spec.template.spec.containers[name="backstage-backend"].env:
+>     duplicate entries for key [name="POSTGRES_HOST"]   (and PORT, USER, PASSWORD)
+> ```
+>
+> **Server-side apply treats `env` as a list keyed by `name` and rejects duplicates outright.**
+> Client-side apply silently kept the last entry, which is why this pattern survives in older values
+> files. The strictness is an improvement: two entries for one variable was always a bug, just a
+> silent one. Confirmed the chart's generated values are byte-identical to the hand-added ones, so
+> deleting the block changes nothing about the running pod.
+>
+> Keep `extraEnvVarsSecrets` — that is what injects `GITHUB_TOKEN`. And if you point Backstage at a
+> database you control (`postgresql.enabled: false`), you *do* set `POSTGRES_*` yourself: that is the
+> case `extraEnvVars` exists for, and there is no duplicate because the chart contributes nothing.
+>
+> **Clean up after the failed install before retrying.** The dead revision leaves a Helm-owned
+> `backstage-postgresql` Secret whose keys don't match what the subchart's password-reuse check looks
+> for, so the next run fails differently — `PASSWORDS ERROR: The secret "backstage-postgresql" does
+> not contain the key "user-password"`. `helm uninstall backstage -n backstage` clears both, and the
+> ESO-owned `backstage` Secret survives because Helm doesn't own it.
+
 > [!warning] Never pin Yarn *backwards* after `create-app` — hit 2026-08-16
 > The tutorial used to run `yarn set version 4.4.1` straight after scaffolding. `create-app@latest`
 > writes supply-chain settings into `.yarnrc.yml` that a 4.4.1 binary cannot parse, so the scaffold

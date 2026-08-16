@@ -123,3 +123,14 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   **two different names** and running the real CI contract in `python:3.13-slim` against Nexus
   (`uv sync --locked`, ruff, 6 tests pass) plus a `buildah bud` on the kind network, which is what CI
   actually runs. Pages: [[backstage]], [[paved-paths]].
+- **2026-08-16** — Backstage chart 2.10.0 refused to install: `duplicate entries for key
+  [name="POSTGRES_HOST"]` (and PORT, USER, PASSWORD) on the backend Deployment. §14.8's values set
+  those four in `extraEnvVars` while `postgresql.enabled: true` makes the chart emit them itself, so
+  every key rendered twice. Server-side apply treats `env` as a list keyed by `name` and rejects
+  duplicates outright — client-side apply used to keep the last silently, which is why the pattern
+  survives in older values files. Verified the chart's generated values are byte-identical to the
+  hand-added ones, so removing the block changes nothing about the pod; `helm ... --dry-run=server`
+  then reports `pending-install` with no duplicates. Also recorded the follow-on trap: the failed
+  revision leaves a Helm-owned `backstage-postgresql` Secret and the retry fails *differently*
+  (`PASSWORDS ERROR ... does not contain the key "user-password"`) until `helm uninstall` clears it.
+  Pages: [[backstage]].

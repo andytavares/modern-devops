@@ -4479,13 +4479,6 @@ backstage:
     tag: "dev"
   extraEnvVarsSecrets:
     - backstage
-  extraEnvVars:
-    - { name: POSTGRES_HOST, value: backstage-postgresql }
-    - { name: POSTGRES_PORT, value: "5432" }
-    - { name: POSTGRES_USER, value: bn_backstage }
-    - name: POSTGRES_PASSWORD
-      valueFrom:
-        secretKeyRef: { name: backstage-postgresql, key: password }
 
 ingress:
   enabled: true
@@ -4498,6 +4491,31 @@ postgresql:
     username: bn_backstage
     password: backstage-change-me
 ```
+
+> [!warning] **Do not set `POSTGRES_*` in `extraEnvVars` — the chart already does.**
+> With `postgresql.enabled: true` the chart wires the backend to its own Postgres subchart, emitting
+> exactly the four variables it needs. Adding them again by hand produces a Deployment with each key
+> twice, and the install dies before anything is created:
+>
+> ```
+> Error: server-side apply failed for object backstage/backstage apps/v1, Kind=Deployment:
+>   .spec.template.spec.containers[name="backstage-backend"].env:
+>     duplicate entries for key [name="POSTGRES_HOST"]
+>     ... POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD
+> ```
+>
+> Server-side apply treats `env` as a list keyed by `name` and **rejects duplicate keys outright**.
+> Client-side apply silently kept the last one, which is why this pattern survived in a lot of
+> older values files — the strictness is new, and it is an improvement: two entries for the same
+> variable is always a bug, it just used to be a *silent* one.
+>
+> The values the chart generates are identical to the ones being added here, so deleting the block
+> changes nothing about the running pod. Keep `extraEnvVarsSecrets`, which is what injects
+> `GITHUB_TOKEN` from [§14.8](#148-build-and-deploy-the-portal).
+>
+> If you point Backstage at a database you control (`postgresql.enabled: false`), then you **do** set
+> `POSTGRES_*` yourself — that is the case `extraEnvVars` exists for, and there is no duplicate
+> because the chart contributes nothing.
 
 ```bash
 helm repo add backstage https://backstage.github.io/charts
