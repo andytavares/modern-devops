@@ -43,5 +43,9 @@ orderWorker:
     limits:   { memory: 128Mi }
 
 podMonitor:
-  enabled: true
+  # false until §13.2 installs kube-prometheus-stack and with it the
+  # monitoring.coreos.com CRDs. Argo CD does not skip a resource whose CRD is
+  # missing — it fails the whole sync, so leaving this true strands every
+  # workload in `shop` as Missing. Flip to true in §13.3 and commit.
+  enabled: false
   interval: 15s

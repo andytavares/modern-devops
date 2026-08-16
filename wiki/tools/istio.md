@@ -5,7 +5,7 @@ role: mTLS, authorization and L7 telemetry between pods
 version: 1.30.3 (charts base + istiod)
 docs: https://istio.io/latest/docs/
 date_added: 2026-08-15
-date_updated: 2026-08-15
+date_updated: 2026-08-16
 status: in-use
 ---
 
@@ -82,6 +82,10 @@ explicit waypoint proxy before any L7 policy works. RAM-constrained? Ambient.
   `kubectl get pods`. `istioctl analyze -n shop` is what catches it.
 - Jobs + sidecars = pods that never complete. Annotate `sidecar.istio.io/inject: "false"`.
 - `base` and `istiod` must be the same version; Istio supports a narrow Kubernetes window.
+- **Namespace enrolment must live in git, not in `kubectl label`.** If [[argo-cd]] manages the
+  `Namespace` object, it recreates it without any label you applied by hand — pods come back `1/1`,
+  STRICT rejects their traffic, [[kiali]] goes empty and the `PodMonitor` matches nothing, all with no
+  error printed. Put `istio-injection: enabled` in the manifest (hit 2026-08-16).
 - **Drain the data plane before removing the control plane** — uninstalling `istiod` while sidecars run
   leaves proxies on last-known config that fail closed on restart.
 

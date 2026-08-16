@@ -532,7 +532,7 @@ def test_routes_are_registered():
 
 ```dockerfile
 # syntax=docker/dockerfile:1.7
-FROM python:3.13-slim AS builder
+FROM docker.io/library/python:3.13-slim AS builder
 
 # uv resolves and installs an order of magnitude faster than pip, and writes a
 # lockfile we can commit for reproducible builds.
@@ -553,7 +553,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
 
-FROM python:3.13-slim AS runtime
+FROM docker.io/library/python:3.13-slim AS runtime
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
 WORKDIR /app
 COPY --from=builder --chown=10001:10001 /app /app
@@ -906,7 +906,7 @@ func TestLoadConfigDefaults(t *testing.T) {
 
 ```dockerfile
 # syntax=docker/dockerfile:1.7
-FROM golang:1.26-alpine AS builder
+FROM docker.io/library/golang:1.26-alpine AS builder
 WORKDIR /src
 
 COPY go.mod go.sum ./
@@ -931,6 +931,40 @@ USER 65532:65532
 EXPOSE 9090
 ENTRYPOINT ["/order-worker"]
 ```
+
+> [!warning] **Fully qualify every `FROM`, or CI hangs forever with no error.**
+> `docker.io/library/golang:1.26-alpine`, not `golang:1.26-alpine`. Docker silently assumes Docker
+> Hub for an unqualified name; **Buildah does not**, and [§12.5](#125-the-pipeline) builds with
+> Buildah. `quay.io/buildah/stable` ships:
+>
+> ```
+> unqualified-search-registries = ["registry.fedoraproject.org", "registry.access.redhat.com", "docker.io"]
+> short-name-mode = "enforcing"
+> ```
+>
+> so a short name is genuinely ambiguous and Buildah asks which registry you meant:
+>
+> ```
+> [1/2] STEP 1/7: FROM golang:1.26-alpine AS builder
+> ? Please select an image:
+>   ▸ registry.fedoraproject.org/golang:1.26-alpine
+>     registry.access.redhat.com/golang:1.26-alpine
+>     docker.io/library/golang:1.26-alpine
+> ```
+>
+> The build pod has a TTY, so Buildah waits for an answer that will never come — the step runs until
+> the pipeline times out, and stuck jobs pile up against your Buildkite concurrency limit. Run the same
+> thing on your laptop without a TTY and it fails in one second with
+> `short-name resolution enforced but cannot prompt without a TTY`, which is why this is hard to
+> reproduce outside CI.
+>
+> **Do not rely on it working by accident.** `python:3.13-slim` resolves silently only because
+> Buildah's bundled `000-shortnames.conf` happens to alias `"python" = "docker.io/library/python"`.
+> There is no such alias for `golang`. That list is a convenience, not a contract.
+>
+> There is a supply-chain argument too, and it is the same one as [§5.1](#51-what-nexus-is-actually-for):
+> an unqualified name is a name whose *meaning depends on the machine resolving it*. Pinning the
+> registry is the same discipline as pinning the tag.
 
 > **Tradeoff — distroless vs alpine vs scratch.** Distroless static gives you a non-root user, CA certificates and timezone data, and nothing else — no shell, no package manager, so `kubectl exec` into it is impossible. That's the point: it's a ~2 MB attack surface. The cost is real, though — when something breaks in production you cannot shell in, and you must debug via `kubectl debug --image=busybox` ephemeral containers instead. Alpine keeps a shell at the price of a package manager and musl libc quirks. For a compiled static Go binary, distroless is the right default.
 
@@ -1412,6 +1446,12 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: floci
+  labels:
+    # Mesh enrolment belongs in git, not in a `kubectl label` you run once.
+    # Argo CD recreates this Namespace on any teardown, and an imperative
+    # label does not come back with it: pods return as 1/1 with no sidecar,
+    # STRICT mTLS rejects them and the PodMonitor matches nothing.
+    istio-injection: enabled
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1735,6 +1775,12 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: shop
+  labels:
+    # Mesh enrolment belongs in git, not in a `kubectl label` you run once.
+    # Argo CD recreates this Namespace on any teardown, and an imperative
+    # label does not come back with it: pods return as 1/1 with no sidecar,
+    # STRICT mTLS rejects them and the PodMonitor matches nothing.
+    istio-injection: enabled
 ---
 apiVersion: external-secrets.io/v1
 kind: ClusterSecretStore
@@ -2089,13 +2135,28 @@ istioctl version
 
 Injection is per-namespace, and the interesting decisions are the exclusions.
 
+`shop` and `floci` are declared in *our* manifests ([§6.2](#62-deploy-floci-into-the-cluster), [§7.5](#75-install-external-secrets-operator)),
+so their labels belong in git and are already there. Only `ingress-nginx` — whose namespace comes from
+an upstream manifest we don't own — needs the imperative form:
+
 ```bash
-kubectl label namespace shop          istio-injection=enabled --overwrite
-kubectl label namespace floci         istio-injection=enabled --overwrite
 kubectl label namespace ingress-nginx istio-injection=enabled --overwrite
 
 kubectl get namespace -L istio-injection
 ```
+
+> [!warning] **A `kubectl label` on a namespace Argo CD manages does not survive.**
+> If you enrol `shop` and `floci` imperatively instead, it works — until the next teardown. Argo CD
+> recreates those namespaces from the manifests, which is exactly what `CreateNamespace=true` and the
+> `Namespace` objects in `deploy/platform/` are for, and the label does not come back with them.
+> Everything then starts *looking* fine and behaving wrongly: pods come up `1/1` instead of `2/2`, so
+> they have no sidecar, so STRICT mTLS refuses their traffic, so [[kiali]]'s graph is empty and the
+> `PodMonitor` — which addresses the sidecar's telemetry port — matches nothing at all. No error is
+> printed anywhere in that chain.
+>
+> This is the general GitOps rule the hard way: **once a resource is under Argo CD, every field of it
+> is, including the ones you set by hand.** `ingress-nginx` is the exception here only because nothing
+> in `deploy/` declares that namespace.
 
 | Namespace | Enrolled | Why |
 |---|---|---|
@@ -2322,9 +2383,33 @@ orderWorker:
     limits:   { memory: 128Mi }
 
 podMonitor:
-  enabled: true
+  # false until §13.2 installs kube-prometheus-stack and with it the
+  # monitoring.coreos.com CRDs. Argo CD does not skip a resource whose CRD is
+  # missing — it fails the whole sync, so leaving this true strands every
+  # workload in `shop` as Missing. Flip to true in §13.3 and commit.
+  enabled: false
   interval: 15s
 ```
+
+> [!warning] **A missing CRD fails the whole Application, not just the one resource.**
+> This is the ordering trap in this chart, and it is worth internalising because it generalises. The
+> `PodMonitor` needs `monitoring.coreos.com/v1`, which arrives with kube-prometheus-stack in
+> [§13.2](#132-install) — two whole sections after Argo CD starts syncing this app in
+> [§11.4](#114-the-app-of-apps). If `podMonitor.enabled` is `true` before then, the sync fails with:
+>
+> ```
+> The Kubernetes API could not find monitoring.coreos.com/PodMonitor for requested
+> resource shop/order-platform. Make sure the "PodMonitor" CRD is installed.
+> ```
+>
+> and **`order-api`, `order-worker`, both Services, both ServiceAccounts and the Ingress all stay
+> `Missing`.** Argo CD syncs an Application as a unit: one invalid task and none of them are applied.
+> `kubectl -n shop get pods` returns nothing, which reads like a scheduling or image problem and is
+> neither. Sections §11.4 to §12.6 simply cannot work with this left on.
+>
+> Note the flag belongs in the **chart's** `values.yaml`, not in `deploy/env/local/values.yaml` —
+> Buildkite rewrites that overlay wholesale on every deploy ([§12.5](#125-the-pipeline)) and anything
+> else you put there is lost on the next green build.
 
 **`deploy/charts/order-platform/templates/_helpers.tpl`**
 
@@ -2589,7 +2674,7 @@ spec:
     # istio-proxy's merged endpoint: our application metrics (scraped over
     # loopback inside the pod, per the prometheus.io/* annotations above) plus
     # Envoy's own. One scrape, both halves, and it survives STRICT mTLS.
-    - port: http-envoy-prom
+    - portNumber: 15020
       path: /stats/prometheus
       interval: {{ .Values.podMonitor.interval }}
 {{- end }}
@@ -2837,6 +2922,16 @@ kind: Application
 metadata:
   name: platform
   namespace: argocd
+  annotations:
+    # Diff by dry-run server-side apply instead of comparing the rendered
+    # manifest to the live object. The ExternalSecrets CRD defaults a pile of
+    # fields the API server injects — deletionPolicy, engineVersion,
+    # mergePolicy, conversionStrategy, decodingStrategy, metadataPolicy,
+    # nullBytePolicy — none of which are in git. A client-side diff sees them
+    # as drift and parks this Application on OutOfSync forever, while
+    # `kubectl diff` (which is already server-side) reports no difference at
+    # all. Requires ServerSideApply, which is set below.
+    argocd.argoproj.io/compare-options: ServerSideDiff=true
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
@@ -3079,7 +3174,18 @@ A Buildkite pipeline does not have to be a file. `buildkite-agent pipeline uploa
 set -eu
 
 REGISTRY="nexus:8082"
+# A build triggered by hand in the UI sets BUILDKITE_COMMIT to the literal
+# string "HEAD" rather than a SHA, which would tag images `:HEAD` — a mutable
+# tag that means a different image on every build, and the exact thing §10.3
+# says a tag must never be. Resolve it to a real SHA before it reaches a tag.
+if [ "$BUILDKITE_COMMIT" = "HEAD" ]; then
+  BUILDKITE_COMMIT="$(git rev-parse HEAD)"
+fi
 SHA="$(echo "$BUILDKITE_COMMIT" | cut -c1-12)"
+
+case "$SHA" in
+  *[!0-9a-f]*|"") echo "refusing to build: BUILDKITE_COMMIT is not a SHA ($BUILDKITE_COMMIT)" >&2; exit 1 ;;
+esac
 
 # Services are discovered, not listed. A directory under services/ with a
 # Dockerfile in it is a service, and that is the entire contract. This is what
@@ -3459,10 +3565,24 @@ Grafana is now at <http://grafana.localtest.me> (`admin` / `admin`).
 
 ### 13.3 Confirm your app is being scraped
 
-The `PodMonitor` is already deployed by Argo CD (the CRD exists now, so re-sync if it was skipped earlier):
+The CRDs exist now, so turn the `PodMonitor` on. It has been off since [§10.1](#101-one-chart-two-workloads) precisely because this CRD didn't exist yet:
 
 ```bash
-argocd app sync order-platform
+# In deploy/charts/order-platform/values.yaml — NOT the env/local overlay,
+# which Buildkite rewrites on every deploy.
+podMonitor:
+  enabled: true
+  interval: 15s
+```
+
+Commit it and let Argo CD pick it up — this is the first change in the tutorial that reaches the cluster purely through git, which is the whole point of §11:
+
+```bash
+git add deploy/charts/order-platform/values.yaml
+git commit -m "feat(monitoring): enable the order-platform PodMonitor"
+git push
+
+argocd app sync order-platform      # or wait up to 3 minutes for the poll
 kubectl -n shop get podmonitor
 ```
 
@@ -3758,7 +3878,7 @@ curl -s -u admin:admin123 http://localhost:8081/service/rest/v1/repositories | j
 
 ### 14.3 Scaffold the portal
 
-Backstage needs an Active LTS Node and a pinned Yarn:
+Backstage needs an Active LTS Node. Let `create-app` choose the Yarn version — see the warning below:
 
 ```bash
 brew install node@22
@@ -3766,7 +3886,29 @@ corepack enable
 
 npx @backstage/create-app@latest --path portal
 cd portal
-yarn set version 4.4.1
+```
+
+> [!warning] **Do not `yarn set version` backwards here.**
+> Earlier revisions of this tutorial ran `yarn set version 4.4.1` at this point. That downgrades Yarn
+> below what `create-app@latest` generates, and the scaffold stops being able to read its own config:
+>
+> ```
+> Usage Error: Unrecognized or legacy configuration settings found: npmMinimalAgeGate
+> ```
+>
+> `create-app` writes supply-chain settings into `.yarnrc.yml` — `npmMinimalAgeGate` (refuse packages
+> published less than N ago, Yarn **4.12+**) and `npmPreapprovedPackages` (exempt `@backstage/*` from
+> it). Pinning 4.4.1 predates both. Nothing warns you at scaffold time; the failure arrives at the
+> first `yarn add`.
+>
+> `create-app` already pins the version it wants in `package.json`'s `packageManager` field, and
+> Corepack honours it — that *is* the reproducibility guarantee, so a second pin here buys nothing and
+> can only conflict. If you do need to move it, move it **forwards**: `yarn set version stable`.
+>
+> The age gate is worth understanding rather than deleting: it is [§5.1](#51-what-nexus-is-actually-for)'s
+> argument applied to time instead of location. Nexus controls *where* a dependency comes from; the
+> gate controls *how battle-tested* it is when you take it. `yarn add --no-time-gate` bypasses it for
+> one command when you genuinely need a fresh release.
 ```
 
 Point it at Nexus rather than the public registry — the same choke point the services use:
@@ -4016,7 +4158,30 @@ spec:
   system: order-platform
 ```
 
-The rest of the skeleton — `main.py`, `pyproject.toml`, a passing test, and a `Dockerfile` that is a copy of order-api's — is mechanical. Copy them from `services/order-api/`, replacing the service name with `${{ values.name }}`.
+The rest of the skeleton lives in the repo at `deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/`:
+
+```
+app/__init__.py     app/main.py     app/settings.py
+tests/__init__.py   tests/test_api.py
+pyproject.toml      uv.lock         Dockerfile      .python-version
+```
+
+The `Dockerfile` is a straight copy of order-api's, deliberately — a paved path that builds differently from the service it was modelled on stops being a paved path the first time someone debugs it. The rest is order-api with the parts a *new* service doesn't have removed: no Kafka producer, no S3 client, no signing key. What survives is the contract the chart depends on — `/healthz`, `/readyz`, `/metrics` on port 8000 — plus one placeholder route so the service does something observable on day one.
+
+> **Three things in here are not a mechanical copy, and each one is a trap avoided.**
+>
+> **`uv.lock` is templated too.** Skipping it and dropping `--locked` from the skeleton's Dockerfile would silently give every scaffolded service worse reproducibility than the two hand-written ones — a paved path that is *worse* than the manual route is how paved paths die. It works because the project name appears in `uv.lock` exactly once:
+> ```toml
+> [[package]]
+> name = "${{ values.name }}"
+> version = "0.1.0"
+> source = { editable = "." }
+> ```
+> The scaffolder substitutes it in the lock and in `pyproject.toml` together, so they still agree. Generate it once by rendering the skeleton under any name, running `uv lock`, and replacing that one name with the placeholder on the way back.
+>
+> **`pyproject.toml` carries the Nexus index.** `[[tool.uv.index]]` again, for the reason in [§3.1](#31-order-api-python--fastapi): an index set only in CI can never match a committed lock. Omit it and every scaffolded service quietly resolves from `pypi.org`, straight through the choke point [§5.1](#51-what-nexus-is-actually-for) exists to close — and nothing fails to tell you.
+>
+> **The metric prefix is computed in Python, not templated.** Service names are hyphenated (`quotes-api`); Prometheus metric names may not be. So `main.py` does `SERVICE.replace("-", "_")` rather than emitting `quotes-api_requests_total`, which would be rejected at registration. Doing it in code instead of in the scaffolder means a rename can never produce an invalid metric name, and there's a test asserting exactly that.
 
 For the chart to render these files, add one template that reads the directory:
 
@@ -4314,13 +4479,6 @@ backstage:
     tag: "dev"
   extraEnvVarsSecrets:
     - backstage
-  extraEnvVars:
-    - { name: POSTGRES_HOST, value: backstage-postgresql }
-    - { name: POSTGRES_PORT, value: "5432" }
-    - { name: POSTGRES_USER, value: bn_backstage }
-    - name: POSTGRES_PASSWORD
-      valueFrom:
-        secretKeyRef: { name: backstage-postgresql, key: password }
 
 ingress:
   enabled: true
@@ -4333,6 +4491,31 @@ postgresql:
     username: bn_backstage
     password: backstage-change-me
 ```
+
+> [!warning] **Do not set `POSTGRES_*` in `extraEnvVars` — the chart already does.**
+> With `postgresql.enabled: true` the chart wires the backend to its own Postgres subchart, emitting
+> exactly the four variables it needs. Adding them again by hand produces a Deployment with each key
+> twice, and the install dies before anything is created:
+>
+> ```
+> Error: server-side apply failed for object backstage/backstage apps/v1, Kind=Deployment:
+>   .spec.template.spec.containers[name="backstage-backend"].env:
+>     duplicate entries for key [name="POSTGRES_HOST"]
+>     ... POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD
+> ```
+>
+> Server-side apply treats `env` as a list keyed by `name` and **rejects duplicate keys outright**.
+> Client-side apply silently kept the last one, which is why this pattern survived in a lot of
+> older values files — the strictness is new, and it is an improvement: two entries for the same
+> variable is always a bug, it just used to be a *silent* one.
+>
+> The values the chart generates are identical to the ones being added here, so deleting the block
+> changes nothing about the running pod. Keep `extraEnvVarsSecrets`, which is what injects
+> `GITHUB_TOKEN` from [§14.8](#148-build-and-deploy-the-portal).
+>
+> If you point Backstage at a database you control (`postgresql.enabled: false`), then you **do** set
+> `POSTGRES_*` yourself — that is the case `extraEnvVars` exists for, and there is no duplicate
+> because the chart contributes nothing.
 
 ```bash
 helm repo add backstage https://backstage.github.io/charts

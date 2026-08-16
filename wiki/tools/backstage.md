@@ -5,7 +5,7 @@ role: Developer portal — catalog plus the two paved paths
 version: chart 2.10.0, create-app 1.53.1
 docs: https://backstage.io/docs/overview/what-is-backstage
 date_added: 2026-08-15
-date_updated: 2026-08-15
+date_updated: 2026-08-16
 status: in-use
 ---
 
@@ -53,6 +53,18 @@ Two paved paths (§14.6–14.7):
   "action not found" *after* the template has done all its work.
 - **Bias every paved-path step towards adding a file rather than editing one** (§14.6). Creation is
   conflict-free and trivially reviewable; editing a shared values file is neither.
+- **A skeleton must inherit the platform's guarantees, or the paved path is a downgrade.** Ours ships
+  a **templated `uv.lock`** — the project name appears in it exactly once, so the scaffolder rewrites
+  it alongside `pyproject.toml` and the two still agree, keeping `uv sync --locked` working. The
+  alternative, dropping `--locked` for scaffolded services only, would make the generated service less
+  reproducible than the hand-written one it was copied from. The skeleton's `pyproject.toml` also
+  declares the [[sonatype-nexus]] index for the same reason it is declared in [[uv]]: an index set
+  only in CI can never match a committed lock, and omitting it sends every scaffolded service straight
+  to `pypi.org` past the [[supply-chain-choke-point]] with no error.
+- **Derive Prometheus metric prefixes in code, not in the template.** Service names are hyphenated and
+  metric names may not be, so `SERVICE.replace("-", "_")` at runtime beats emitting
+  `quotes-api_requests_total`, which fails at registration. A rename then cannot produce an invalid
+  metric name.
 - **Guest auth means there is no "who did that".** Every scaffolder run is attributed to one shared
   token. Production shape: GitHub OAuth for user identity plus a GitHub App so PRs are opened on
   behalf of the person who filled in the form.
@@ -64,6 +76,61 @@ Two paved paths (§14.6–14.7):
 - The bundled PostgreSQL uses a `bitnamilegacy` image — fine for a laptop, not for anything durable.
 - New catalog files in an existing repo are **not** auto-discovered without a location entry or the
   GitHub discovery provider. This is the one seam the paved path leaves for a human (§14.7).
+
+> [!warning] Don't set `POSTGRES_*` in `extraEnvVars` — the chart already does. Hit 2026-08-16
+> With `postgresql.enabled: true`, chart 2.10.0 wires the backend to its own Postgres subchart and
+> emits `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER` and `POSTGRES_PASSWORD`. Adding the same
+> four via `extraEnvVars` renders each key twice and the install dies before creating anything:
+>
+> ```
+> Error: server-side apply failed for object backstage/backstage apps/v1, Kind=Deployment:
+>   .spec.template.spec.containers[name="backstage-backend"].env:
+>     duplicate entries for key [name="POSTGRES_HOST"]   (and PORT, USER, PASSWORD)
+> ```
+>
+> **Server-side apply treats `env` as a list keyed by `name` and rejects duplicates outright.**
+> Client-side apply silently kept the last entry, which is why this pattern survives in older values
+> files. The strictness is an improvement: two entries for one variable was always a bug, just a
+> silent one. Confirmed the chart's generated values are byte-identical to the hand-added ones, so
+> deleting the block changes nothing about the running pod.
+>
+> Keep `extraEnvVarsSecrets` — that is what injects `GITHUB_TOKEN`. And if you point Backstage at a
+> database you control (`postgresql.enabled: false`), you *do* set `POSTGRES_*` yourself: that is the
+> case `extraEnvVars` exists for, and there is no duplicate because the chart contributes nothing.
+>
+> **Clean up after the failed install before retrying.** The dead revision leaves a Helm-owned
+> `backstage-postgresql` Secret whose keys don't match what the subchart's password-reuse check looks
+> for, so the next run fails differently — `PASSWORDS ERROR: The secret "backstage-postgresql" does
+> not contain the key "user-password"`. `helm uninstall backstage -n backstage` clears both, and the
+> ESO-owned `backstage` Secret survives because Helm doesn't own it.
+
+> [!warning] Never pin Yarn *backwards* after `create-app` — hit 2026-08-16
+> The tutorial used to run `yarn set version 4.4.1` straight after scaffolding. `create-app@latest`
+> writes supply-chain settings into `.yarnrc.yml` that a 4.4.1 binary cannot parse, so the scaffold
+> becomes unable to read its own config:
+>
+> ```
+> Usage Error: Unrecognized or legacy configuration settings found: npmMinimalAgeGate
+>   (in portal/.yarnrc.yml)
+> ```
+>
+> `npmMinimalAgeGate` — refuse packages published less than N ago — arrived in **Yarn 4.12**, with
+> `npmPreapprovedPackages` to exempt `@backstage/*` from it. Nothing complains at scaffold time; the
+> error waits until the first `yarn add`, which reads like a broken package rather than a broken
+> toolchain pin.
+>
+> `create-app` already pins its choice in `package.json`'s `packageManager` field and Corepack honours
+> it — that *is* the reproducibility guarantee. A second pin buys nothing and can only conflict. Fixed
+> with `yarn set version stable` (4.4.1 → 4.18.0), which rewrites `yarnPath`, `packageManager` and
+> `.yarn/releases/` together.
+>
+> To run `yarn set version` while the config is unreadable, comment the offending keys out first — the
+> parse error blocks every Yarn command, including the one that fixes it.
+>
+> Keep the age gate rather than deleting it: it is [[supply-chain-choke-point]]'s argument applied to
+> *time* rather than *location*. [[sonatype-nexus]] controls where a dependency comes from; the gate
+> controls how battle-tested it is when you take it. `yarn add --no-time-gate` bypasses it for one
+> command.
 
 ## Official docs
 

@@ -1,4 +1,7 @@
 # syntax=docker/dockerfile:1.7
+# A copy of order-api's, deliberately: a paved path that builds differently
+# from the service it was modelled on stops being a paved path the first time
+# someone debugs it.
 FROM docker.io/library/python:3.13-slim AS builder
 
 # uv resolves and installs an order of magnitude faster than pip, and writes a
