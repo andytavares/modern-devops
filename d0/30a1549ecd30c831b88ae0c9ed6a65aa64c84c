@@ -1,0 +1,45 @@
+pants.toml
+  s_a10aebdc52be9f::t_a7f7999ab6568b 38-40
+.buildkite/pants-ci.Dockerfile
+  s_a10aebdc52be9f::t_3004ba8ab0da53 12
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_94afdb6e6495d8 27-29,78-79,160-161,346-348
+  s_a10aebdc52be9f::t_302b0c7f61e42a 124-130
+  s_a10aebdc52be9f::t_9eada86f70c06c 114-121
+BUILD
+  s_a10aebdc52be9f::t_787b7f49852806 1
+checks/BUILD
+  s_a10aebdc52be9f::t_5902885c6b8169 1-5,9-11,13,16-17
+  s_a10aebdc52be9f::t_4f72179b83b911 15
+checks/build_single_edition.py
+  s_a10aebdc52be9f::t_1eb493ed71ae51 34,62-66,79
+  s_a10aebdc52be9f::t_cbcec6bc76a5b1 1-12,21-22,38,42-46,50-55,67,74-77,85-99
+  s_a10aebdc52be9f::t_787b7f49852806 13-20,23-33,35-37,39-41,47-49,56-61,68-73,78,80-84,100-103
+checks/test_docs_are_current.py
+  s_a10aebdc52be9f::t_8d23c66e66d5a9 1-33
+checks/verify_doc_listings.py
+  s_a10aebdc52be9f::t_787b7f49852806 1-24,27-39,42-44,55,57,62,65-72,74-87,113-115,117-120,126-129,131,141-142,145-146,148,212-215
+  s_a10aebdc52be9f::t_9312e36a77e4c2 59-61
+  s_a10aebdc52be9f::t_2cf98109921e16 88-106,111,122-125
+  s_a10aebdc52be9f::t_54c86bc7a5acb7 176-177
+  s_a10aebdc52be9f::t_ca62c992811524 25-26,40-41,56,58,63-64,73,107-110,112,116,121,130,132-140,147,152-154,189,197-198,202
+  s_a10aebdc52be9f::t_ae4be62f083d42 155-175,178-188
+  s_a10aebdc52be9f::t_13ca48fb134ccc 190-196,199-201,203-211
+  s_a10aebdc52be9f::t_1eb493ed71ae51 45-54,143-144,149-151
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "d030a1549ecd30c831b88ae0c9ed6a65aa64c84c",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
