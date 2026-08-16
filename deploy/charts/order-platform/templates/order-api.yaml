@@ -33,6 +33,14 @@ spec:
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ .Values.orderApi.port | quote }}
     spec:
+      # Kubernetes injects a Docker-link env var per Service in this namespace:
+      # ORDER_API_PORT, ORDER_WORKER_PORT, PRICING_PORT, FRONTEND_PORT — each
+      # set to "tcp://<clusterIP>:<port>". Any app reading a variable of that
+      # name as its own config gets a URL where it expected an integer:
+      #   ValueError: invalid literal for int() with base 10: 'tcp://10.96...'
+      # Env vars outrank every other config source, so the app cannot win.
+      # Service links are a Docker-links relic nothing here uses.
+      enableServiceLinks: false
       serviceAccountName: order-api
       imagePullSecrets:
         - name: {{ .Values.global.imagePullSecret }}
