@@ -67,3 +67,36 @@ answers and add ones it hits. An empty list here means we stopped being curious,
 - **What deleted the Argo CD `root` Application on 2026-08-15?** The cascade delete that tore down the
   platform was traced precisely (see [[argo-cd]], [[strimzi]]), but the originating command was not.
   No audit log was available. *To settle:* enable Argo CD audit logging, or shell history discipline.
+
+## The monorepo build system (added 2026-08-16)
+
+- **The paved path now produces services the pipeline cannot build.** The [[backstage]] skeleton
+  emits `pyproject.toml` and `uv.lock` and **no `BUILD` file**, so a scaffolded service arrives
+  outside the [[pants]] monorepo — and CI now discovers services by the presence of `services/*/BUILD`
+  (§19.5). A service created through the form is therefore not linted, tested, packaged or built.
+  This is a regression in [[paved-paths]] introduced by the migration, and it is known: `ae9a448`
+  fixed the package-name half of the problem and explicitly deferred this half. *To settle:* make the
+  skeleton emit a `BUILD` file with `python_sources` / `python_tests` / `pex_binary`, drop the
+  per-service `pyproject.toml` and `uv.lock`, and scaffold one service end to end.
+- **Five of the eight Pants backends we depend on are `experimental.*`.** go, protobuf-go, javascript,
+  typescript and ruff. The stated mitigation is that each has a one-command escape hatch. *To settle:*
+  nothing to settle by research — this is a bet whose cost only appears at a Pants upgrade. Worth
+  re-reading the release notes before bumping `pants_version`, and worth recording here if a backend
+  breaks or graduates.
+- **The canary and the fault-injection drill have never been run against a live cluster.** §9.8 and
+  §9.9 are written from the manifests and their reasoning, and every manifest passes
+  `kubectl apply --dry-run=server` against the live CRDs — but the 90/10 split, the weight shift, the
+  retry envelope and the outlier ejections are *documented*, not *observed*. The claim that a
+  client-side injected delay counts toward `consecutive5xxErrors` at order-api's sidecar is reasoned
+  from Envoy's behaviour and is the least verified sentence in the phase. *To settle:* run the drill
+  and record what the frontend and [[kiali]] actually showed.
+- **Does the PEX first-run extraction cost enough startup latency to matter?** An `emptyDir` starts
+  empty, so every fresh pod pays the unpack. For `grpcio` + `pydantic-core` that is plausibly seconds,
+  and it lands inside the readiness probe budget. Nobody has measured it. *To settle:* time
+  `pricing`'s container from start to first successful `/readyz`, and compare against a `--venv` mode
+  PEX. See [[pex]].
+- **§17–§19 exist only in the phased edition.** `modern-devops-tutorial.md` has no Pants, proto,
+  pricing, PEX or frontend material, so the two editions no longer carry the same section set — which
+  contradicts `docs/README.md`'s promise that `§N.M` means the same thing in both. Every *existing*
+  number still does. *To settle:* port §17–§19 into the single-document edition, which is a tutorial
+  change and therefore the human's call.

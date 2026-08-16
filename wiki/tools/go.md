@@ -17,16 +17,47 @@ status: in-use
 ## What it does here
 
 `services/order-worker` (§3.2): consumes the `orders` topic, writes to DynamoDB via [[floci]],
-exposes `/healthz`, `/readyz` and `/metrics` on port 9090.
+exposes `/healthz`, `/readyz` and `/metrics` on port 9090. Go [[grpc]] stubs for `shop.v1.Pricing`
+are generated for it from `protos/shop/v1/pricing.proto` by the same target that generates the Python
+ones (§18.1).
 
-Built as `CGO_ENABLED=0 GOOS=linux` with `-trimpath` and `-ldflags="-s -w -X main.version=..."`,
-producing a static binary that runs on `gcr.io/distroless/static-debian12:nonroot`.
+Built as a static binary that runs on `gcr.io/distroless/static-debian12:nonroot`. Since the
+[[pants]] migration the compile happens under `pants package services/order-worker:bin`
+(`go_mod` / `go_package` / `go_binary`) and the Dockerfile just `COPY`s the result — `CGO_ENABLED=0`
+is set by the Go backend's default toolchain env rather than in the Dockerfile.
+
+> [!warning] The `-X main.version` claim on this page was wrong — corrected 2026-08-16
+> **What this page said:** *"`-X main.version` stamps the build SHA into the binary at link time, so
+> a running process can report which commit it is."* §3.2 said the same thing about
+> `-ldflags="-s -w -X main.version=${VERSION}"`.
+>
+> **What is true:** `-X importpath.name=value` sets a **string variable that already exists** in the
+> compiled package. `services/order-worker/main.go` declares no `var version string`; it reads the
+> environment — `version: getenv("SERVICE_VERSION", "dev")`. When the symbol is absent Go's linker
+> does not error and does not warn. **It silently does nothing.**
+>
+> So the `ARG VERSION`, the `--build-arg VERSION=$SHA`, and the `BUILD_ARGS` special case in the
+> pipeline were plumbing for a mechanism that never ran. Nothing looked broken because the version a
+> running worker reports has always come from `SERVICE_VERSION`, which the chart sets from the image
+> tag (§10.1).
+>
+> **Which source won and why:** the source code. Both the tutorial and this page asserted a link-time
+> stamp; `main.go` has no symbol for `-X` to write to, and Go's linker behaviour on a missing symbol
+> is a no-op by design. The pipeline plumbing has been deleted rather than repaired.
+>
+> `-s -w` and `-trimpath` were and are real. Only the `-X` was inert.
+>
+> **The transferable lesson: `-X` fails open.** A flag that misconfigures silently while still
+> producing a plausible artifact needs a test that asserts the *outcome* — one
+> `assert version != "dev"` in a smoke test would have caught this on day one.
 
 ## Key concepts
 
 - **`CGO_ENABLED=0`** yields a genuinely static binary — the precondition for scratch/distroless.
-- **`-X main.version`** stamps the build SHA into the binary at link time, so a running process can
-  report which commit it is. Cheap, and invaluable during an incident.
+- **Version reporting is an environment variable, not a linker flag.** `SERVICE_VERSION`, set by the
+  chart from the image tag. Pants' `go_binary` does support `linker_flags`, so a real `-X` stamp is
+  reinstatable — but it would need a `var version` in `main.go` and a test, and one working mechanism
+  beats two.
 - **Graceful shutdown matters here**: on SIGTERM the worker must finish its in-flight batch and commit
   offsets, hence `terminationGracePeriodSeconds: 45`.
 - Module proxying via `GOPROXY` → [[sonatype-nexus]], with `GOSUMDB=off` because the public checksum
@@ -61,4 +92,4 @@ the alpine step needed disappears.
 - Distroless base images: https://github.com/GoogleContainerTools/distroless
 
 > [!tip] Related
-> [[apache-kafka]], [[floci]], [[sonatype-nexus]], [[order-platform]]
+> [[apache-kafka]], [[floci]], [[sonatype-nexus]], [[order-platform]], [[pants]], [[grpc]]

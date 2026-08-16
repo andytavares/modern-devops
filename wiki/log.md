@@ -160,3 +160,37 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   `FROM node:24-trixie-slim` lines were fully qualified — Buildah resolved `node` only via its
   shortname alias list, the same luck that `python` had and `golang` did not (see [[buildah]]).
   Pages: [[backstage]], [[buildah]].
+- **2026-08-16** — **Polyglot monorepo documented.** Four new pages — [[pants]], [[pex]], [[grpc]],
+  [[vite]] — plus a new phase document `docs/phase-7-polyglot-monorepo.md` (§17 Pants, §18 one proto
+  two languages, §19 pricing / PEX / frontend / CI), and the canary added to `docs/phase-4` as §9.8
+  (DestinationRule subsets, 90/10 VirtualService weights, the retry arithmetic, outlier detection)
+  and §9.9 (the fault-injection drill). Source: the four implementation commits on
+  `feat/pants-polyglot-grpc` (`ccf317d`, `9bd0086`, `5a94af4`, `3e31724`, `ae9a448`), the manifests
+  and BUILD files themselves, and Context7 for the [[pex]] and [[pants]] vendor claims.
+  Seven failures recorded, each on the page where a reader will hit it:
+  `complete_platforms` (a PEX that builds clean and dies on import in the container),
+  `PEX_ROOT` under `readOnlyRootFilesystem` (fails in the bootstrap, so no application log line
+  appears), `Duplicate module named "app"` (a property of the source-root layout, not of those
+  services), Pants' JS/TS backend not inferring a build script's config or asset inputs (a missing
+  `style.css` produced a green build and an unstyled page), the ruff backend path in 2.33 failing as
+  a `ModuleNotFoundError`, Homebrew's interpreter being invisible to `[python-bootstrap]`, and
+  Istio detecting gRPC from the **Service port name** (wrong name = silent TCP passthrough, so the
+  entire canary applies successfully and does nothing).
+- **2026-08-16** — **A documented claim was found to be false and corrected**, per rule 7 recorded
+  rather than overwritten. §3.2 and [[go]] both stated that `-ldflags "-X main.version=…"` stamps the
+  build SHA into the `order-worker` binary at link time. It does not: `main.go` declares no
+  `var version string`, and Go's linker silently does nothing when the `-X` target symbol is absent.
+  The version a running worker reports has always come from `SERVICE_VERSION`, set by the chart from
+  the image tag. The `ARG VERSION`, the `--build-arg VERSION=$SHA` and the pipeline's per-service
+  `BUILD_ARGS` special case were plumbing for a mechanism that never ran once. Source won: the source
+  code, over both documents. Callouts added to `modern-devops-tutorial.md` §3.2,
+  `docs/phase-1-the-application.md` §3.2, and [[go]]; the `-ldflags` listing itself is left intact
+  with the correction beside it. `-s -w` and `-trimpath` were and are real.
+- **2026-08-16** — **Two stale claims corrected in the phased edition, and one recorded but not
+  fixed.** `docs/phase-5` listed the Backstage skeleton as emitting `app/`; commit `ae9a448` had
+  already templated it to `${{ values.name | replace("-", "_") }}` to stop the paved path
+  manufacturing the duplicate-module failure. Corrected, with the reason. Recorded and **not** fixed:
+  `deploy/charts/order-platform/templates/pricing.yaml` cites *"§9.6 DestinationRule"* when the
+  DestinationRule is §9.8 — the fix belongs in the manifest, and a documentation pass should not edit
+  deployed YAML. Flagged in `docs/phase-4` §9.8.
+

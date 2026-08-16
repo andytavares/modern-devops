@@ -27,6 +27,10 @@ backend_packages = [
 # Everything that is not source. dist/ holds `pants package` output — the PEXes
 # and Go binaries that Buildah later copies into images.
 pants_ignore.add = [
+  # Scaffolder templates, not source. Their BUILD files contain nunjucks
+  # placeholders and are not valid Python until Backstage renders them —
+  # Pants would otherwise fail the whole repo with a BuildFileSyntaxError.
+  "/deploy/backstage/templates",
   "/portal",          # Backstage owns its own Yarn workspace; not ours to build
   "/wiki",
   "/raw",

@@ -11,6 +11,7 @@ class Settings:
 
     def __init__(self) -> None:
         self.service_version = os.getenv("SERVICE_VERSION", "dev")
+        self.port = int(os.getenv("PORT", "8000"))
 
 
 def _req(name: str) -> str:

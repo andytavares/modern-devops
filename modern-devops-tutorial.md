@@ -932,6 +932,36 @@ EXPOSE 9090
 ENTRYPOINT ["/order-worker"]
 ```
 
+> [!warning] **`-X main.version` in that `-ldflags` has never done anything. Corrected 2026-08-16.**
+> `-ldflags "-X importpath.name=value"` sets a **string variable that already exists** in the compiled
+> package. `main.go` above declares no `var version string` — it reads the environment:
+>
+> ```go
+> version: getenv("SERVICE_VERSION", "dev"),
+> ```
+>
+> When the target symbol is absent, Go's linker does not error and does not warn. It silently does
+> nothing. So the `ARG VERSION`, the `--build-arg VERSION=$SHA` the pipeline passed in, and the claim
+> that the build SHA is stamped into the binary at link time were all describing a mechanism that
+> never ran once.
+>
+> **What actually reports the version** is `SERVICE_VERSION`, set from the image tag by the Helm chart
+> (§10.1). That has worked the whole time, which is why nothing looked broken.
+>
+> Recorded rather than quietly edited, per the repo's rule on contradictions: the earlier text was
+> wrong, this is the correction, and the `-ldflags` line is left in the listing above because it is
+> what the file said when this section was written. **`-s -w` and `-trimpath` are real and do what the
+> comment says**; only the `-X` was inert.
+>
+> The general lesson is about linker flags specifically: **`-X` fails open.** Anything that
+> misconfigures silently while still producing a plausible artifact needs a test asserting the
+> *outcome*. One `assert version != "dev"` in a smoke test would have caught this on day one.
+>
+> This machinery has since been deleted rather than fixed: the Pants migration dropped the
+> `--build-arg` plumbing entirely, and `services/order-worker/Dockerfile` in the repo today is the
+> four-line `COPY`-a-prebuilt-binary form, not the multi-stage build shown above. `SERVICE_VERSION`
+> from the chart already works, and one mechanism beats two.
+
 > [!warning] **Fully qualify every `FROM`, or CI hangs forever with no error.**
 > `docker.io/library/golang:1.26-alpine`, not `golang:1.26-alpine`. Docker silently assumes Docker
 > Hub for an unqualified name; **Buildah does not**, and [§12.5](#125-the-pipeline) builds with

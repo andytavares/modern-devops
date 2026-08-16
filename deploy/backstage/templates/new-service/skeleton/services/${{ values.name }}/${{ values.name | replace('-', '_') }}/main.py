@@ -2,6 +2,7 @@ import logging
 import sys
 import time
 
+import uvicorn
 from fastapi import FastAPI, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
@@ -68,3 +69,12 @@ def root() -> dict:
 
     REQUESTS.labels(route="/", result="ok").inc()
     return payload
+
+
+def main() -> None:
+    """Entry point for the packaged pex_binary: run the ASGI app under uvicorn."""
+    uvicorn.run(app, host="0.0.0.0", port=settings.port)
+
+
+if __name__ == "__main__":
+    main()
