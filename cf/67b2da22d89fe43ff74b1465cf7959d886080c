@@ -1,0 +1,29 @@
+wiki/log.md
+  s_a10aebdc52be9f::t_73d4bd6bccbd89 290-316
+wiki/concepts/secrets-management.md
+  s_a10aebdc52be9f::t_56b674d8a1697e 27-32
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_211abd7e306f2e 1966-1991
+wiki/tools/external-secrets-operator.md
+  s_a10aebdc52be9f::t_7e2443a07171df 53-82
+wiki/index.md
+  s_a10aebdc52be9f::t_fab64be411aed3 29-34
+docs/phase-1-the-application.md
+  s_a10aebdc52be9f::t_211abd7e306f2e 1317-1342
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "cf67b2da22d89fe43ff74b1465cf7959d886080c",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
