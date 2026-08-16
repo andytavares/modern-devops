@@ -1,0 +1,28 @@
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_45599ffc2be32f 4107-4114
+  s_a10aebdc52be9f::t_6f4ed986492dfc 4901-4925
+infra/backstage-values.yaml
+  s_a10aebdc52be9f::t_7c1b08d26523a5 13-25
+wiki/tools/backstage.md
+  s_a10aebdc52be9f::t_faa09ba6792c7b 110-129
+portal/app-config.production.yaml
+  s_a10aebdc52be9f::t_45599ffc2be32f 6-13
+wiki/.obsidian/workspace.json
+  s_a10aebdc52be9f::t_b62fe934d4e969 184
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "83f44710f077a5b95ab251fab3039b44862a86a3",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
