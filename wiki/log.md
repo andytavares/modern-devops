@@ -230,5 +230,39 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   `deploy/charts/order-platform/templates/pricing.yaml` cites *"§9.6 DestinationRule"* when the
   DestinationRule is §9.8 — the fix belongs in the manifest, and a documentation pass should not edit
   deployed YAML. Flagged in `docs/phase-4` §9.8.
-
-||||||| 12e1572
+- **2026-08-16** — **Tool-choice justifications reframed from licensing to enterprise substitution.**
+  [[floci]], [[openbao]] and [[sonatype-nexus]] were each argued on a licence change — LocalStack's
+  Community sunset, Vault's move to BUSL, and nothing at all for Nexus. Read end to end that says
+  "these are obscure tools picked to dodge fees", which is a fair objection and was never answered.
+  The actual principle is now stated once, up front, in `modern-devops-tutorial.md` §0 and
+  `docs/README.md`: this platform is shaped like an **enterprise**, not a startup, and where the
+  component a real employer hands you is behind a price tag or an account gate it is substituted with
+  the open-source equivalent that teaches the same lesson. No tool choice changed; only the argument.
+  Every existing factual claim was kept (the March 2026 sunset, the 2023 BUSL move, the
+  `/_localstack/health` compatibility, ESO's `vault` provider).
+  Each of the three now names four things: the commercial tool, its price or gate, what concretely
+  transfers, and where it does not. Rewritten in §0.2 (table), §5.1 (new callout — Nexus had no
+  "why not Artifactory" argument at all), §6.1, §7.1, mirrored into `docs/phase-0-foundations.md` and
+  `docs/phase-1-the-application.md`, and into the "Why this, not the alternative" section of all three
+  wiki pages (added to [[openbao]] and [[sonatype-nexus]], which lacked one).
+  New sourced facts, all dated 2026-08: Nexus Repository **Community Edition** caps at 40,000
+  components / 100,000 requests per day and lacks HA, content replication and SAML/SSO
+  (<https://help.sonatype.com/en/ce-onboarding.html>); self-managed Artifactory starts at $27,000/year
+  (<https://jfrog.com/pricing/>); LocalStack's free Hobby tier is non-commercial and account-gated,
+  paid tiers $39–89 per developer per month (<https://www.localstack.cloud/pricing>); OpenBao shipped
+  namespaces in 2.3 beta, API-compatible with Vault Enterprise but not storage- or
+  operator-API-compatible (<https://openbao.org/blog/namespaces-announcement/>); the Floci repo was
+  created 2026-02-18 (GitHub API).
+  Three honest seams were found and are now written down rather than smoothed over:
+  **(1)** the cost argument does not hold for Vault at all — Vault *Community* Edition is free to run,
+  the gate there is the licence; the money appears at Vault **Enterprise**, and the Enterprise-only
+  features (Sentinel, replication, HSM auto-unseal, control groups) are absent from OpenBao *and* from
+  Vault CE, so this platform teaches none of them.
+  **(2)** Nexus is not a substitution at the product level — CE is the same binary as Pro under a
+  usage cap — but the **Policy** leg of [[supply-chain-choke-point]] is aspirational here: blocking a
+  CVE at the choke point requires Sonatype Repository Firewall / IQ or JFrog Xray, both paid.
+  **(3)** **IAM policy evaluation is never exercised** anywhere in this platform: Floci accepts
+  credentials and never authorises them, so nothing here tells a reader whether an IAM policy is
+  correct. That is a genuine teaching gap, not a licensing one.
+  Also removed a stray merge-conflict marker (`||||||| 12e1572`) that had been committed at the end of
+  this file.

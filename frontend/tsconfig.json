@@ -1,5 +1,9 @@
 {
   "compilerOptions": {
+    // Required by Pants\' TypeScript backend, which refuses to typecheck
+    // without an explicit outDir. vite ignores it — it writes to its own
+    // build.outDir — so this exists purely so `pants check` can run.
+    "outDir": "./dist",
     "target": "ES2022",
     "useDefineForClassFields": true,
     "module": "ESNext",

@@ -34,10 +34,31 @@ identity-based authz in the platform.
 
 ## Why this, not the alternative
 
-**vs LocalStack**: LocalStack's Community edition sunset in March 2026 — basic usage now requires an
-auth token and the last community release is frozen with no security updates. Floci is MIT-licensed,
-needs no account, and is a drop-in replacement: it even serves LocalStack's `/_localstack/health`
-endpoint, so existing tooling and Testcontainers wait strategies keep working.
+**vs LocalStack** — this is a *cost* substitution, not a technical preference, and the tutorial says so
+in §0 and §6.1.
+
+**What you get at work is LocalStack Pro.** It is the incumbent AWS emulator by a wide margin, and the
+one you should expect to find already installed. We cannot use it here: LocalStack's Community edition
+sunset in March 2026 (auth token required for basic usage, last community release frozen with no
+security updates); what replaced it is a free **Hobby** tier that is non-commercial-only and still
+requires an account, plus paid tiers at **$39–89 per developer per month**
+([pricing](https://www.localstack.cloud/pricing), as of 2026-08). A per-seat account gate is
+incompatible with a tutorial meant to run offline.
+
+**Why Floci teaches the same thing.** MIT-licensed, no account, no telemetry, ~69 AWS services, and a
+drop-in replacement down to serving LocalStack's own `/_localstack/health` endpoint, so existing
+tooling and Testcontainers wait strategies keep working. What actually transfers is not Floci: it is
+the **AWS wire protocol** — SigV4-signed requests, `boto3` and `aws-sdk-go-v2` behaviour, pagination,
+path-style S3 addressing, and the fact that redirecting an SDK at an emulator is one environment
+variable (`AWS_ENDPOINT_URL`) rather than a code branch. Swapping Floci for LocalStack Pro changes the
+image name and adds an auth token. Nothing else.
+
+**Where it genuinely does not teach the same thing.** Floci is new — repo created February 2026 — so it
+has no long track record, and in a real job you will meet LocalStack, not Floci. More importantly,
+**IAM policy evaluation is not exercised here at all**: credentials are accepted and never authorised,
+so nothing in this platform tells you whether an IAM policy is correct. LocalStack's paid tiers do
+emulate IAM enforcement. That is the one capability gap that is a real teaching gap rather than a
+licensing one. See also the general emulator caveats under Gotchas.
 
 ## Gotchas
 

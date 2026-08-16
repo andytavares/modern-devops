@@ -7,6 +7,21 @@ This is the phased edition. Every phase ends with something that **works and tha
 each one exists because the previous one left a specific problem unsolved. If you stop after any
 phase, you are left with a coherent system rather than a half-built one.
 
+**It is shaped like an enterprise, not a startup, and that is a design decision.** Most engineers do not
+land on a greenfield team that picks its own tools. They land somewhere with an artifact repository they
+did not choose, a secrets manager another team operates, and a narrow slice of someone else's AWS
+account — so those things are here, in those roles, with those seams. Where the component a real
+employer hands you is behind a price tag or an account gate, we substitute the open-source equivalent
+that teaches the same lesson: **OpenBao** for HashiCorp Vault, **Nexus Repository Community Edition**
+for Nexus Pro or JFrog Artifactory (from $27,000/year self-managed, as of 2026-08), **Floci** for
+LocalStack Pro ($39–89 per developer per month; the free tier is non-commercial and requires an
+account). The substitution is at the *vendor* level, never the *concept* level — each one is chosen
+because its API, its vocabulary and its failure modes are the ones you will meet at work. Where a
+substitute stops being equivalent, the section that introduces it says so outright rather than selling
+you the swap: [§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for),
+[§6.1](phase-1-the-application.md#61-why-an-emulator-at-all),
+[§7.1](phase-1-the-application.md#71-the-problem-with-kubernetes-secrets).
+
 > The single-document edition is [`../modern-devops-tutorial.md`](../modern-devops-tutorial.md). Same
 > content, same section numbers — this edition regroups it into the order you'd actually build it.
 > Section references like `§7.6` mean the same thing in both.

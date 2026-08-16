@@ -28,6 +28,12 @@ answers and add ones it hits. An empty list here means we stopped being curious,
 
 - **Which AWS behaviours does Floci not emulate faithfully?** IAM policy evaluation, DynamoDB
   throttling and S3 consistency are the usual suspects. *To settle:* Floci docs + targeted probes.
+- **Is there any free way to exercise IAM policy evaluation locally?** This is the one place the
+  enterprise-substitution principle (§0) leaves a real teaching gap rather than a licensing one:
+  Floci accepts credentials and never authorises them, so a reader finishes this tutorial having
+  never tested an IAM policy. LocalStack charges for IAM enforcement. *To settle:* check whether
+  Floci enforces IAM at all today, and whether `iam-policy-simulator`-style tooling or AWS's own
+  `simulate-principal-policy` API covers it offline.
 
 ## Backstage
 

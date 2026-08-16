@@ -18,6 +18,14 @@ whose sections are cited throughout as `§N.M`.
 > two-version [[istio]] canary. §17–§19 in `docs/phase-7-polyglot-monorepo.md`; those sections do not
 > exist in the single-document edition yet.
 >
+> **The tool-choice arguments were reframed on 2026-08-16.** [[floci]], [[openbao]] and
+> [[sonatype-nexus]] were previously justified on *licensing*, which read like dodging fees around
+> obscure tools. The actual principle — now stated once in §0 and in `docs/README.md` — is that this
+> platform is shaped like an **enterprise**, and where the component a real employer hands you is
+> behind a price tag or an account gate it is substituted with the open-source equivalent that teaches
+> the same lesson. Each of the three pages now names the commercial tool, what it costs, what
+> concretely transfers, and **where it does not**.
+>
 > One documented claim was found to be **false and has been corrected**: `-ldflags "-X
 > main.version=…"` never stamped anything, because `main.go` has no such symbol. Both §3.2 and
 > [[go]] carried it. See [[go]] for the full record.
@@ -56,11 +64,11 @@ that span tools — read those when a question is "why is it like this", not "wh
 - [[ingress-nginx]] — the single edge for every `*.localtest.me` URL
 
 ### Artifacts, secrets, state
-- [[sonatype-nexus]] — registry plus PyPI/Go/npm proxies; the supply-chain choke point
-- [[openbao]] — the source of truth for secrets (Vault's MPL fork)
+- [[sonatype-nexus]] — registry plus PyPI/Go/npm proxies; the supply-chain choke point. Community Edition standing in for Nexus Pro / JFrog Artifactory
+- [[openbao]] — the source of truth for secrets; the MPL fork standing in for HashiCorp Vault
 - [[external-secrets-operator]] — syncs OpenBao values into Kubernetes Secrets
 - [[postgresql]] — Backstage's catalog and scaffolder state
-- [[floci]] — S3 and DynamoDB locally, no AWS account
+- [[floci]] — S3 and DynamoDB locally, no AWS account; standing in for LocalStack Pro
 
 ### Messaging
 - [[apache-kafka]] — the durable log joining order-api to order-worker

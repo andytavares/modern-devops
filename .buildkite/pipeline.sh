@@ -90,20 +90,23 @@ steps:
     plugins:
       - kubernetes:
           podSpec:
+            # The pants image lives in Nexus, which requires auth. nexus-push is
+            # Opaque (a Buildah auth file) and the kubelet cannot use it here.
+            imagePullSecrets:
+              - name: nexus-pull
             containers:
-              - image: docker.io/library/python:3.13-slim
+              # Built once from .buildkite/pants-ci.Dockerfile and pushed to
+              # Nexus. Pants 2.x is NOT on PyPI — `pip install
+              # pantsbuild.pants==2.33.0` fails, because modern Pants ships
+              # only as the scie-pants launcher binary. Baking that binary
+              # into an image keeps every build pulling from Nexus.
+              - image: nexus:8082/ci/pants:0.13.2
                 resources:
                   requests: { cpu: "1", memory: 2Gi }
                   limits:   { memory: 4Gi }
                 command:
                   - |
                     set -euo pipefail
-
-                    # Pants from PyPI *through Nexus* (PIP_INDEX_URL above), so
-                    # the build system itself crosses the §5.1 choke point like
-                    # every other dependency. The alternative — curl | bash of
-                    # the launcher from the internet — would not.
-                    pip install --quiet "pantsbuild.pants==2.33.0"
 
                     # git metadata: Pants uses it to decide what changed.
                     git config --global --add safe.directory "$PWD"

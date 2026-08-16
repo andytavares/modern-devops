@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 
 import boto3
 import grpc
-import uvicorn
+import uvicorn  # pants: no-infer-dep  (via fastapi[standard])
 from aiokafka import AIOKafkaProducer
-from botocore.config import Config as BotoConfig
+from botocore.config import Config as BotoConfig  # pants: no-infer-dep  (via boto3)
 from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from pydantic import BaseModel, Field
