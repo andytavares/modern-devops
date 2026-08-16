@@ -1,35 +1,23 @@
 # syntax=docker/dockerfile:1.7
-# A copy of order-api's, deliberately: a paved path that builds differently
-# from the service it was modelled on stops being a paved path the first time
-# someone debugs it.
-FROM docker.io/library/python:3.13-slim AS builder
+#
+# Build context is `dist/` — the output of `pants package`, not this source
+# tree. The PEX already carries the whole dependency closure resolved from
+# locks/python-default.lock, so there is nothing for this image to install.
+FROM docker.io/library/python:3.13-slim
 
-# uv resolves and installs an order of magnitude faster than pip, and writes a
-# lockfile we can commit for reproducible builds.
-COPY --from=ghcr.io/astral-sh/uv:0.12.1 /uv /usr/local/bin/uv
-
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=never
-
-WORKDIR /app
-COPY pyproject.toml uv.lock ./
-# --no-install-project: dependencies only, so this layer caches across code changes.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project --no-dev
-
-COPY app ./app
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
-
-
-FROM docker.io/library/python:3.13-slim AS runtime
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
+
 WORKDIR /app
-COPY --from=builder --chown=10001:10001 /app /app
-ENV PATH="/app/.venv/bin:$PATH" \
+COPY --chown=10001:10001 ${{ values.name }}.pex /app/service.pex
+
+# A PEX unpacks its dependency closure on first run, so it needs somewhere
+# writable. Under readOnlyRootFilesystem it has nowhere and dies in the PEX
+# bootstrap before any application log line appears. The chart mounts an
+# emptyDir at /tmp to match.
+ENV PEX_ROOT=/tmp/pex \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+
 USER 10001
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["python", "/app/service.pex"]

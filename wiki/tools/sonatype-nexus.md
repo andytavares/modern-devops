@@ -45,6 +45,42 @@ Your laptop pushing successfully says nothing about whether a node can pull. Ver
 `docker exec devops-worker curl -s -o /dev/null -w '%{http_code}' http://nexus:8082/v2/` → `401` is
 the *good* answer (reachable, demanding auth).
 
+## Why this, not the alternative
+
+**vs JFrog Artifactory, and vs Nexus Pro** — the odd one of the three substitutions in this platform,
+because it is not a substitution at the *product* level at all.
+
+**What you get at work is Nexus Repository Pro or JFrog Artifactory.** Which one was a procurement
+decision. Neither is licensable for a tutorial: JFrog lists self-managed Artifactory from
+**$27,000/year** ([pricing](https://jfrog.com/pricing/), as of 2026-08) and Nexus Pro is quote-only.
+
+**Why this teaches the same thing.** `sonatype/nexus3:3.95.0` is **Nexus Repository Community
+Edition** — the same binary and UI as Pro under a usage cap of **40,000 total components or 100,000
+requests per day**, after which it stops accepting new components until usage drops below both
+([CE onboarding](https://help.sonatype.com/en/ce-onboarding.html), as of 2026-08). Note that failed
+requests, including 401s, count toward the request limit. Everything §5 configures — hosted vs proxy vs
+group, the Docker Bearer Token realm, a separate connector port, per-repository anonymous access, a
+private `GOPROXY` — is identical on Pro.
+
+It transfers to Artifactory too, because the interesting parts are protocols rather than products: OCI
+distribution for the registry, PEP 503's simple index for PyPI, the Go module proxy protocol for Go. The
+client-side configuration (`insecure-registries`, [[containerd]]'s `hosts.toml`, `PIP_INDEX_URL`,
+`GOPROXY`, `GOSUMDB=off`) is unchanged, and the repository vocabulary maps one-to-one:
+
+| Nexus | Artifactory |
+|---|---|
+| hosted | local |
+| proxy | remote |
+| group | virtual |
+| — | federated (multi-site sync; no CE equivalent) |
+
+**Where it genuinely does not teach the same thing.** CE has no high availability, no content
+replication and no SAML/SSO, so the operational half of running a real artifact repository is out of
+reach here. And the **Policy** leg of [[supply-chain-choke-point]] is aspirational in this platform:
+blocking a CVE at the choke point is done by Sonatype Repository Firewall / IQ Server or JFrog Xray,
+both paid add-ons. We teach where the choke point is and prove everything routes through it. We do not
+teach what a policy engine attached to it feels like.
+
 ## Key concepts
 
 - **Docker Bearer Token Realm** must be activated in Security → Realms, or `docker login` returns 401

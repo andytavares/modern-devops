@@ -6,11 +6,25 @@
 
 ---
 
+> [!tip] There is a phased edition of this document.
+> [`docs/README.md`](docs/README.md) splits the same material into seven phases that each end with
+> something working and checkable — cluster → running application → observability → delivery → mesh →
+> portal → operating it. Same section numbers, so `§7.6` means the same thing in both, and the wiki's
+> citations resolve against either.
+>
+> **They differ in three places, deliberately**, because the phased order changes what is true when:
+> it installs the application with `helm install` in [§10.5](docs/phase-1-the-application.md#105-install-it)
+> and hands it to Argo CD later, it scrapes metrics with a `ServiceMonitor` before the mesh exists,
+> and it swaps that for the `PodMonitor` in §9.6 as the consequence of turning on STRICT mTLS.
+> This document keeps the original order, where Istio arrives before the app is deployed.
+
 ## 0. What this is, and what it is not
 
 This is a build-it-yourself platform. You will end up with a single-machine environment that has the same *shape* as a real production platform: source in GitHub, CI on Buildkite, artifacts in Nexus, secrets in OpenBao, deploys via Argo CD into Kubernetes, an AWS-shaped dependency emulated by Floci, an event bus on Kafka, and observability in Grafana.
 
 It is not a toy. It is also not production. The difference is stated explicitly every time we take a shortcut, in a **Tradeoff** block. Read those blocks — they are the actual content. Anyone can `helm install`; knowing what you gave up when you did is the job.
+
+**It is shaped like an enterprise, not a startup, and that is a design decision.** Most engineers do not land on a greenfield team that picks its own tools. They land somewhere with an artifact repository they did not choose, a secrets manager another team operates, and a narrow slice of someone else's AWS account — so those things are here, in those roles, with those seams. Where the component a real employer hands you is behind a price tag or an account gate, we substitute the open-source equivalent that teaches the same lesson: **OpenBao** for HashiCorp Vault, **Nexus Repository Community Edition** for Nexus Pro or JFrog Artifactory (from $27,000/year self-managed, as of 2026-08), **Floci** for LocalStack Pro ($39–89 per developer per month; the free tier is non-commercial and requires an account), **Strimzi** for Confluent for Kubernetes or a managed broker like MSK. The substitution is at the *vendor* level, never the *concept* level — each one is chosen because its API, its vocabulary and its failure modes are the ones you will meet at work. Where a substitute stops being equivalent, the section that introduces it says so outright rather than selling you the swap.
 
 **Time:** 6–9 hours if you type everything. **Disk:** ~40 GB. **RAM:** 16 GB free.
 
@@ -94,10 +108,10 @@ Two languages, because a real platform is polyglot and the interesting problems 
 | CI | **Buildkite** | Hybrid model: the control plane is SaaS, the *agents* run on your infra. That is the actual production pattern for regulated shops — build secrets never leave your network. Jenkins is self-hosted-everything and shows its age; GitHub Actions self-hosted runners blur the trust boundary less cleanly. **Caveat: there is no fully-offline Buildkite.** You need a free buildkite.com org. |
 | CD | **Argo CD** | Pull-based GitOps. The cluster converges on git rather than CI pushing into the cluster, so CI never needs cluster credentials. Flux is equally good and more composable; Argo wins here purely on the UI, which makes drift and sync state legible while you're learning. |
 | Packaging | **Helm** | Still the lingua franca for third-party software distribution. We use it for our own app too, and [§10.4](#104-tradeoff-helm-vs-kustomize) is honest about when you shouldn't. |
-| Artifacts | **Sonatype Nexus** | One box that is a Docker registry *and* a PyPI proxy *and* a Go module proxy. Teaches the real reason artifact repositories exist: not storage, but a supply-chain choke point. |
-| Secrets | **OpenBao** | The Linux Foundation fork of HashiCorp Vault, created after Vault moved to BUSL. API-compatible, so everything you learn transfers, and the ecosystem (External Secrets Operator) already speaks it. |
-| Cloud emulation | **Floci** | LocalStack's Community edition sunset in March 2026 (auth tokens required, security updates frozen). Floci is MIT-licensed, needs no account, and serves the real AWS wire protocol on port 4566. |
-| Events | **Kafka via Strimzi** | Strimzi is the reference Kubernetes operator for Kafka and is now KRaft-only, so you learn the modern topology (no ZooKeeper) rather than a legacy one. |
+| Artifacts | **Sonatype Nexus** | What you get at work is Nexus Pro or JFrog Artifactory; we run Nexus **Community Edition**, which is the same binary under a usage cap rather than a different product. One box that is a Docker registry *and* a PyPI proxy *and* a Go module proxy, which teaches the real reason artifact repositories exist: not storage, but a supply-chain choke point. [§5.1](#51-what-nexus-is-actually-for) says what CE does not have. |
+| Secrets | **OpenBao** | What you get at work is HashiCorp Vault. Vault moved to BUSL in 2023; OpenBao is the Linux Foundation fork of its last MPL version and is API-compatible, so paths, policies, KV v2 and Kubernetes auth transfer verbatim — and the ecosystem already speaks it, which is why External Secrets Operator configures it with its **`vault`** provider. [§7.1](#71-the-problem-with-kubernetes-secrets). |
+| Cloud emulation | **Floci** | What you get at work is LocalStack Pro. Its Community edition sunset in March 2026 (auth token required, security updates frozen) and the paid tiers are $39–89 per developer per month. Floci is MIT-licensed, needs no account, and serves the real AWS wire protocol on port 4566 — so what you actually learn is the SDK, not the emulator. [§6.1](#61-why-an-emulator-at-all). |
+| Events | **Kafka via Strimzi** | Kafka itself is Apache-2.0 and free; what costs money is *someone running it for you* — MSK, Confluent Cloud, or Confluent for Kubernetes. Strimzi is the CNCF operator that does the same job for free, and it is KRaft-only so you learn the modern topology rather than a ZooKeeper-era one. [§8.1](#81-operator-not-statefulset) says what it does not teach you. |
 | Observability | **Grafana** via kube-prometheus-stack | One chart, the whole metrics pipeline: Prometheus Operator, Grafana, Alertmanager, node-exporter, kube-state-metrics. |
 | Service mesh | **Istio** (sidecar mode) | The mesh with the deepest documentation and the largest install base, and the one whose vocabulary — `PeerAuthentication`, `AuthorizationPolicy`, SPIFFE identities — you will meet in other people's clusters. Linkerd is genuinely simpler and lighter and is the better choice if mTLS is all you want; we take Istio because [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) is the part worth learning and Istio's policy model is the one being copied. |
 | Mesh visualisation | **Kiali** | Purpose-built for Istio: it reads the Prometheus you already have plus Istio's config and draws both the traffic graph and the validation errors. Nothing else tells you *"this AuthorizationPolicy references a ServiceAccount that doesn't exist"* without you going looking. |
@@ -256,7 +270,9 @@ dev = [
 ]
 
 # Declared here, not only as a CI env var, so `uv.lock` records this registry
-# and the lock validates identically on a laptop and in the build pod.
+# and the lock validates identically on a laptop and in the build pod. uv
+# refuses a lockfile whose registries aren't in the current index config, which
+# is what `uv sync --locked` was failing on when only CI set UV_INDEX_URL.
 [[tool.uv.index]]
 url = "http://nexus:8081/repository/pypi-proxy/simple"
 default = true
@@ -932,6 +948,36 @@ EXPOSE 9090
 ENTRYPOINT ["/order-worker"]
 ```
 
+> [!warning] **`-X main.version` in that `-ldflags` has never done anything. Corrected 2026-08-16.**
+> `-ldflags "-X importpath.name=value"` sets a **string variable that already exists** in the compiled
+> package. `main.go` above declares no `var version string` — it reads the environment:
+>
+> ```go
+> version: getenv("SERVICE_VERSION", "dev"),
+> ```
+>
+> When the target symbol is absent, Go's linker does not error and does not warn. It silently does
+> nothing. So the `ARG VERSION`, the `--build-arg VERSION=$SHA` the pipeline passed in, and the claim
+> that the build SHA is stamped into the binary at link time were all describing a mechanism that
+> never ran once.
+>
+> **What actually reports the version** is `SERVICE_VERSION`, set from the image tag by the Helm chart
+> (§10.1). That has worked the whole time, which is why nothing looked broken.
+>
+> Recorded rather than quietly edited, per the repo's rule on contradictions: the earlier text was
+> wrong, this is the correction, and the `-ldflags` line is left in the listing above because it is
+> what the file said when this section was written. **`-s -w` and `-trimpath` are real and do what the
+> comment says**; only the `-X` was inert.
+>
+> The general lesson is about linker flags specifically: **`-X` fails open.** Anything that
+> misconfigures silently while still producing a plausible artifact needs a test asserting the
+> *outcome*. One `assert version != "dev"` in a smoke test would have caught this on day one.
+>
+> This machinery has since been deleted rather than fixed: the Pants migration dropped the
+> `--build-arg` plumbing entirely, and `services/order-worker/Dockerfile` in the repo today is the
+> four-line `COPY`-a-prebuilt-binary form, not the multi-stage build shown above. `SERVICE_VERSION`
+> from the chart already works, and one mechanism beats two.
+
 > [!warning] **Fully qualify every `FROM`, or CI hangs forever with no error.**
 > `docker.io/library/golang:1.26-alpine`, not `golang:1.26-alpine`. Docker silently assumes Docker
 > Hub for an unqualified name; **Buildah does not**, and [§12.5](#125-the-pipeline) builds with
@@ -1129,6 +1175,12 @@ Most people meet Nexus as "the place images go". That undersells it. An artifact
 
 We configure three repository types to make that concrete: a **Docker hosted** registry for our images, a **PyPI proxy**, and a **Go proxy**.
 
+> **Why Nexus, and why its free edition rather than Artifactory.** In an enterprise you will be handed Sonatype Nexus Repository Pro or JFrog Artifactory, and the choice between them was made by procurement, not by you. Neither is licensable for a tutorial: JFrog lists self-managed Artifactory from **$27,000/year**, and Nexus Pro is quote-only. So we run `sonatype/nexus3:3.95.0`, which is **Nexus Repository Community Edition** — not a lookalike, the same binary and the same UI as Pro under a usage cap of **40,000 total components or 100,000 requests per day**, after which it refuses new components until you drop below both ([Sonatype](https://help.sonatype.com/en/ce-onboarding.html), as of 2026-08). Everything §5 does — hosted vs proxy vs group, the Docker Bearer Token realm, a separate connector port because the registry API lives at `/v2/`, anonymous access scoped per repository, a private `GOPROXY` — is identical on Pro.
+>
+> It transfers to Artifactory as well, because the parts that matter are protocols, not products. A Docker registry is the OCI distribution API; a PyPI proxy is PEP 503's simple index; a Go proxy is the module proxy protocol. The client-side configuration in [§5.8](#58-trust-the-plain-http-registry-from-docker)–[§5.10](#510-teach-pods-about-nexus-coredns) — `insecure-registries`, containerd's `hosts.toml`, `PIP_INDEX_URL`, `GOPROXY`, `GOSUMDB=off` — is unchanged against Artifactory, and Artifactory's repository types are Nexus's under other names: **local** = hosted, **remote** = proxy, **virtual** = group.
+>
+> **Where the free edition genuinely does not teach the same thing.** CE has no high availability, no content replication and no SAML/SSO, so the operational half of running a real artifact repository — multi-site, an outage that is more than downtime, identity federation — is out of scope here and cannot be brought in. Nor is the **Policy** bullet above something you will actually build: blocking a CVE at the choke point is done by Sonatype Repository Firewall / IQ Server or JFrog Xray, both paid. This tutorial teaches you where the choke point is and how everything routes through it. It does not, and cannot, show you what a policy engine bolted onto it feels like in anger.
+
 ### 5.2 Networking: the part everyone gets wrong
 
 Nexus needs to be reachable, under **the same name and port**, from three places:
@@ -1200,7 +1252,7 @@ Open <http://localhost:8081>, sign in as `admin` with that password. You'll be w
 > Anonymous can then read the two language proxies and nothing else.
 
 > [!warning] Earlier revisions of this tutorial said **Disable anonymous access** here.
-> That made [§12](#12-buildkite-ci) unrunnable. The build steps fetch from the PyPI and Go proxies
+> That made [§12](#12-buildkite-ci-that-runs-on-your-infrastructure) unrunnable. The build steps fetch from the PyPI and Go proxies
 > with **no credentials** — `PIP_INDEX_URL` and `GOPROXY` are bare URLs — so every dependency
 > resolution failed with `401 Unauthorized`, surfacing as `go: ... 401 Unauthorized` and, for `uv`,
 > as a step that hangs rather than fails. Disabling anonymous access and then not authenticating CI
@@ -1435,7 +1487,13 @@ Your app talks to S3 and DynamoDB. You have three options for local development:
 
 Floci serves the actual AWS protocol on port 4566, so the AWS SDK, `aws` CLI, IAM signing and pagination all behave normally. Your application code contains **zero** emulator-specific branches — the only difference between local and production is the value of `AWS_ENDPOINT_URL`, which both `boto3` and `aws-sdk-go-v2` honour natively.
 
-> **Why Floci and not LocalStack.** LocalStack's Community edition sunset in March 2026: basic usage now requires an auth token and the last community release is frozen with no security updates. Floci is MIT-licensed, requires no account or telemetry, covers 69 AWS services, and is a drop-in replacement — it even serves LocalStack's `/_localstack/health` endpoint so existing tooling and Testcontainers wait strategies keep working. Repo: <https://github.com/floci-io/floci>.
+> **Why Floci and not LocalStack.** The emulator you will be handed at work is **LocalStack Pro**, and it is the incumbent by a wide margin. We cannot use it here. LocalStack's Community edition sunset in March 2026: basic usage now requires an auth token and the last community release is frozen with no security updates. What replaced it is a free **Hobby** tier that is non-commercial-only and still needs an account, and paid tiers at **$39–89 per developer per month** (as of 2026-08) — a per-seat gate on a tutorial anyone should be able to run offline.
+>
+> Floci is the open-source stand-in: MIT-licensed, no account, no telemetry, ~69 AWS services, and a drop-in replacement down to serving LocalStack's own `/_localstack/health` endpoint, so existing tooling and Testcontainers wait strategies keep working. Repo: <https://github.com/floci-io/floci>.
+>
+> **What actually transfers is not Floci.** It is the AWS wire protocol: SigV4-signed requests, `boto3` and `aws-sdk-go-v2` behaviour, pagination, path-style S3 addressing, and the fact that pointing an SDK at an emulator is one environment variable (`AWS_ENDPOINT_URL`) rather than a code branch. Swap Floci for LocalStack Pro on Monday and the only thing that changes is the image name and the auth token. That is the point of choosing an emulator that speaks the real protocol instead of a mock.
+>
+> **Where it stops being equivalent, stated plainly.** Floci is new — the repo dates from February 2026 — so it has no long track record, and you should expect to meet LocalStack rather than Floci in any real job. LocalStack Pro also emulates things the free tiers of anything do not, notably **IAM policy evaluation**; here, credentials are accepted and never authorised, so nothing in this tutorial teaches you whether your IAM policy is correct. More generally, an emulator is not AWS: IAM semantics, consistency and throttling all differ. It is good enough to build against and not good enough to certify against.
 
 ### 6.2 Deploy Floci into the cluster
 
@@ -1634,7 +1692,11 @@ A Kubernetes `Secret` is base64-encoded, not encrypted. Anyone with `get secret`
 
 We take the last one: **OpenBao** stores the secrets, **External Secrets Operator (ESO)** projects them into Kubernetes `Secret` objects that pods consume normally.
 
-> **Why OpenBao rather than HashiCorp Vault.** Vault moved to the Business Source License in 2023. OpenBao is the Linux Foundation fork of the last Mozilla-Public-License version, is API-compatible, and is under open governance. Everything you learn here — paths, policies, the KV v2 engine, Kubernetes auth — transfers to Vault verbatim. That API compatibility is why ESO configures OpenBao using its **`vault` provider**; there is no separate `openbao` provider key, and expecting one is the single most common mistake here.
+> **Why OpenBao rather than HashiCorp Vault.** The secrets manager you will be handed at work is **Vault** — most likely Vault Enterprise, which is quote-only and routinely a five- or six-figure annual contract. Vault also moved to the Business Source License in 2023, so it is no longer open source in any sense a tutorial can rely on. OpenBao is the Linux Foundation fork of the last Mozilla-Public-License version, under open governance, and **API-compatible**.
+>
+> Be precise about what "transfers" means, because it is more than a hand-wave: paths, ACL policy documents, the KV v2 engine and its `/data/` and `/metadata/` split, the Kubernetes auth method and its TokenReview dependency, tokens and leases, and the `bao`/`vault` CLI verbs are the same on both. So is the ecosystem — which is the concrete proof: ESO configures OpenBao using its **`vault` provider**. There is no separate `openbao` provider key, and expecting one is the single most common mistake here. Everything you type in §7 you can type at a Vault cluster.
+>
+> **Where it stops being equivalent.** Vault *Community* Edition is free to run, so "we picked OpenBao because Vault costs money" would be a lie — the licence is the gate, not the invoice. The invoice appears one level up, and that is the real gap: Sentinel policy-as-code, performance and disaster-recovery replication, HSM auto-unseal and seal wrapping, and control groups are Vault **Enterprise** features, and this tutorial teaches none of them because neither Vault CE nor OpenBao has them. Namespaces are the partial exception — OpenBao shipped its own, API-compatible with Vault Enterprise's, in 2.3 (beta, May 2025) — but they are not storage- or operator-API-compatible, so a migration is not a copy. Assume the *application-facing* API matches and verify anything operator-facing against OpenBao's own docs rather than Vault's.
 
 ### 7.2 Install OpenBao
 
@@ -1916,6 +1978,35 @@ git add deploy/ && git commit -m "feat(platform): floci, openbao and external se
 You could write a StatefulSet for Kafka. You'd then own broker ID assignment, rolling restarts that respect in-sync replica counts, certificate rotation, partition rebalancing on scale-up, and KRaft controller quorum management. That is a full-time job.
 
 Strimzi is a Kubernetes **operator**: it turns `Kafka`, `KafkaNodePool` and `KafkaTopic` custom resources into a managed cluster, and encodes the operational knowledge above as controller logic. This is what operators are *for* — stateful software with non-trivial day-2 operations.
+
+> **Why Strimzi, when you will probably never run Kafka yourself.** Be clear about what is and is not
+> free here. **Apache Kafka is Apache-2.0** — the broker costs nothing. What costs money is somebody
+> operating it for you: **Amazon MSK**, **Confluent Cloud**, or **Confluent for Kubernetes**, which is
+> the licensed operator Confluent sells to do roughly what Strimzi does. Strimzi is the CNCF project
+> that fills that slot for free, which is the same substitution as OpenBao for Vault and Nexus CE for
+> Artifactory — the vendor changes, the concepts do not.
+>
+> **And no, the AWS emulator cannot stand in for MSK.** Floci advertises a `kafka` service and
+> `aws kafka list-clusters` answers, so it looks promising. `create-cluster` returns a 500, and the
+> log says why: `java.net.SocketException: No such file or directory`. Emulators in this family do not
+> implement Kafka — they launch a *real* broker as a sibling Docker container through
+> `/var/run/docker.sock`, which a Kubernetes pod does not have and should not be given, since mounting
+> the node's Docker socket into a pod is a container-escape primitive. Verified against this cluster on
+> 2026-08-16. It is the same shape as the IAM gap in [§6](#6-floci-aws-without-aws): the emulator gives
+> you the API surface, and the behaviour is the part that is paid.
+>
+> **What transfers if your job is managed Kafka.** Almost all of the interesting part. Topics,
+> partitions and keys; consumer groups and rebalancing; `acks=all` with `min.insync.replicas` and what
+> happens to writes when the ISR shrinks ([§15.4](#154-break-it-on-purpose)); offset-commit ordering
+> and why committing *after* the downstream write buys you at-least-once with idempotent results. None
+> of that changes because a cloud provider runs the brokers.
+>
+> **What does not transfer.** Broker operations — which is precisely what MSK and Confluent Cloud sell.
+> If your employer runs managed Kafka you will never do a rolling broker upgrade, never size a
+> `KafkaNodePool`, and never watch the operator rebuild a broker after you delete it. Treat §8's
+> operator content as *understanding what the managed service is doing on your behalf*, not as a skill
+> you will bill for. The `KafkaTopic` CRD is the one piece that genuinely goes either way: topic-as-code
+> is a pattern you will want wherever your brokers live.
 
 > **Modern Kafka is KRaft.** ZooKeeper is gone: Kafka nodes take `controller` and/or `broker` roles and manage metadata via a Raft quorum among the controllers. Strimzi 0.46 and later are KRaft-only (0.45 was the last release supporting ZooKeeper). If you find a tutorial with a `zookeeper:` block in the `Kafka` resource, it is out of date.
 
@@ -2382,6 +2473,15 @@ orderWorker:
     requests: { cpu: 50m, memory: 64Mi }
     limits:   { memory: 128Mi }
 
+# Exactly one of these two should be on. serviceMonitor is the pre-mesh scrape
+# path (§13.3); podMonitor replaces it once STRICT mTLS refuses plaintext
+# scrapes (§9.6). Both start false because the monitoring.coreos.com CRDs do
+# not exist until §13.2 installs kube-prometheus-stack, and Argo CD fails the
+# whole Application sync on a resource whose CRD is missing.
+serviceMonitor:
+  enabled: false
+  interval: 15s
+
 podMonitor:
   # false until §13.2 installs kube-prometheus-stack and with it the
   # monitoring.coreos.com CRDs. Argo CD does not skip a resource whose CRD is
@@ -2389,6 +2489,9 @@ podMonitor:
   # workload in `shop` as Missing. Flip to true in §13.3 and commit.
   enabled: false
   interval: 15s
+
+scaffolded:
+  tag: "dev"     # CI overwrites this in the env overlay, same as the other two
 ```
 
 > [!warning] **A missing CRD fails the whole Application, not just the one resource.**
@@ -2652,6 +2755,47 @@ spec:
 {{- end }}
 ```
 
+**`deploy/charts/order-platform/templates/servicemonitor.yaml`**
+
+```yaml
+{{- if .Values.serviceMonitor.enabled }}
+# The pre-mesh scrape path. Prometheus talks straight to each Service's metrics
+# port over plaintext, which is the obvious thing and works fine — right up
+# until STRICT mTLS (§9.4) starts refusing it, at which point every one of these
+# targets goes down and *nothing logs an error*.
+#
+# §9.6 is that failure. The fix is podmonitor.yaml, which scrapes the sidecar's
+# merged endpoint instead. Exactly one of these two should be enabled:
+#   before Istio -> serviceMonitor.enabled: true
+#   after Istio  -> podMonitor.enabled: true
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: order-platform
+  labels:
+    # kube-prometheus-stack's Prometheus selects monitors by this label in the
+    # default configuration we install in §13.
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames: ["shop"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: order-platform
+  endpoints:
+    # Two entries because the two services name their ports differently:
+    # order-api serves the app and its metrics on `http`, order-worker exposes
+    # `metrics` separately. A ServiceMonitor selects by port *name*, so a port
+    # that does not exist on a given Service is simply skipped.
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}
+```
+
 **`deploy/charts/order-platform/templates/podmonitor.yaml`**
 
 ```yaml
@@ -2671,9 +2815,17 @@ spec:
     matchLabels:
       app.kubernetes.io/part-of: order-platform
   podMetricsEndpoints:
-    # istio-proxy's merged endpoint: our application metrics (scraped over
-    # loopback inside the pod, per the prometheus.io/* annotations above) plus
-    # Envoy's own. One scrape, both halves, and it survives STRICT mTLS.
+    # istio-proxy's MERGED endpoint on 15020: our application metrics (scraped
+    # over loopback inside the pod, per the prometheus.io/* annotations above)
+    # plus Envoy's and Istio's. One scrape, all of it, and it survives STRICT.
+    #
+    # It must be 15020 and it must be addressed by number. Istio: "forwards
+    # requests to the sidecar telemetry port 15020 for merged metrics or 15090
+    # for Envoy-only metrics". 15090 is the one carrying the port NAME
+    # `http-envoy-prom`; 15020 is unnamed in the pod spec, so `port:` cannot
+    # reach it and `portNumber:` is required. Selecting http-envoy-prom gets
+    # you istio_requests_total (Kiali works) but never the application's own
+    # metrics, which is a silent half-failure.
     - portNumber: 15020
       path: /stats/prometheus
       interval: {{ .Values.podMonitor.interval }}
@@ -3551,7 +3703,7 @@ kubeProxy: { enabled: false }
 
 ```bash
 helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
-  --version 82.14.1 \
+  --version 88.3.0 \
   --namespace monitoring --create-namespace \
   --values infra/monitoring-values.yaml \
   --wait --timeout 15m
@@ -4385,7 +4537,170 @@ spec:
 
 ### 14.8 Build and deploy the portal
 
-The portal is built by our own CI, on the same path as everything else — it's just a bigger image. Take the official multi-stage Dockerfile from Backstage's deployment docs (`packages/backend/Dockerfile` in the generated app already contains it) and add the build step to the generator:
+The portal is built by our own CI, on the same path as everything else — it's just a bigger image. It needs a Dockerfile CI can actually run (see the warning below for why the generated one will not do), and a build step in the generator:
+
+**`portal/Dockerfile`** — Backstage's [multi-stage build](https://backstage.io/docs/deployment/docker#multi-stage-build), which compiles the project *inside* the image. This is the one CI uses; see the warning below for why the generated `packages/backend/Dockerfile` cannot be.
+
+```dockerfile
+# Multi-stage build, from https://backstage.io/docs/deployment/docker#multi-stage-build
+#
+# This exists alongside packages/backend/Dockerfile, which create-app generates
+# and which is a *host build*: it expects `yarn install && yarn tsc &&
+# yarn build:backend` to have already produced packages/backend/dist/. That is
+# fine on a laptop and impossible in our CI, where the build step is a Buildah
+# pod with no Node toolchain. This one builds the project inside the image, so
+# `buildah bud` against the portal directory is self-contained.
+#
+# Slower than a host build. That is the trade for not needing Node in CI.
+
+# Stage 1 - Create yarn install skeleton layer
+FROM docker.io/library/node:24-trixie-slim AS packages
+
+WORKDIR /app
+COPY backstage.json package.json yarn.lock ./
+COPY .yarn ./.yarn
+COPY .yarnrc.yml ./
+
+COPY packages packages
+
+# No internal plugins in this portal — portal/plugins/ holds only a README, and
+# .dockerignore excludes it, so this COPY matches nothing and fails the build.
+# Uncomment it the day you add one.
+# COPY plugins plugins
+
+RUN find packages \! -name "package.json" -mindepth 2 -maxdepth 2 -exec rm -rf {} \+
+
+# Stage 2 - Install dependencies and build packages
+FROM docker.io/library/node:24-trixie-slim AS build
+
+# Set Python interpreter for `node-gyp` to use
+ENV PYTHON=/usr/bin/python3
+
+# Install isolate-vm dependencies, these are needed by the @backstage/plugin-scaffolder-backend.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3 g++ build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install sqlite3 dependencies. You can skip this if you don't use sqlite3 in the image,
+# in which case you should also move better-sqlite3 to "devDependencies" in package.json.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends libsqlite3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+USER node
+WORKDIR /app
+
+COPY --from=packages --chown=node:node /app .
+
+# .yarnrc.yml points npmRegistryServer at Nexus, so this resolves through the
+# choke point (§5.1) exactly like pip and Go do — the build pod's DNS reaches
+# `nexus` the same way every other pod does.
+RUN --mount=type=cache,target=/home/node/.cache/yarn,sharing=locked,uid=1000,gid=1000 \
+    yarn install --immutable
+
+COPY --chown=node:node . .
+
+RUN yarn tsc
+RUN yarn --cwd packages/backend build
+
+RUN mkdir packages/backend/dist/skeleton packages/backend/dist/bundle \
+    && tar xzf packages/backend/dist/skeleton.tar.gz -C packages/backend/dist/skeleton \
+    && tar xzf packages/backend/dist/bundle.tar.gz -C packages/backend/dist/bundle
+
+# Stage 3 - Build the actual backend image and install production dependencies
+FROM docker.io/library/node:24-trixie-slim
+
+# Set Python interpreter for `node-gyp` to use
+ENV PYTHON=/usr/bin/python3
+
+# Install isolate-vm dependencies, these are needed by the @backstage/plugin-scaffolder-backend.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3 g++ build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install sqlite3 dependencies. You can skip this if you don't use sqlite3 in the image,
+# in which case you should also move better-sqlite3 to "devDependencies" in package.json.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends libsqlite3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# From here on we use the least-privileged `node` user to run the backend.
+USER node
+
+# This should create the app dir as `node`.
+# If it is instead created as `root` then the `tar` command below will
+# fail: `can't create directory 'packages/': Permission denied`.
+# If this occurs, then ensure BuildKit is enabled (`DOCKER_BUILDKIT=1`)
+# so the app dir is correctly created as `node`.
+WORKDIR /app
+
+# Copy the install dependencies from the build stage and context
+COPY --from=build --chown=node:node /app/.yarn ./.yarn
+COPY --from=build --chown=node:node /app/.yarnrc.yml  ./
+COPY --from=build --chown=node:node /app/backstage.json ./
+COPY --from=build --chown=node:node /app/yarn.lock /app/package.json /app/packages/backend/dist/skeleton/ ./
+
+# Note: The skeleton bundle only includes package.json files -- if your app has
+# plugins that define a `bin` export, the bin files need to be copied as well to
+# be linked in node_modules/.bin during yarn install.
+
+RUN --mount=type=cache,target=/home/node/.cache/yarn,sharing=locked,uid=1000,gid=1000 \
+    yarn workspaces focus --all --production && rm -rf "$(yarn cache clean)"
+
+# Copy the built packages from the build stage
+COPY --from=build --chown=node:node /app/packages/backend/dist/bundle/ ./
+
+# Copy any other files that we need at runtime
+COPY --chown=node:node app-config*.yaml ./
+
+# This will include the examples, if you don't need these simply remove this line
+COPY --chown=node:node examples ./examples
+
+# This switches many Node.js dependencies to production mode.
+ENV NODE_ENV=production
+
+# This disables node snapshot for Node 20 to work with the Scaffolder
+ENV NODE_OPTIONS="--no-node-snapshot"
+
+CMD ["node", "packages/backend", "--config", "app-config.yaml", "--config", "app-config.production.yaml"]
+```
+
+`create-app` also writes a `.dockerignore` tuned for the *host* build, and one line in it is fatal to the multi-stage one:
+
+**`portal/.dockerignore`**
+
+```
+.git
+.yarn/cache
+.yarn/install-state.gz
+node_modules
+# NOT excluded: portal/Dockerfile is a multi-stage build that compiles from
+# source inside the image, so `yarn tsc` needs packages/*/src. create-app writes
+# this file for the *host* build, where dist/ is prebuilt and the sources are
+# dead weight. Excluding them fails with TS18003 "No inputs were found in config
+# file", which names tsconfig.json and never mentions Docker.
+# packages/*/src
+packages/*/node_modules
+plugins
+*.local.yaml
+```
+
+> **`packages/*/src` must not be excluded.** For a host build the TypeScript sources are dead weight — `dist/` is already compiled, so excluding them just makes the context smaller. The multi-stage build compiles *from* those sources, and without them `yarn tsc` fails with:
+>
+> ```
+> error TS18003: No inputs were found in config file '/app/tsconfig.json'.
+> Specified 'include' paths were '["packages/*/src", ...]'
+> ```
+>
+> Which names `tsconfig.json` and never mentions Docker, so it sends you into TypeScript config rather than at what you copied into the build context. `plugins` stays excluded, because the `COPY plugins plugins` line is commented out above.
 
 **`.buildkite/pipeline.sh`** — after the services loop, before the deploy step:
 
@@ -4507,6 +4822,43 @@ spec:
   data:
     - secretKey: GITHUB_TOKEN
       remoteRef: { key: backstage, property: github_token }
+---
+# The portal is pulled from Nexus like everything else, so the `backstage`
+# namespace needs its own pull secret. Secrets do not cross namespaces — §7's
+# `nexus-pull` lives in `shop` and is invisible here. Without this the kubelet
+# reports `no basic auth credentials`, which reads like a registry problem and
+# is really a missing Secret in this namespace.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: nexus-pull
+  namespace: backstage
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: nexus-pull
+    creationPolicy: Owner
+    template:
+      type: kubernetes.io/dockerconfigjson
+      data:
+        .dockerconfigjson: |
+          {
+            "auths": {
+              "nexus:8082": {
+                "username": "{{ .username }}",
+                "password": "{{ .password }}",
+                "auth": "{{ printf "%s:%s" .username .password | b64enc }}"
+              }
+            }
+          }
+  data:
+    - secretKey: username
+      remoteRef: { key: nexus, property: username }
+    - secretKey: password
+      remoteRef: { key: nexus, property: password }
 ```
 
 **`infra/backstage-values.yaml`**
@@ -4862,7 +5214,7 @@ Also delete the Buildkite pipeline and agent token in the Buildkite UI, and revo
 
 ## Appendix A — Version matrix
 
-Verified 2026-08-15. Re-check before you start; these move.
+Verified 2026-08-16 against a running cluster — every version below was read back from the live workload or the installed chart, not from a changelog. Re-check before you start; these move.
 
 | Component | Version | How to check |
 |---|---|---|
@@ -4876,12 +5228,12 @@ Verified 2026-08-15. Re-check before you start; these move.
 | Strimzi | 0.50.1 (Kafka 4.1.0) | `helm search repo strimzi/strimzi-kafka-operator --versions` |
 | Argo CD | v3.4.7 | [releases](https://github.com/argoproj/argo-cd/releases) |
 | agent-stack-k8s | 0.46.3 | [releases](https://github.com/buildkite/agent-stack-k8s/releases) |
-| kube-prometheus-stack | 82.14.1 | `helm search repo prometheus-community/kube-prometheus-stack --versions` |
+| kube-prometheus-stack | 88.3.0 (Prometheus Operator v0.93.0) | `helm search repo prometheus-community/kube-prometheus-stack --versions` |
 | Istio (`base`, `istiod`) | 1.30.3 | `helm search repo istio/istiod --versions` |
 | Kiali (`kiali-server`) | 2.30.0 | `helm search repo kiali/kiali-server --versions` |
 | Backstage chart | 2.10.0 (`create-app` 1.53.1) | `helm search repo backstage/backstage --versions` |
 | Node.js | 22.x or 24.x (Active LTS) | `node --version` |
-| Yarn | 4.4.1 | `yarn --version` |
+| Yarn | 4.18.0 — whatever `create-app` pins in `packageManager`; **never downgrade** ([§14.3](#143-scaffold-the-portal)) | `yarn --version` |
 | Buildah | `quay.io/buildah/stable:v1.40.1` | [quay.io tags](https://quay.io/repository/buildah/stable?tab=tags) |
 | Go | 1.26.x | `go version` |
 | Python | 3.13.x | `python3 --version` |

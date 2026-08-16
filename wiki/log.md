@@ -160,3 +160,130 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   `FROM node:24-trixie-slim` lines were fully qualified — Buildah resolved `node` only via its
   shortname alias list, the same luck that `python` had and `golang` did not (see [[buildah]]).
   Pages: [[backstage]], [[buildah]].
+- **2026-08-16** — Full audit of the repo against `modern-devops-tutorial.md`, mechanically rather
+  than by reading. Extracted all 51 ``**`path`** + fenced block`` listings and diffed each against the
+  real file. Result: **0 missing files**, 47 exact matches, and 4 declared partials that were proven
+  correct rather than waved through — the two `.buildkite/pipeline.sh` halves (§12.5 + §14.8) were
+  shown to reconstruct the file byte-for-byte, and every line of the `portal/.yarnrc.yml` and
+  `packages/backend/src/index.ts` fragments was confirmed present in the real file.
+  Seven drifts found and fixed, all of them cases where a fix had landed in a file but only half in
+  the tutorial: the `pyproject.toml` uv-index comment, the `values.yaml` `scaffolded:` block, the
+  PodMonitor 15020 rationale, the `nexus-pull` ExternalSecret in `backstage-secrets.yaml`, a
+  `golang:1.26` rationale block that existed only in the tutorial and not in `pipeline.sh`, and two
+  files CI depends on that the tutorial never listed at all — `portal/Dockerfile` and
+  `portal/.dockerignore`. §14.8 also still claimed `packages/backend/Dockerfile` "already contains"
+  the multi-stage build, which is the false statement that produced the exit-125 failure; corrected.
+  Also swept 50 internal `§` anchors (one broken: `#12-buildkite-ci`) and re-verified the version
+  matrix by reading versions back off the **live cluster** — two were wrong: Yarn (4.4.1 → 4.18.0,
+  the value removed as a defect) and kube-prometheus-stack (82.14.1 → 88.3.0, which is what is
+  actually installed and what §13 was validated on). Pages: [[log]].
+- **2026-08-16** — Produced a **phased edition** of the tutorial in `docs/`: seven phases that each
+  end in something working and checkable, plus a README explaining why that order. Section numbers
+  are preserved verbatim, so every `§N.M` citation in this wiki resolves against either edition.
+  Assembly was mechanical (extract by heading, rewrite cross-file anchors, verify every link) rather
+  than hand-copied, so the two editions cannot silently drift in the parts they share: all 16
+  numbered sections placed exactly once, §0 became the README, 0 broken links across 9 files.
+  Three places genuinely differ, because reordering changes what is true when — recorded here so the
+  difference is not mistaken for drift:
+  1. Phase 1 installs the app with `helm install` (new §10.4 build-by-hand and §10.5 install) and
+     Phase 3 hands the release to [[argo-cd]] with an explicit `helm uninstall`. The single-doc
+     edition never deploys the app until Argo does.
+  2. Observability comes **before** the mesh, so Phase 2 scrapes with a `ServiceMonitor` on the app's
+     own port. This required a new chart template, `servicemonitor.yaml`, plus a
+     `serviceMonitor.enabled` value — exactly one of the two monitors should ever be on.
+  3. §9.6 becomes the moment STRICT mTLS breaks that scrape and you swap to the `PodMonitor` on
+     15020. In the single-doc order the mesh precedes monitoring, so the same lesson can only be told
+     retrospectively.
+  The reordering also fixes a latent oddity in the original: Istio arrived at §9, enabling STRICT
+  mTLS on a `shop` namespace that had no workloads in it yet. Pages: [[argo-cd]], [[prometheus]],
+  [[istio]], [[order-platform]].
+- **2026-08-16** — **Polyglot monorepo documented.** Four new pages — [[pants]], [[pex]], [[grpc]],
+  [[vite]] — plus a new phase document `docs/phase-7-polyglot-monorepo.md` (§17 Pants, §18 one proto
+  two languages, §19 pricing / PEX / frontend / CI), and the canary added to `docs/phase-4` as §9.8
+  (DestinationRule subsets, 90/10 VirtualService weights, the retry arithmetic, outlier detection)
+  and §9.9 (the fault-injection drill). Source: the four implementation commits on
+  `feat/pants-polyglot-grpc` (`ccf317d`, `9bd0086`, `5a94af4`, `3e31724`, `ae9a448`), the manifests
+  and BUILD files themselves, and Context7 for the [[pex]] and [[pants]] vendor claims.
+  Seven failures recorded, each on the page where a reader will hit it:
+  `complete_platforms` (a PEX that builds clean and dies on import in the container),
+  `PEX_ROOT` under `readOnlyRootFilesystem` (fails in the bootstrap, so no application log line
+  appears), `Duplicate module named "app"` (a property of the source-root layout, not of those
+  services), Pants' JS/TS backend not inferring a build script's config or asset inputs (a missing
+  `style.css` produced a green build and an unstyled page), the ruff backend path in 2.33 failing as
+  a `ModuleNotFoundError`, Homebrew's interpreter being invisible to `[python-bootstrap]`, and
+  Istio detecting gRPC from the **Service port name** (wrong name = silent TCP passthrough, so the
+  entire canary applies successfully and does nothing).
+- **2026-08-16** — **A documented claim was found to be false and corrected**, per rule 7 recorded
+  rather than overwritten. §3.2 and [[go]] both stated that `-ldflags "-X main.version=…"` stamps the
+  build SHA into the `order-worker` binary at link time. It does not: `main.go` declares no
+  `var version string`, and Go's linker silently does nothing when the `-X` target symbol is absent.
+  The version a running worker reports has always come from `SERVICE_VERSION`, set by the chart from
+  the image tag. The `ARG VERSION`, the `--build-arg VERSION=$SHA` and the pipeline's per-service
+  `BUILD_ARGS` special case were plumbing for a mechanism that never ran once. Source won: the source
+  code, over both documents. Callouts added to `modern-devops-tutorial.md` §3.2,
+  `docs/phase-1-the-application.md` §3.2, and [[go]]; the `-ldflags` listing itself is left intact
+  with the correction beside it. `-s -w` and `-trimpath` were and are real.
+- **2026-08-16** — **Two stale claims corrected in the phased edition, and one recorded but not
+  fixed.** `docs/phase-5` listed the Backstage skeleton as emitting `app/`; commit `ae9a448` had
+  already templated it to `${{ values.name | replace("-", "_") }}` to stop the paved path
+  manufacturing the duplicate-module failure. Corrected, with the reason. Recorded and **not** fixed:
+  `deploy/charts/order-platform/templates/pricing.yaml` cites *"§9.6 DestinationRule"* when the
+  DestinationRule is §9.8 — the fix belongs in the manifest, and a documentation pass should not edit
+  deployed YAML. Flagged in `docs/phase-4` §9.8.
+- **2026-08-16** — **Tool-choice justifications reframed from licensing to enterprise substitution.**
+  [[floci]], [[openbao]] and [[sonatype-nexus]] were each argued on a licence change — LocalStack's
+  Community sunset, Vault's move to BUSL, and nothing at all for Nexus. Read end to end that says
+  "these are obscure tools picked to dodge fees", which is a fair objection and was never answered.
+  The actual principle is now stated once, up front, in `modern-devops-tutorial.md` §0 and
+  `docs/README.md`: this platform is shaped like an **enterprise**, not a startup, and where the
+  component a real employer hands you is behind a price tag or an account gate it is substituted with
+  the open-source equivalent that teaches the same lesson. No tool choice changed; only the argument.
+  Every existing factual claim was kept (the March 2026 sunset, the 2023 BUSL move, the
+  `/_localstack/health` compatibility, ESO's `vault` provider).
+  Each of the three now names four things: the commercial tool, its price or gate, what concretely
+  transfers, and where it does not. Rewritten in §0.2 (table), §5.1 (new callout — Nexus had no
+  "why not Artifactory" argument at all), §6.1, §7.1, mirrored into `docs/phase-0-foundations.md` and
+  `docs/phase-1-the-application.md`, and into the "Why this, not the alternative" section of all three
+  wiki pages (added to [[openbao]] and [[sonatype-nexus]], which lacked one).
+  New sourced facts, all dated 2026-08: Nexus Repository **Community Edition** caps at 40,000
+  components / 100,000 requests per day and lacks HA, content replication and SAML/SSO
+  (<https://help.sonatype.com/en/ce-onboarding.html>); self-managed Artifactory starts at $27,000/year
+  (<https://jfrog.com/pricing/>); LocalStack's free Hobby tier is non-commercial and account-gated,
+  paid tiers $39–89 per developer per month (<https://www.localstack.cloud/pricing>); OpenBao shipped
+  namespaces in 2.3 beta, API-compatible with Vault Enterprise but not storage- or
+  operator-API-compatible (<https://openbao.org/blog/namespaces-announcement/>); the Floci repo was
+  created 2026-02-18 (GitHub API).
+  Three honest seams were found and are now written down rather than smoothed over:
+  **(1)** the cost argument does not hold for Vault at all — Vault *Community* Edition is free to run,
+  the gate there is the licence; the money appears at Vault **Enterprise**, and the Enterprise-only
+  features (Sentinel, replication, HSM auto-unseal, control groups) are absent from OpenBao *and* from
+  Vault CE, so this platform teaches none of them.
+  **(2)** Nexus is not a substitution at the product level — CE is the same binary as Pro under a
+  usage cap — but the **Policy** leg of [[supply-chain-choke-point]] is aspirational here: blocking a
+  CVE at the choke point requires Sonatype Repository Firewall / IQ or JFrog Xray, both paid.
+  **(3)** **IAM policy evaluation is never exercised** anywhere in this platform: Floci accepts
+  credentials and never authorises them, so nothing here tells a reader whether an IAM policy is
+  correct. That is a genuine teaching gap, not a licensing one.
+  Also removed a stray merge-conflict marker (`||||||| 12e1572`) that had been committed at the end of
+  this file.
+- **2026-08-16** — Kafka choice re-examined after a challenge that the stack used non-standard tools.
+  Audited every Helm chart in the platform: all eleven are published by the upstream project's own
+  GitHub organisation (kubernetes, istio, argoproj, prometheus-community, external-secrets, openbao,
+  kiali, backstage, buildkite) — none from an individual. Strimzi was the one worth questioning, and
+  the Bitnami Kafka chart was evaluated as a replacement and **rejected on evidence**: its default
+  image is `docker.io/bitnami/kafka:4.0.0-debian-12-r10`, and Bitnami's own chart README states that
+  from 2025-08-28 all public-catalog images moved to `docker.io/bitnamilegacy` where they "no longer
+  receive updates", with maintained images behind the commercial Bitnami Secure Images. Swapping would
+  have moved off a free, CNCF-governed, actively maintained operator onto a frozen image.
+  Also tested whether the AWS emulator could stand in for managed Kafka, since that would have removed
+  the question entirely: it cannot. [[floci]] advertises `kafka: running` and answers
+  `list-clusters`, but `create-cluster` returns 500 with
+  `java.net.SocketException: No such file or directory` — that family of emulator launches a real
+  broker as a sibling Docker container via `/var/run/docker.sock`, which a pod does not have and must
+  not be given. Recorded on [[floci]] as the same class of gap as its IAM limitation: the emulator
+  provides the API surface, and the behaviour is the paid part.
+  Kept Strimzi and fixed the actual defect, which was the *justification* — it sold the choice on
+  "KRaft-only", a weak reason that read as arbitrary. Now framed like the other substitutions: Kafka
+  is free, what costs money is someone operating it, Strimzi fills the Confluent-for-Kubernetes slot
+  for nothing — and it states plainly that broker operations are exactly what a managed service sells,
+  so §8 should be read as understanding what MSK does on your behalf. Pages: [[strimzi]], [[floci]].

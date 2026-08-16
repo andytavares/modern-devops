@@ -21,10 +21,14 @@ case "$SHA" in
 esac
 
 # Services are discovered, not listed. A directory under services/ with a
-# Dockerfile in it is a service, and that is the entire contract. This is what
+# BUILD file in it is a service, and that is the entire contract. This is what
 # lets the Backstage paved path (§14.6) add a service without touching CI.
+#
+# It used to key off Dockerfile, which is still there — but BUILD is the more
+# honest signal now: a directory Pants does not know about cannot be built,
+# tested or packaged, so it is not a service this pipeline can deliver.
 SERVICES="$(cd services && ls -d */ 2>/dev/null | sed 's#/##' | while read -r s; do
-  [ -f "$s/Dockerfile" ] && echo "$s"
+  [ -f "$s/BUILD" ] && [ -f "$s/Dockerfile" ] && echo "$s"
 done | sort | tr '\n' ' ')"
 
 if [ -z "$SERVICES" ]; then
@@ -70,57 +74,85 @@ env:
   GOFLAGS: "-mod=mod"
 
 steps:
-  # ── 1. Tests, in parallel ────────────────────────────────────────────────
-  - label: ":python: test order-api"
-    key: test-api
+  # ── 1. One step, every language ──────────────────────────────────────────
+  # This used to be two steps — a Python one running uv/ruff/pytest and a Go
+  # one running go vet/test — which had to be edited by hand every time a
+  # service was added, in a language-specific way. Pants replaces both with
+  # one invocation that discovers what changed and what it depends on.
+  #
+  # `pants package` runs here too, rather than in the image build, because the
+  # build steps below are daemonless Buildah pods with no toolchain: no Python,
+  # no Go, no Node. They receive artifacts, they do not produce them.
+  - label: ":hammer: lint · typecheck · test · package"
+    key: verify
     agents: { queue: kubernetes }
+    artifact_paths: "dist/*"
     plugins:
       - kubernetes:
           podSpec:
+            # The pants image lives in Nexus, which requires auth. nexus-push is
+            # Opaque (a Buildah auth file) and the kubelet cannot use it here.
+            imagePullSecrets:
+              - name: nexus-pull
             containers:
-              - image: python:3.13-slim
+              # Built once from .buildkite/pants-ci.Dockerfile and pushed to
+              # Nexus. Pants 2.x is NOT on PyPI — `pip install
+              # pantsbuild.pants==2.33.0` fails, because modern Pants ships
+              # only as the scie-pants launcher binary. Baking that binary
+              # into an image keeps every build pulling from Nexus.
+              - image: nexus:8082/ci/pants:0.13.2
+                resources:
+                  requests: { cpu: "1", memory: 2Gi }
+                  limits:   { memory: 4Gi }
                 command:
                   - |
                     set -euo pipefail
-                    cd services/order-api
-                    pip install --quiet uv
-                    uv sync --locked --dev
-                    uv run ruff check .
-                    uv run pytest -q
 
-  - label: ":go: test order-worker"
-    key: test-worker
-    agents: { queue: kubernetes }
-    plugins:
-      - kubernetes:
-          podSpec:
-            containers:
-              # Debian, not alpine: `go test -race` needs cgo, and the alpine
-              # image ships CGO_ENABLED=0 with no C toolchain. Adding gcc and
-              # musl-dev to alpine also works; this is one word instead.
-              - image: golang:1.26
-                command:
-                  - |
-                    set -euo pipefail
-                    cd services/order-worker
-                    go vet ./...
-                    go test -race ./...
+                    # git metadata: Pants uses it to decide what changed.
+                    git config --global --add safe.directory "$PWD"
+
+                    pants lint check test ::
+
+                    # Only the deployable artifacts. `::` would also build the
+                    # frontend bundle, which the frontend image rebuilds itself.
+                    pants package \
+                      services/order-api:bin \
+                      services/order-worker:bin \
+                      services/pricing:bin
+
+                    ls -la dist/
 
   - wait
 YAML
 
+# `golang:1.26` and not `golang:1.26-alpine` for the TEST step specifically:
+#
+#   golang:1.26-alpine : CGO_ENABLED=0, no gcc
+#   golang:1.26        : CGO_ENABLED=1, gcc 14.2.0, git 2.47.3
+#
+# `go test -race` is implemented with a C runtime, so on alpine it refuses with
+# `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1` — and setting
+# that variable alone doesn't help, because there is no compiler to use. The
+# Dockerfile in §3.2 still builds FROM golang:1.26-alpine, and should: there we
+# *want* CGO_ENABLED=0 for a static binary in a scratch image. Test and build
+# want opposite things from the same toolchain, which is why they differ.
+
 # ── 2. Build and push images ───────────────────────────────────────────────
-# One template, one step per service. When these were two hand-maintained
-# YAML blocks they differed only in a name, which is exactly the kind of
-# duplication that drifts without anyone noticing.
+# These pods contain Buildah and nothing else — no Python, no Go, no compiler.
+# They download the artifact the verify step produced and copy it into an
+# image. That is the whole reason `pants package` runs upstream rather than
+# here, and it is why every Dockerfile in services/ is now four lines long.
+#
+# The build context is dist/, not the service directory, because that is where
+# the artifacts are. Each Dockerfile COPYs its artifact by name (order-api.pex,
+# pricing.pex, order-worker), which is what the `output_path` on each Pants
+# target exists to guarantee.
 for SVC in $SERVICES; do
-  # Only the Go image takes a version stamp (services/order-worker/Dockerfile
-  # declares ARG VERSION); buildah warns about build-args the Dockerfile never
-  # declares, so don't pass it to the Python one.
-  case "$SVC" in
-    order-worker) BUILD_ARGS="--build-arg \"VERSION=$SHA\" " ;;
-    *)            BUILD_ARGS="" ;;
-  esac
+  # No build args. The old pipeline passed --build-arg VERSION=$SHA into
+  # `-ldflags "-X main.version=..."`, but main.go has no such package-level
+  # symbol — it reads SERVICE_VERSION from the environment, which the Helm
+  # chart sets. Go's -X is a silent no-op when the symbol is absent, so that
+  # machinery never did anything. Removed rather than carried forward.
 
   cat <<YAML
 
@@ -153,12 +185,19 @@ for SVC in $SERVICES; do
                   - |
                     set -euo pipefail
 
+                    # The artifact built by the verify step. Without this the
+                    # COPY below fails with "no such file or directory" on a
+                    # path that exists perfectly well in the repo — because the
+                    # context is dist/, not the source tree.
+                    buildkite-agent artifact download "dist/*" .
+                    ls -la dist/
+
                     buildah bud \\
                       --tls-verify=false \\
-                      ${BUILD_ARGS}--file services/$SVC/Dockerfile \\
+                      --file services/$SVC/Dockerfile \\
                       --tag "$REGISTRY/shop/$SVC:$SHA" \\
                       --tag "$REGISTRY/shop/$SVC:latest" \\
-                      services/$SVC
+                      dist
 
                     buildah push --tls-verify=false "$REGISTRY/shop/$SVC:$SHA"
                     buildah push --tls-verify=false "$REGISTRY/shop/$SVC:latest"
@@ -166,6 +205,52 @@ for SVC in $SERVICES; do
                     echo "pushed $REGISTRY/shop/$SVC:$SHA"
 YAML
 done
+
+# The frontend is not under services/ and does not consume a Pants artifact:
+# its Dockerfile runs the vite build itself in a node stage. That is a
+# deliberate inconsistency — the static bundle is platform-independent, so it
+# has none of the cross-compilation problem that forced the other three into
+# the artifact-handoff shape. Worth revisiting if the node stage gets slow.
+cat <<YAML
+
+  - label: ":art: build frontend ($SHA)"
+    key: build-frontend
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            volumes:
+              - name: nexus-auth
+                secret: { secretName: nexus-push }
+            containers:
+              - image: quay.io/buildah/stable:v1.40.1
+                securityContext:
+                  privileged: true
+                env:
+                  - name: STORAGE_DRIVER
+                    value: vfs
+                  - name: BUILDAH_FORMAT
+                    value: docker
+                  - name: REGISTRY_AUTH_FILE
+                    value: /auth/config.json
+                volumeMounts:
+                  - name: nexus-auth
+                    mountPath: /auth
+                    readOnly: true
+                command:
+                  - |
+                    set -euo pipefail
+
+                    buildah bud \\
+                      --tls-verify=false \\
+                      --file frontend/Dockerfile \\
+                      --tag "$REGISTRY/shop/frontend:$SHA" \\
+                      --tag "$REGISTRY/shop/frontend:latest" \\
+                      frontend
+
+                    buildah push --tls-verify=false "$REGISTRY/shop/frontend:$SHA"
+                    buildah push --tls-verify=false "$REGISTRY/shop/frontend:latest"
+YAML
 
 # The portal is not a service and does not fit the services template: a
 # different Dockerfile path, a different context, and a build measured in

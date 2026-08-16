@@ -1,32 +1,19 @@
 # syntax=docker/dockerfile:1.7
-FROM docker.io/library/python:3.13-slim AS builder
+#
+# Build context is `dist/` (the `pants package services/order-api:bin` output),
+# not the source tree: the PEX already bundles the interpreter-independent
+# dependency closure resolved by Pants from locks/python-default.lock, so there
+# is nothing left for this image to resolve or install.
+FROM docker.io/library/python:3.13-slim
 
-# uv resolves and installs an order of magnitude faster than pip, and writes a
-# lockfile we can commit for reproducible builds.
-COPY --from=ghcr.io/astral-sh/uv:0.12.1 /uv /usr/local/bin/uv
-
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=never
-
-WORKDIR /app
-COPY pyproject.toml uv.lock ./
-# --no-install-project: dependencies only, so this layer caches across code changes.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-install-project --no-dev
-
-COPY app ./app
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev
-
-
-FROM docker.io/library/python:3.13-slim AS runtime
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
+
 WORKDIR /app
-COPY --from=builder --chown=10001:10001 /app /app
-ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 \
+COPY --chown=10001:10001 order-api.pex /app/order-api.pex
+
+ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+
 USER 10001
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["python", "/app/order-api.pex"]

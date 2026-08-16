@@ -8,10 +8,27 @@ whose sections are cited throughout as `§N.M`.
 
 > [!info] Status as of 2026-08-16
 > The platform has now been **built and run on a live kind cluster** through §13, and CI executes real
-> jobs in-cluster. Seven defects in the tutorial were found by running it and have been fixed; each is
-> recorded on the relevant tool page as a `> [!warning]` with the exact symptom. The pages carrying
-> observed-in-anger failures are [[sonatype-nexus]], [[buildkite]], [[uv]], [[go]], [[argo-cd]],
-> [[strimzi]], [[floci]] and [[ingress-nginx]]. See [[log]] for the sequence.
+> jobs in-cluster. Defects found by running it are recorded on the relevant tool page as a
+> `> [!warning]` with the exact symptom. The pages carrying observed-in-anger failures are
+> [[sonatype-nexus]], [[buildkite]], [[uv]], [[go]], [[argo-cd]], [[strimzi]], [[floci]],
+> [[ingress-nginx]], [[pants]], [[pex]] and [[vite]]. See [[log]] for the sequence.
+>
+> **The build system changed on 2026-08-16.** [[pants]] replaced per-language toolchains, one
+> `.proto` now generates Python and Go stubs ([[grpc]]), and a third service (`pricing`) runs as a
+> two-version [[istio]] canary. §17–§19 in `docs/phase-7-polyglot-monorepo.md`; those sections do not
+> exist in the single-document edition yet.
+>
+> **The tool-choice arguments were reframed on 2026-08-16.** [[floci]], [[openbao]] and
+> [[sonatype-nexus]] were previously justified on *licensing*, which read like dodging fees around
+> obscure tools. The actual principle — now stated once in §0 and in `docs/README.md` — is that this
+> platform is shaped like an **enterprise**, and where the component a real employer hands you is
+> behind a price tag or an account gate it is substituted with the open-source equivalent that teaches
+> the same lesson. Each of the three pages now names the commercial tool, what it costs, what
+> concretely transfers, and **where it does not**.
+>
+> One documented claim was found to be **false and has been corrected**: `-ldflags "-X
+> main.version=…"` never stamped anything, because `main.go` has no such symbol. Both §3.2 and
+> [[go]] carried it. See [[go]] for the full record.
 
 ## How to read this
 
@@ -34,6 +51,7 @@ that span tools — read those when a question is "why is it like this", not "wh
 | 12 | CI | [[buildkite]], [[buildah]] |
 | 13 | Observability | [[prometheus]], [[grafana]], [[kiali]] |
 | 14 | Portal | [[backstage]], [[postgresql]] |
+| 17–19 | Build system | [[pants]], [[pex]], [[grpc]], [[vite]] |
 | 3 | Applications | [[fastapi]], [[uv]], [[go]] |
 
 ## Tools
@@ -46,11 +64,11 @@ that span tools — read those when a question is "why is it like this", not "wh
 - [[ingress-nginx]] — the single edge for every `*.localtest.me` URL
 
 ### Artifacts, secrets, state
-- [[sonatype-nexus]] — registry plus PyPI/Go/npm proxies; the supply-chain choke point
-- [[openbao]] — the source of truth for secrets (Vault's MPL fork)
+- [[sonatype-nexus]] — registry plus PyPI/Go/npm proxies; the supply-chain choke point. Community Edition standing in for Nexus Pro / JFrog Artifactory
+- [[openbao]] — the source of truth for secrets; the MPL fork standing in for HashiCorp Vault
 - [[external-secrets-operator]] — syncs OpenBao values into Kubernetes Secrets
 - [[postgresql]] — Backstage's catalog and scaffolder state
-- [[floci]] — S3 and DynamoDB locally, no AWS account
+- [[floci]] — S3 and DynamoDB locally, no AWS account; standing in for LocalStack Pro
 
 ### Messaging
 - [[apache-kafka]] — the durable log joining order-api to order-worker
@@ -70,12 +88,18 @@ that span tools — read those when a question is "why is it like this", not "wh
 - [[prometheus]] — scraping, storage, alert evaluation
 - [[grafana]] — dashboards as code
 
+### Build system
+- [[pants]] — one build system for Python, Go and TypeScript; the monorepo's whole argument
+- [[pex]] — Python services as one executable zip, so the image is `FROM` plus `COPY`
+- [[grpc]] — one `.proto` compiled into two languages; the first synchronous hop in the platform
+- [[vite]] — the Canary Watch dashboard that makes a traffic shift visible in a browser
+
 ### Portal and applications
 - [[backstage]] — catalog plus the two paved paths
 - [[order-platform]] — the app this platform exists to deliver, and its chart
 - [[fastapi]] — order-api (Python)
 - [[go]] — order-worker
-- [[uv]] — Python dependency resolution and locking
+- [[uv]] — Python dependency resolution and locking (superseded by [[pants]] for building; still the reference for lockfile/index discipline)
 
 ## Concepts
 

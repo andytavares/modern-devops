@@ -1,0 +1,147 @@
+# Canary routing and resilience for shop.v1.Pricing (services/pricing), consumed
+# by order-api's PricingClient over gRPC with a 2s client-side deadline
+# (order_api/main.py: `self._stub.PriceOrder(request, timeout=self._timeout_seconds)`).
+# order-api never falls back to a local price on failure — it returns HTTP 502 —
+# so every value below is chosen against that 2s budget, worked out explicitly
+# in the comments rather than left as Istio defaults.
+#
+# gRPC-over-HTTP/2 note: Istio does NOT have a separate "grpc:" route stanza.
+# gRPC rides HTTP/2, so it is routed with the ordinary `http:` block below.
+# What makes Istio treat this Service's traffic as HTTP/2-aware in the first
+# place (rather than opaque TCP) is the Service port *name* -- `grpc` (see the
+# Service manifest: ports named `grpc` and `metrics`). Istio's port-name
+# protocol sniffing maps the `grpc` / `grpc-*` prefix to HTTP/2 with gRPC
+# semantics, which is what makes header-based routing, retries and
+# gRPC-status-aware outlier detection possible at all. Get the port name
+# wrong (e.g. call it `pricing` or `tcp-grpc`) and Istio falls back to plain
+# TCP passthrough -- this whole file would silently stop doing anything.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: pricing
+  namespace: shop
+spec:
+  host: pricing.shop.svc.cluster.local
+  subsets:
+    - name: v1
+      labels:
+        version: v1
+    - name: v2
+      labels:
+        version: v2
+  trafficPolicy:
+    # Applies to both subsets (v1 and v2 each get their own Envoy cluster, but
+    # both inherit this trafficPolicy since neither subset overrides it).
+    connectionPool:
+      # Modest limits for a 2-3 replica internal service taking gRPC calls from
+      # order-api (and order-worker). HTTP/2 multiplexes many requests over one
+      # connection, so we don't need -- and don't want -- a large connection count.
+      tcp:
+        maxConnections: 20
+      http:
+        # Concurrent in-flight requests across the whole pool. 100 is generous
+        # headroom over expected order volume for a demo service while still
+        # bounding worst-case fan-out from a client bug.
+        http2MaxRequests: 100
+        # 0 = unlimited requests per HTTP/2 connection. HTTP/2 is designed for
+        # long-lived multiplexed connections; forcing periodic reconnects (a
+        # nonzero cap) only adds handshake latency to a service already living
+        # inside a 2s client deadline, for no gRPC-specific benefit.
+        maxRequestsPerConnection: 0
+    outlierDetection:
+      # Eject a pod after 3 consecutive gateway/5xx errors. Justification for a
+      # 2-3 replica subset: with `consecutive5xxErrors` left at its default of
+      # 5, a single bad replica in a pool that small could account for a large
+      # share of total request volume before ejection ever kicks in -- the
+      # blast radius is too big to wait for 5. 3 is fast enough to react to a
+      # genuinely broken pod within a handful of requests, without being so
+      # low (e.g. 1-2) that ordinary transient errors trip it.
+      consecutive5xxErrors: 3
+      # How often Envoy sweeps for ejection candidates.
+      interval: 15s
+      # Minimum time a pod stays ejected once flagged. Kept at the 30s
+      # default: long enough that the ejected pod isn't immediately
+      # reconsidered on the next 15s sweep, short enough that a transient
+      # blip (e.g. a fault-injection drill, see pricing-fault-injection.yaml.disabled)
+      # self-heals without operator intervention.
+      baseEjectionTime: 30s
+      # Cap ejections at 50%, not the 10% default. Rationale: with only 2-3
+      # replicas per subset, 10% of the pool rounds down to zero ejectable
+      # hosts -- outlier detection would be configured but functionally
+      # inert. 50% guarantees room to eject at least one bad replica out of
+      # two while always leaving at least one healthy replica standing, so a
+      # single failing pod can never take the whole subset out of rotation.
+      maxEjectionPercent: 50
+---
+# 90/10 canary split between pricing-v1 and pricing-v2, with a request-level
+# timeout and retry policy sized against order-api's 2s client-side gRPC
+# deadline (order_api/main.py PricingClient, settings.pricing_timeout_seconds).
+#
+# The arithmetic, in order:
+#
+#   1. route `timeout: 1800ms` -- deliberately LESS than the client's 2000ms
+#      deadline, never more. A route timeout longer than 2s is pointless:
+#      order-api's own grpc timeout fires at 2s regardless of what Envoy is
+#      still doing, so anything Envoy does past that point is wasted work the
+#      caller has already given up on. Setting it a bit *under* 2s (200ms of
+#      slack) means Envoy is the one that gives up and returns a clean
+#      "upstream request timeout" to order-api's stub, rather than the two
+#      timers racing to fire at effectively the same instant, which would
+#      make the failure mode nondeterministic (sometimes a proxy-side error,
+#      sometimes a bare DEADLINE_EXCEEDED from the grpc lib itself).
+#
+#   2. retries: attempts=2, perTryTimeout=500ms -- worst case this is the
+#      initial try plus 2 retries = 3 attempts * 500ms = 1500ms of pure
+#      per-try time. Add Istio's exponential backoff between attempts
+#      (minimum ~25ms per gap, 2 gaps = ~50ms) and the worst-case total is
+#      ~1550ms. That leaves ~250ms of slack under the 1800ms route timeout,
+#      and ~450ms of slack under order-api's 2000ms client deadline. Retries
+#      that could exceed the caller's own deadline are worse than useless --
+#      they burn the time budget on attempts the caller will never see the
+#      result of -- so every number here is chosen to keep the full retry
+#      envelope inside both ceilings, not just the outer one.
+#
+#   3. retryOn -- gRPC-over-HTTP/2 conditions, deliberately narrow:
+#        - unavailable, cancelled: transient / connection-level failures
+#          (matches Istio's own cluster-wide default retry set) -- exactly
+#          the class of error a retry against a *different* pod is likely to
+#          fix.
+#        - connect-failure, refused-stream: HTTP/2-level conditions (TCP
+#          connect failure, stream reset before headers) -- the request
+#          never reached an application handler, so retrying is safe and
+#          cheap.
+#      Deliberately NOT retried:
+#        - deadline-exceeded: the request already burned its per-try time
+#          budget once; retrying just spends more of the same 2s budget on
+#          the same failure mode.
+#        - resource-exhausted / internal: these usually mean the instance is
+#          already overloaded or broken. Retrying hammers a struggling pod
+#          instead of giving it room to recover -- that's what
+#          outlierDetection above is for (eject it), not what retries are for.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: pricing
+  namespace: shop
+spec:
+  hosts:
+    - pricing.shop.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v1
+            port:
+              number: 50051
+          weight: 90
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v2
+            port:
+              number: 50051
+          weight: 10
+      timeout: 1800ms
+      retries:
+        attempts: 2
+        perTryTimeout: 500ms
+        retryOn: cancelled,unavailable,connect-failure,refused-stream

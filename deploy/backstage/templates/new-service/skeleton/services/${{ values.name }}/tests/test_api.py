@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from app.main import METRIC_PREFIX, SERVICE, app, healthz
+from ${{ values.name | replace('-', '_') }}.main import METRIC_PREFIX, SERVICE, app, healthz
 
 client = TestClient(app)
 

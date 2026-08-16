@@ -3,3 +3,9 @@ __pycache__/
 bin/
 *.pyc
 .DS_Store
+
+# Pants build output
+/dist/
+.pants.d/
+.pids/
+__pycache__/

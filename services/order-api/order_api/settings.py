@@ -13,6 +13,13 @@ class Settings:
         # Injected by External Secrets Operator from OpenBao. See §7.
         self.signing_key = _req("ORDER_SIGNING_KEY")
         self.service_version = os.getenv("SERVICE_VERSION", "dev")
+        self.order_api_port = int(os.getenv("ORDER_API_PORT", "8000"))
+        self.pricing_addr = os.getenv(
+            "PRICING_ADDR", "pricing.shop.svc.cluster.local:50051"
+        )
+        self.pricing_timeout_seconds = float(
+            os.getenv("PRICING_TIMEOUT_SECONDS", "2.0")
+        )
 
 
 def _req(name: str) -> str:

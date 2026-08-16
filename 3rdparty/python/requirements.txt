@@ -1,0 +1,29 @@
+# Third-party Python for the whole monorepo, resolved once into
+# locks/python-default.lock. Pants computes per-target dependencies from
+# imports, so a service only ships what it actually uses — one requirements
+# file does not mean one fat PEX.
+#
+# Versions are pinned by the lockfile, which is committed. Pinning here as well
+# would mean two places to update and one of them silently winning.
+
+# --- gRPC + protobuf runtime (generated code needs these at run time) ---
+grpcio
+grpcio-tools
+protobuf
+
+# --- order-api ---
+fastapi[standard]==0.139.2
+aiokafka==0.12.0
+boto3==1.40.11
+prometheus-client==0.23.1
+pydantic==2.11.7
+
+# --- test + typecheck ---
+pytest==8.4.1
+httpx==0.28.1
+mypy
+types-protobuf
+# grpcio ships no py.typed marker, so mypy cannot see its types at all. Verified
+# via `pants export --resolve=python-default` that site-packages has no py.typed
+# under grpc/ — mypy's own suggestion to install these stubs is correct.
+types-grpcio

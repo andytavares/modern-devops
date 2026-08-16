@@ -1,0 +1,95 @@
+[GLOBAL]
+pants_version = "2.33.0"
+
+# One build system, four languages. The Python and protobuf-Python backends are
+# stable; go, javascript and typescript are still shipped under
+# `pants.backend.experimental.*` upstream. That is a real risk and it is taken
+# knowingly: the value of a polyglot monorepo is precisely that one tool builds,
+# tests and lints everything, and the escape hatch for any of them is the
+# language's own toolchain, one command away.
+backend_packages = [
+  # Python — stable (ruff lives under experimental.* in 2.33, mypy does not)
+  "pants.backend.python",
+  "pants.backend.experimental.python.lint.ruff.check",
+  "pants.backend.experimental.python.lint.ruff.format",
+  "pants.backend.python.typecheck.mypy",
+  "pants.backend.codegen.protobuf.python",
+
+  # Go — experimental upstream
+  "pants.backend.experimental.go",
+  "pants.backend.experimental.codegen.protobuf.go",
+
+  # Frontend — experimental upstream
+  "pants.backend.experimental.javascript",
+  "pants.backend.experimental.typescript",
+]
+
+# Everything that is not source. dist/ holds `pants package` output — the PEXes
+# and Go binaries that Buildah later copies into images.
+pants_ignore.add = [
+  # Scaffolder templates, not source. Their BUILD files contain nunjucks
+  # placeholders and are not valid Python until Backstage renders them —
+  # Pants would otherwise fail the whole repo with a BuildFileSyntaxError.
+  "/deploy/backstage/templates",
+  "/portal",          # Backstage owns its own Yarn workspace; not ours to build
+  "/wiki",
+  "/raw",
+  "/docs",
+]
+
+[source]
+# Import roots. `protos` is listed so generated code is importable as
+# `shop.v1.pricing_pb2` rather than by a path that leaks the directory layout.
+root_patterns = ["/", "/services/*", "/protos"]
+
+[python]
+interpreter_constraints = [">=3.13,<3.14"]
+enable_resolves = true
+default_resolve = "python-default"
+
+[python.resolves]
+python-default = "locks/python-default.lock"
+
+[python-bootstrap]
+# Where Pants looks for a CPython matching the interpreter constraints above.
+# <PYENV> and <PATH> are the defaults; the Homebrew path is added because
+# `brew install python@3.13` puts an unversioned `python` in libexec/bin that
+# is not on PATH, and without it Pants reports
+# "No working interpreter compatible with the requested constraints was found"
+# while a perfectly good 3.13 sits on disk.
+search_path = ["<PYENV>", "<PATH>", "/opt/homebrew/opt/python@3.13/libexec/bin"]
+
+[python-repos]
+# The supply-chain choke point (§5.1) applies to the build system too. Pants
+# resolves through Nexus, not pypi.org, exactly like uv did before it.
+indexes = ["http://nexus:8081/repository/pypi-proxy/simple"]
+
+[golang]
+# Go modules also resolve through Nexus. GOSUMDB is off for the same reason as
+# §12.5: the public checksum database is unreachable through a private proxy.
+subprocess_env_vars = [
+  "GOPROXY=http://nexus:8081/repository/go-proxy",
+  "GOSUMDB=off",
+  "GOFLAGS=-mod=mod",
+  "HOME",
+  "PATH",
+]
+
+[python-protobuf]
+# protoc also emits .pyi stubs for each generated file. Without this, mypy sees
+# pricing_pb2.py building its message classes dynamically via
+# _builder.BuildTopDescriptorsAndMessages(...) into globals() and reports
+# "PriceOrderRequest is not defined" — the classes genuinely do not exist
+# statically. Pants' help prefers this over the older mypy_plugin option.
+generate_type_stubs = true
+
+[mypy]
+install_from_resolve = "python-default"
+
+[test]
+# A test that depends on network or wall-clock is a test that fails in CI at
+# 2am for reasons unrelated to the change. Fail loudly instead.
+timeout_default = 60
+
+[anonymous-telemetry]
+enabled = false

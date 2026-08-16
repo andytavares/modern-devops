@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package shop.v1;
+
+// One .proto, two languages, one build system. Pants generates Python stubs for
+// order-api and pricing, and Go stubs for order-worker, from this single file —
+// which is the entire argument for a polyglot monorepo. Change a field here and
+// both languages fail to compile in the same `pants check ::`, before anything
+// reaches a cluster.
+option go_package = "github.com/andytavares/modern-devops/protos/shop/v1;shopv1";
+
+service Pricing {
+  // Priced synchronously on the order path, which is what makes it a useful
+  // subject for §9: a timeout here is a user-visible failure, so retries,
+  // outlier detection and traffic shifting all have observable consequences.
+  rpc PriceOrder(PriceOrderRequest) returns (PriceOrderResponse);
+}
+
+message PriceOrderRequest {
+  string sku = 1;
+  int32 quantity = 2;
+  int32 unit_amount_cents = 3;
+  string customer = 4;
+}
+
+message PriceOrderResponse {
+  int32 total_amount_cents = 1;
+  int32 discount_cents = 2;
+  string rule_applied = 3;
+
+  // Which pricing implementation served this call. The frontend tallies it, so
+  // a VirtualService weight change is visible in a browser within seconds
+  // rather than only in Kiali. This field is the whole canary demo.
+  string served_by = 4;
+}

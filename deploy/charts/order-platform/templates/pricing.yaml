@@ -1,0 +1,100 @@
+{{- if .Values.pricing.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pricing
+  labels: {{- include "op.labels" (dict "name" "pricing" "root" $) | nindent 4 }}
+---
+{{- range $version, $cfg := (dict "v1" .Values.pricing.v1 "v2" .Values.pricing.v2) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pricing-{{ $version }}
+  labels: {{- include "op.labels" (dict "name" "pricing" "root" $) | nindent 4 }}
+    version: {{ $version }}
+spec:
+  replicas: {{ $cfg.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pricing
+      version: {{ $version }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: {{- include "op.labels" (dict "name" "pricing" "root" $) | nindent 8 }}
+        # Istio subsets select on this label (§9.6 DestinationRule) — it must
+        # live on the pod template, not just the Deployment.
+        version: {{ $version }}
+      annotations:
+        checksum/config: {{ toJson $.Values | sha256sum }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: {{ $.Values.pricing.httpPort | quote }}
+    spec:
+      serviceAccountName: pricing
+      imagePullSecrets:
+        - name: {{ $.Values.global.imagePullSecret }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: pricing
+          image: {{ include "op.image" (dict "root" $ "img" $cfg.image) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: grpc, containerPort: {{ $.Values.pricing.grpcPort }} }
+            - { name: metrics, containerPort: {{ $.Values.pricing.httpPort }} }
+          env:
+            - name: PRICING_VERSION
+              value: {{ $version | quote }}
+            - name: PRICING_GRPC_PORT
+              value: {{ $.Values.pricing.grpcPort | quote }}
+            - name: PRICING_HTTP_PORT
+              value: {{ $.Values.pricing.httpPort | quote }}
+            # PEX unpacks its dependency closure here; see the volumeMount note.
+            - name: PEX_ROOT
+              value: "/tmp/pex"
+            - name: SERVICE_VERSION
+              value: {{ $cfg.image.tag | quote }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            periodSeconds: 5
+            failureThreshold: 2
+          resources: {{- toYaml $.Values.pricing.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          # A PEX is a zip that unpacks its dependency closure on first run, so
+          # it needs somewhere writable. Under readOnlyRootFilesystem it has
+          # nowhere and dies before any of our code runs:
+          #   FileNotFoundError: [Errno 2] No usable temporary directory found
+          #   in ['/tmp', '/var/tmp', '/usr/tmp', '/app']
+          # Note the failure is in the PEX bootstrap, so no application log line
+          # ever appears — it looks like the image is broken rather than the
+          # pod spec. An emptyDir plus an explicit PEX_ROOT fixes it and keeps
+          # the root filesystem read-only, which is worth the four lines.
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: pricing
+  labels: {{- include "op.labels" (dict "name" "pricing" "root" $) | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: pricing
+  ports:
+    - { name: grpc, port: 50051, targetPort: grpc }
+    - { name: metrics, port: 9090, targetPort: metrics }
+{{- end }}

@@ -42,6 +42,48 @@ orderWorker:
     requests: { cpu: 50m, memory: 64Mi }
     limits:   { memory: 128Mi }
 
+# Exactly one of these two should be on. serviceMonitor is the pre-mesh scrape
+# path (§13.3); podMonitor replaces it once STRICT mTLS refuses plaintext
+# scrapes (§9.6). Both start false because the monitoring.coreos.com CRDs do
+# not exist until §13.2 installs kube-prometheus-stack, and Argo CD fails the
+# whole Application sync on a resource whose CRD is missing.
+serviceMonitor:
+  enabled: false
+  interval: 15s
+
+pricing:
+  enabled: true
+  grpcPort: 50051
+  httpPort: 9090
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { memory: 128Mi }
+  v1:
+    image:
+      repository: shop/pricing
+      tag: "dev"
+    replicas: 2
+  v2:
+    image:
+      repository: shop/pricing
+      tag: "dev"
+    replicas: 1
+
+frontend:
+  enabled: true
+  image:
+    repository: shop/frontend
+    tag: "dev"
+  replicas: 2
+  port: 8080
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits:   { memory: 64Mi }
+  ingress:
+    enabled: true
+    className: nginx
+    host: app.localtest.me
+
 podMonitor:
   # false until §13.2 installs kube-prometheus-stack and with it the
   # monitoring.coreos.com CRDs. Argo CD does not skip a resource whose CRD is

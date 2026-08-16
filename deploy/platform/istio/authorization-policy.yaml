@@ -22,7 +22,7 @@ spec:
               - "cluster.local/ns/shop/sa/order-api"
               - "cluster.local/ns/shop/sa/order-worker"
 ---
-# 3. order-api is reachable from the edge, and from nowhere else.
+# 3. order-api is reachable from the edge, and from the frontend -- nowhere else.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -38,3 +38,29 @@ spec:
         - source:
             principals:
               - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/shop/sa/frontend"
+---
+# 4. pricing is the canary target (v1/v2, one Service). It is called
+# synchronously on the order path with no fallback on failure (see
+# services/order-api/order_api/main.py: `_price_order` raises HTTP 502 on any
+# grpc.RpcError, it never guesses a price) -- so its blast radius must be as
+# small as possible. order-api is the only workload with any business calling
+# it. Not order-worker, not frontend, not anything in floci.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-order-api-to-pricing
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pricing
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/shop/sa/order-api"
