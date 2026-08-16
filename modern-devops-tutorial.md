@@ -998,13 +998,49 @@ kubectl config use-context kind-devops
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.13.0/deploy/static/provider/kind/deploy.yaml
 
+# REQUIRED as of controller-v1.13.0 — see the explanation below. Without this the
+# controller can land on a worker node, bind hostPort 80 there, and be
+# unreachable from your laptop.
+kubectl -n ingress-nginx patch deployment ingress-nginx-controller --type=strategic -p \
+  '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/os":"linux","ingress-ready":"true"}}}}}'
+
 kubectl wait --namespace ingress-nginx \
   --for=condition=ready pod \
   --selector=app.kubernetes.io/component=controller \
   --timeout=180s
+
+# Confirm it landed on the node that actually publishes 80/443:
+kubectl -n ingress-nginx get pods -o wide
+# NODE should be devops-control-plane
 ```
 
-That manifest is the kind-specific variant: it runs the controller as a DaemonSet with `hostPort` 80/443 and a `nodeSelector` of `ingress-ready=true`, which is the label we set in the cluster config. That's why the two files have to agree.
+That manifest is the kind-specific variant: the controller is a **Deployment** whose container
+declares `hostPort` 80 and 443. Combined with kind's `extraPortMappings`, that is what puts nginx on
+your laptop's port 80 — but **only if the pod is scheduled on the node those mappings belong to**,
+which is the control plane. Hence the patch.
+
+> **Why the patch is needed, and why the tutorial can't just describe the manifest.** Up to
+> **v1.11.x** the kind manifest pinned the controller itself: `type: NodePort` plus
+> `nodeSelector: ingress-ready: "true"`, matching the label we set in `infra/kind-cluster.yaml`. As of
+> **v1.13.0 upstream dropped both**: the Service is now `type: LoadBalancer` (which stays `<pending>`
+> forever on kind, harmlessly) and the pod carries only `nodeSelector: kubernetes.io/os: linux` plus
+> *tolerations* for the control plane. Tolerations permit scheduling there; they do not require it. So
+> the scheduler is free to place the controller on any node, and on a multi-node kind cluster it
+> usually won't pick the one with the port mappings.
+>
+> The symptom is `curl http://localhost` returning **`000`** — not a 404, not a 502. `000` is curl
+> saying it never established a connection, because on your host's port 80 there is genuinely nothing
+> listening. `kubectl get pods` shows `1/1 Running` throughout, which is the part that makes this
+> expensive to debug: **the controller is perfectly healthy, just on the wrong node.**
+>
+> Diagnose it in one command — compare where the pod is with where the ports are:
+> ```bash
+> kubectl -n ingress-nginx get pods -o wide          # NODE
+> docker ps --format '{{.Names}}\t{{.Ports}}'        # which container publishes 80
+> ```
+> The general lesson outrides ingress-nginx: **`hostPort` is a property of a node, not of a cluster.**
+> Any workload you reach through a fixed host port must be pinned to the node that exposes it, and a
+> pod that merely *tolerates* a node is not pinned to it.
 
 We'll use `*.localtest.me` hostnames throughout. `localtest.me` and every subdomain of it resolve to `127.0.0.1` from public DNS, so you get real hostname-based routing with zero `/etc/hosts` edits.
 
@@ -1013,6 +1049,7 @@ Verify:
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost
 # 404 is correct — nginx is up and has no matching Ingress yet.
+# 000 means nothing is listening: the controller is on the wrong node (see above).
 ```
 
 ---
@@ -1341,6 +1378,11 @@ spec:
     metadata:
       labels: { app.kubernetes.io/name: floci }
     spec:
+      # The `floci` Service is in this namespace, so kubelet would inject
+      # FLOCI_PORT=tcp://<clusterIP>:4566. Floci is a Quarkus app and SmallRye
+      # Config reads that as the `floci.port` property, which must be an integer.
+      # Startup then fails on the injected value. Turn the injection off.
+      enableServiceLinks: false
       containers:
         - name: floci
           image: floci/floci:1.5.11
@@ -2018,7 +2060,7 @@ Sidecars are injected at pod **creation**, so existing pods need a restart:
 
 ```bash
 kubectl -n floci rollout restart deployment/floci
-kubectl -n ingress-nginx rollout restart daemonset/ingress-nginx-controller
+kubectl -n ingress-nginx rollout restart deployment/ingress-nginx-controller
 
 # order-api / order-worker don't exist yet — they'll be born with sidecars in §11.
 kubectl -n floci get pods          # READY should be 2/2
@@ -2631,7 +2673,16 @@ kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath='{.data.password}' | base64 -d && echo
 ```
 
-Open <http://argocd.localtest.me>, log in as `admin`. Your browser will warn about the certificate — expected, Argo CD self-signs.
+Open <https://argocd.localtest.me>, log in as `admin`. Your browser will warn about the certificate — expected, Argo CD self-signs.
+
+> **`https`, not `http`, and this one is a trap.** We deploy `argocd-server` in its default TLS mode
+> (no `--insecure`, `server.insecure` unset in `argocd-cmd-params-cm`), and the Ingress above sets
+> `backend-protocol: HTTPS`, so nginx terminates the browser's TLS and re-originates to Argo CD.
+> Argo CD therefore marks its `argocd.token` cookie `Secure`. Over plain `http://` the login page
+> renders fine and the password is accepted — but the browser silently discards a `Secure` cookie,
+> so the next request arrives unauthenticated and you are bounced back to `/login`. **Forever, with
+> no error anywhere**: not in the browser, not in `kubectl logs deploy/argocd-server`. An endless
+> login redirect on `http://` is this and nothing else.
 
 Install the CLI (useful, and required for one step below):
 
@@ -4464,7 +4515,7 @@ kind delete cluster --name devops   # the cluster is disposable; recreate from �
 kubectl label namespace shop floci ingress-nginx istio-injection-
 kubectl -n shop rollout restart deploy         # pods keep their sidecars until recreated
 kubectl -n floci rollout restart deploy
-kubectl -n ingress-nginx rollout restart daemonset/ingress-nginx-controller
+kubectl -n ingress-nginx rollout restart deployment/ingress-nginx-controller
 
 helm uninstall kiali-server -n istio-system
 helm uninstall istiod -n istio-system
@@ -4498,7 +4549,7 @@ Verified 2026-08-15. Re-check before you start; these move.
 |---|---|---|
 | kind | v0.32.0 | `kind version` / [releases](https://github.com/kubernetes-sigs/kind/releases) |
 | Helm | ≥ 3.8.0 (OCI required) | `helm version --short` |
-| ingress-nginx | controller-v1.13.0 | [releases](https://github.com/kubernetes/ingress-nginx/releases) |
+| ingress-nginx | controller-v1.13.0 | [releases](https://github.com/kubernetes/ingress-nginx/releases) — **note:** v1.13.0's kind manifest dropped the `ingress-ready` nodeSelector; [§4.3](#43-install-the-ingress-controller) patches it back |
 | Sonatype Nexus | `sonatype/nexus3:3.95.0` | [Docker Hub tags](https://hub.docker.com/r/sonatype/nexus3/tags) |
 | Floci | `floci/floci:1.5.11` | [github.com/floci-io/floci](https://github.com/floci-io/floci) |
 | OpenBao Helm chart | 0.29.1 (OpenBao 2.5.0) | `helm search repo openbao/openbao --versions` |
@@ -4531,6 +4582,8 @@ Two version rules worth internalising:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `ImagePullBackOff` on `nexus:8082/...` | containerd can't reach or auth to Nexus | `docker exec devops-worker curl -s -o /dev/null -w '%{http_code}' http://nexus:8082/v2/` — expect `401`. Not `401`? Re-run [§5.9](#59-teach-containerd-on-the-kind-nodes-about-nexus). `401` but still failing? The pod is missing `imagePullSecrets` or the ExternalSecret hasn't synced. |
+| `curl http://localhost` returns **`000`** | Ingress controller scheduled on a node with no port mappings | `000` = nothing listening, not a 404. `kubectl -n ingress-nginx get pods -o wide` — if `NODE` isn't `devops-control-plane`, apply the `ingress-ready` nodeSelector patch in [§4.3](#43-install-the-ingress-controller). Upstream dropped that selector in controller-v1.13.0. |
+| Ingress Service stuck `EXTERNAL-IP <pending>` | `type: LoadBalancer` with no cloud provider | Harmless on kind — traffic arrives via `hostPort`, not the Service. Don't install MetalLB to "fix" it. |
 | Pods can't resolve `nexus` | Nexus container got a new IP | Re-run [§5.10](#510-teach-pods-about-nexus-coredns) with the current `docker inspect nexus` IP. |
 | `docker push` → `http: server gave HTTP response to HTTPS client` | `insecure-registries` not applied | [§5.8](#58-trust-the-plain-http-registry-from-docker), then **restart Docker**. |
 | `docker login nexus:8082` → 401 with correct password | Docker Bearer Token Realm not active | Nexus → ⚙ → Security → Realms → activate it ([§5.4](#54-create-the-docker-hosted-registry)). |

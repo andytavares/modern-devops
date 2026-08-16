@@ -1,0 +1,23 @@
+{{- if .Values.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: order-platform
+  labels:
+    # kube-prometheus-stack's Prometheus selects monitors by this label in the
+    # default configuration we install in §13.
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames: ["shop"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: order-platform
+  podMetricsEndpoints:
+    # istio-proxy's merged endpoint: our application metrics (scraped over
+    # loopback inside the pod, per the prometheus.io/* annotations above) plus
+    # Envoy's own. One scrape, both halves, and it survives STRICT mTLS.
+    - port: http-envoy-prom
+      path: /stats/prometheus
+      interval: {{ .Values.podMonitor.interval }}
+{{- end }}
