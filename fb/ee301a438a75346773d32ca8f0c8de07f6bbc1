@@ -1,0 +1,30 @@
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_15f52e765f98bd 125-136
+deploy/charts/order-platform/values.yaml
+  s_a10aebdc52be9f::t_c1682a62b86eb1 45-53
+deploy/charts/order-platform/templates/servicemonitor.yaml
+  s_a10aebdc52be9f::t_15f52e765f98bd 1-36
+wiki/log.md
+  s_a10aebdc52be9f::t_15f52e765f98bd 163-199
+  s_a10aebdc52be9f::t_f5b86c93d28a36 234
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_15f52e765f98bd 9-20,271-273,1247,2429-2437,2445-2447,2711-2751,2771-2781,3659,4493-4656,4778-4814,5170,5184,5189
+CLAUDE.md
+  s_a10aebdc52be9f::t_15f52e765f98bd 11-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "fbee301a438a75346773d32ca8f0c8de07f6bbc1",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
