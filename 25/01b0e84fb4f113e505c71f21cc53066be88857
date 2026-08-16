@@ -1,0 +1,27 @@
+deploy/charts/order-platform/templates/order-worker.yaml
+  s_a10aebdc52be9f::t_88bd1025f77216 33-40
+deploy/charts/order-platform/templates/pricing.yaml
+  s_a10aebdc52be9f::t_88bd1025f77216 36-43
+deploy/charts/order-platform/templates/frontend.yaml
+  s_a10aebdc52be9f::t_88bd1025f77216 27-34
+deploy/charts/order-platform/templates/scaffolded.yaml
+  s_a10aebdc52be9f::t_88bd1025f77216 28-35
+deploy/charts/order-platform/templates/order-api.yaml
+  s_a10aebdc52be9f::t_88bd1025f77216 36-43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "2501b0e84fb4f113e505c71f21cc53066be88857",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
