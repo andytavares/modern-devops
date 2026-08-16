@@ -1,0 +1,47 @@
+deploy/platform/floci.yaml
+  s_a10aebdc52be9f::t_7352473464747d 5-10
+wiki/concepts/gitops.md
+  s_a10aebdc52be9f::t_2ec1b947ea1aaf 6,42-45
+deploy/charts/order-platform/templates/podmonitor.yaml
+  s_a10aebdc52be9f::t_34cb7acb3d243f 17-28
+wiki/tools/prometheus.md
+  s_a10aebdc52be9f::t_b644efa02d9b59 57-85
+deploy/platform/kiali-ingress.yaml
+  h_16ba00fe96244d 1-17
+deploy/platform/secret-store.yaml
+  s_a10aebdc52be9f::t_7352473464747d 5-10
+wiki/tools/istio.md
+  s_a10aebdc52be9f::t_2ec1b947ea1aaf 8,85-88
+wiki/open-questions.md
+  s_a10aebdc52be9f::t_0ee8c0a45727aa 43-51
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_6047db99cf4a12 2105-2107,2114-2125
+  s_a10aebdc52be9f::t_250c0709fa19ba 2104
+  s_a10aebdc52be9f::t_52d4561b27042f 2126
+  s_a10aebdc52be9f::t_6a83e5cea05287 1415-1420,1744-1749,2643
+wiki/log.md
+  s_a10aebdc52be9f::t_145a9daeaaad05 60-75
+wiki/.obsidian/workspace.json
+  s_a10aebdc52be9f::t_3ad032bc0bb50b 188
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "40298d05dc75c80bb6c04810f75a9a0ad9fd607b",
+  "prompts": {},
+  "humans": {
+    "h_16ba00fe96244d": {
+      "author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
