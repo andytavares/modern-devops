@@ -1,0 +1,29 @@
+{{- define "op.labels" -}}
+app.kubernetes.io/name: {{ .name }}
+app.kubernetes.io/part-of: order-platform
+app.kubernetes.io/managed-by: {{ .root.Release.Service }}
+app.kubernetes.io/version: {{ .root.Chart.AppVersion | quote }}
+{{- end -}}
+
+{{- define "op.image" -}}
+{{- printf "%s/%s:%s" .root.Values.global.registry .img.repository .img.tag -}}
+{{- end -}}
+
+{{/*
+Common env shared by both services. Keeping this in one place is the whole
+reason we wrote a chart instead of two YAML files.
+*/}}
+{{- define "op.commonEnv" -}}
+- name: KAFKA_BROKERS
+  value: {{ .Values.kafka.brokers | quote }}
+- name: KAFKA_TOPIC
+  value: {{ .Values.kafka.topic | quote }}
+- name: AWS_ENDPOINT_URL
+  value: {{ .Values.aws.endpointUrl | quote }}
+- name: AWS_DEFAULT_REGION
+  value: {{ .Values.aws.region | quote }}
+- name: AWS_ACCESS_KEY_ID
+  value: "test"
+- name: AWS_SECRET_ACCESS_KEY
+  value: "test"
+{{- end -}}
