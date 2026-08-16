@@ -1,0 +1,39 @@
+services/order-api/openapi_dump.py
+  s_a10aebdc52be9f::t_801da99be8a56a 1-14,16-17,26-34
+  s_a10aebdc52be9f::t_42ce2462b7932e 15,18-25
+services/order-api/openapi.json
+  s_a10aebdc52be9f::t_247554033eef83 1-199
+catalog-info.yaml
+  s_a10aebdc52be9f::t_00593feda2a02c 39-104
+  s_a10aebdc52be9f::t_a84b2564b6d9f9 13,15,22-23
+docs/phase-1-the-application.md
+  s_a10aebdc52be9f::t_211abd7e306f2e 1317-1342
+wiki/tools/external-secrets-operator.md
+  s_a10aebdc52be9f::t_7e2443a07171df 53-82
+services/order-api/BUILD
+  s_a10aebdc52be9f::t_1f6a25302b30c6 6-22
+  s_a10aebdc52be9f::t_ea6ded59ea059c 32-34
+wiki/concepts/secrets-management.md
+  s_a10aebdc52be9f::t_56b674d8a1697e 27-32
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_211abd7e306f2e 1966-1991
+services/order-api/tests/test_openapi_spec.py
+  s_a10aebdc52be9f::t_d2a4fb4f27daf9 1-24,28-31
+  s_a10aebdc52be9f::t_ac0fbba404ead0 25-27
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "437ed54136bc7e2ebff20bacd62991eb101bd3fb",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
