@@ -5,6 +5,16 @@ orderApi:
 orderWorker:
   image:
     tag: "94556f06957b"
+pricing:
+  v1:
+    image:
+      tag: "94556f06957b"
+  v2:
+    image:
+      tag: "94556f06957b"
+frontend:
+  image:
+    tag: "94556f06957b"
 # Every scaffolded service (§14.6) is built from this same
 # commit, so one tag covers all of them.
 scaffolded:

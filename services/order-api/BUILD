@@ -23,4 +23,8 @@ pex_binary(
     # `pants package` resolves macOS wheels for native deps (grpcio,
     # pydantic-core, uvloop, watchfiles) that import-fail in the container.
     complete_platforms=["3rdparty/python:linux-platform"],
+    # Land in dist/ under a predictable name so dist/ can be used
+    # directly as the Buildah build context and the Dockerfile can COPY by
+    # name. Default would be dist/services.<name>/bin.pex.
+    output_path="order-api.pex",
 )

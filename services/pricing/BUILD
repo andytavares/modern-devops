@@ -30,4 +30,8 @@ pex_binary(
     # is a native extension; without this, `pants package` resolves macOS wheels
     # that build and pass every check here, then fail to import in the cluster.
     complete_platforms=["3rdparty/python:linux-platform"],
+    # Land in dist/ under a predictable name so dist/ can be used
+    # directly as the Buildah build context and the Dockerfile can COPY by
+    # name. Default would be dist/services.<name>/bin.pex.
+    output_path="pricing.pex",
 )
