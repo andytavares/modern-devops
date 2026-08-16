@@ -177,3 +177,23 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   matrix by reading versions back off the **live cluster** — two were wrong: Yarn (4.4.1 → 4.18.0,
   the value removed as a defect) and kube-prometheus-stack (82.14.1 → 88.3.0, which is what is
   actually installed and what §13 was validated on). Pages: [[log]].
+- **2026-08-16** — Produced a **phased edition** of the tutorial in `docs/`: seven phases that each
+  end in something working and checkable, plus a README explaining why that order. Section numbers
+  are preserved verbatim, so every `§N.M` citation in this wiki resolves against either edition.
+  Assembly was mechanical (extract by heading, rewrite cross-file anchors, verify every link) rather
+  than hand-copied, so the two editions cannot silently drift in the parts they share: all 16
+  numbered sections placed exactly once, §0 became the README, 0 broken links across 9 files.
+  Three places genuinely differ, because reordering changes what is true when — recorded here so the
+  difference is not mistaken for drift:
+  1. Phase 1 installs the app with `helm install` (new §10.4 build-by-hand and §10.5 install) and
+     Phase 3 hands the release to [[argo-cd]] with an explicit `helm uninstall`. The single-doc
+     edition never deploys the app until Argo does.
+  2. Observability comes **before** the mesh, so Phase 2 scrapes with a `ServiceMonitor` on the app's
+     own port. This required a new chart template, `servicemonitor.yaml`, plus a
+     `serviceMonitor.enabled` value — exactly one of the two monitors should ever be on.
+  3. §9.6 becomes the moment STRICT mTLS breaks that scrape and you swap to the `PodMonitor` on
+     15020. In the single-doc order the mesh precedes monitoring, so the same lesson can only be told
+     retrospectively.
+  The reordering also fixes a latent oddity in the original: Istio arrived at §9, enabling STRICT
+  mTLS on a `shop` namespace that had no workloads in it yet. Pages: [[argo-cd]], [[prometheus]],
+  [[istio]], [[order-platform]].

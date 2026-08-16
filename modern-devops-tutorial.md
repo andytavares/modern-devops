@@ -6,6 +6,18 @@
 
 ---
 
+> [!tip] There is a phased edition of this document.
+> [`docs/README.md`](docs/README.md) splits the same material into seven phases that each end with
+> something working and checkable — cluster → running application → observability → delivery → mesh →
+> portal → operating it. Same section numbers, so `§7.6` means the same thing in both, and the wiki's
+> citations resolve against either.
+>
+> **They differ in three places, deliberately**, because the phased order changes what is true when:
+> it installs the application with `helm install` in [§10.5](docs/phase-1-the-application.md#105-install-it)
+> and hands it to Argo CD later, it scrapes metrics with a `ServiceMonitor` before the mesh exists,
+> and it swaps that for the `PodMonitor` in §9.6 as the consequence of turning on STRICT mTLS.
+> This document keeps the original order, where Istio arrives before the app is deployed.
+
 ## 0. What this is, and what it is not
 
 This is a build-it-yourself platform. You will end up with a single-machine environment that has the same *shape* as a real production platform: source in GitHub, CI on Buildkite, artifacts in Nexus, secrets in OpenBao, deploys via Argo CD into Kubernetes, an AWS-shaped dependency emulated by Floci, an event bus on Kafka, and observability in Grafana.
@@ -2384,6 +2396,15 @@ orderWorker:
     requests: { cpu: 50m, memory: 64Mi }
     limits:   { memory: 128Mi }
 
+# Exactly one of these two should be on. serviceMonitor is the pre-mesh scrape
+# path (§13.3); podMonitor replaces it once STRICT mTLS refuses plaintext
+# scrapes (§9.6). Both start false because the monitoring.coreos.com CRDs do
+# not exist until §13.2 installs kube-prometheus-stack, and Argo CD fails the
+# whole Application sync on a resource whose CRD is missing.
+serviceMonitor:
+  enabled: false
+  interval: 15s
+
 podMonitor:
   # false until §13.2 installs kube-prometheus-stack and with it the
   # monitoring.coreos.com CRDs. Argo CD does not skip a resource whose CRD is
@@ -2654,6 +2675,47 @@ spec:
     app.kubernetes.io/name: order-worker
   ports:
     - { name: metrics, port: 9090, targetPort: metrics }
+{{- end }}
+```
+
+**`deploy/charts/order-platform/templates/servicemonitor.yaml`**
+
+```yaml
+{{- if .Values.serviceMonitor.enabled }}
+# The pre-mesh scrape path. Prometheus talks straight to each Service's metrics
+# port over plaintext, which is the obvious thing and works fine — right up
+# until STRICT mTLS (§9.4) starts refusing it, at which point every one of these
+# targets goes down and *nothing logs an error*.
+#
+# §9.6 is that failure. The fix is podmonitor.yaml, which scrapes the sidecar's
+# merged endpoint instead. Exactly one of these two should be enabled:
+#   before Istio -> serviceMonitor.enabled: true
+#   after Istio  -> podMonitor.enabled: true
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: order-platform
+  labels:
+    # kube-prometheus-stack's Prometheus selects monitors by this label in the
+    # default configuration we install in §13.
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames: ["shop"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: order-platform
+  endpoints:
+    # Two entries because the two services name their ports differently:
+    # order-api serves the app and its metrics on `http`, order-worker exposes
+    # `metrics` separately. A ServiceMonitor selects by port *name*, so a port
+    # that does not exist on a given Service is simply skipped.
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
 {{- end }}
 ```
 
