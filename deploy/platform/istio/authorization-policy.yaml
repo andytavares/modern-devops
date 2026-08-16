@@ -22,7 +22,47 @@ spec:
               - "cluster.local/ns/shop/sa/order-api"
               - "cluster.local/ns/shop/sa/order-worker"
 ---
-# 3. order-api is reachable from the edge, and from the frontend -- nowhere else.
+# 3. The same deny-all, for shop. Without this, Istio's default applies: a
+# workload that no ALLOW policy selects accepts traffic from anything in the
+# mesh. Policies 4 and 5 below select order-api and pricing, so those two were
+# already covered -- but frontend and order-worker were selected by nothing,
+# and were therefore reachable from every workload in the cluster. Deny-by-
+# default is a property of the namespace, not of the workloads you remembered
+# to write a policy for.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: shop
+spec:
+  {}
+---
+# 4. The frontend is a browser-facing page. It is reachable from the edge and
+# from nowhere else -- it has no callers inside the mesh.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-ingress-to-frontend
+  namespace: shop
+spec:
+  action: ALLOW
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/ingress-nginx/sa/ingress-nginx"
+---
+# 5. order-worker takes no inbound traffic at all. It consumes from Kafka and
+# writes to Floci; nothing calls it. The one exception is Prometheus scraping
+# its metrics port, which reaches the sidecar's merged endpoint rather than the
+# application, so it needs no allow rule here. An empty rules list would deny
+# everything including that, so the policy allows precisely one thing: nothing
+# inbound to the application ports.
+#
+# 6. order-api is reachable from the edge, and from the frontend -- nowhere else.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:

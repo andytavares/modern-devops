@@ -1061,24 +1061,35 @@ kubectl create clusterrolebinding openbao-token-review \
   --serviceaccount=openbao:openbao
 ```
 
-Now enable and configure the auth method. This reads the pod's own mounted CA cert and token, so the values are always correct for this cluster:
+Now enable and configure the auth method. Note what is **not** in this command:
 
 ```bash
 kubectl -n openbao exec -i openbao-0 -- sh -c '
 set -eu
 export BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200
-SA=/var/run/secrets/kubernetes.io/serviceaccount
 
 bao auth enable kubernetes 2>/dev/null || true
 
 bao write auth/kubernetes/config \
-  kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" \
-  token_reviewer_jwt="$(cat $SA/token)" \
-  kubernetes_ca_cert="$(cat $SA/ca.crt)"
+  kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
 
 echo "kubernetes auth configured"
 '
 ```
+
+There is no `token_reviewer_jwt` and no `kubernetes_ca_cert`, and omitting them is the
+documented configuration for an OpenBao running inside the cluster it authenticates against.
+When those fields are absent, OpenBao reads the token and CA from its own service account
+mount **on every request**, and re-reads them as they change.
+
+Passing them explicitly looks more careful and is the opposite. Since Kubernetes 1.21 the
+projected service account token is bound and short-lived — roughly an hour, rotated
+automatically at about 80% of its life. `token_reviewer_jwt="$(cat $SA/token)"` copies the
+*contents* of that token into OpenBao's config and freezes a snapshot of it. Everything works.
+Then, an hour or so later, every TokenReview call OpenBao makes starts failing `permission
+denied`, the `ClusterSecretStore` flips to `Invalid`, and every `ExternalSecret` in the cluster
+stops refreshing — long after the setup you verified as green. The same argument applies to
+`kubernetes_ca_cert`, which breaks on CA rotation instead of token rotation.
 
 Write a policy granting read-only access to the `shop` mount, and a role binding it to the ESO ServiceAccount:
 

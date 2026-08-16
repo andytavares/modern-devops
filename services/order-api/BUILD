@@ -36,6 +36,10 @@ python_tests(
 
 pex_binary(
     name="bin",
+    # Declares this target as something CI ships. `pants --tag=deployable
+    # package ::` selects on it, so a service is packaged the moment it says
+    # so itself — no list in the pipeline to keep in sync.
+    tags=["deployable"],
     entry_point="order_api.main:main",
     dependencies=[":lib"],
     # The cluster runs linux/aarch64, not this macOS laptop. Without this,

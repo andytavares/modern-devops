@@ -1747,24 +1747,35 @@ kubectl create clusterrolebinding openbao-token-review \
   --serviceaccount=openbao:openbao
 ```
 
-Now enable and configure the auth method. This reads the pod's own mounted CA cert and token, so the values are always correct for this cluster:
+Now enable and configure the auth method. Note what is **not** in this command:
 
 ```bash
 kubectl -n openbao exec -i openbao-0 -- sh -c '
 set -eu
 export BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200
-SA=/var/run/secrets/kubernetes.io/serviceaccount
 
 bao auth enable kubernetes 2>/dev/null || true
 
 bao write auth/kubernetes/config \
-  kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" \
-  token_reviewer_jwt="$(cat $SA/token)" \
-  kubernetes_ca_cert="$(cat $SA/ca.crt)"
+  kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
 
 echo "kubernetes auth configured"
 '
 ```
+
+There is no `token_reviewer_jwt` and no `kubernetes_ca_cert`, and omitting them is the
+documented configuration for an OpenBao running inside the cluster it authenticates against.
+When those fields are absent, OpenBao reads the token and CA from its own service account
+mount **on every request**, and re-reads them as they change.
+
+Passing them explicitly looks more careful and is the opposite. Since Kubernetes 1.21 the
+projected service account token is bound and short-lived — roughly an hour, rotated
+automatically at about 80% of its life. `token_reviewer_jwt="$(cat $SA/token)"` copies the
+*contents* of that token into OpenBao's config and freezes a snapshot of it. Everything works.
+Then, an hour or so later, every TokenReview call OpenBao makes starts failing `permission
+denied`, the `ClusterSecretStore` flips to `Invalid`, and every `ExternalSecret` in the cluster
+stops refreshing — long after the setup you verified as green. The same argument applies to
+`kubernetes_ca_cert`, which breaks on CA rotation instead of token rotation.
 
 Write a policy granting read-only access to the `shop` mount, and a role binding it to the ESO ServiceAccount:
 
@@ -3892,7 +3903,26 @@ So the honest pitch: the mesh gives you **identity-based mTLS on every HTTP hop 
 
 > **Tradeoff — sidecar vs ambient.** We use sidecars: an Envoy injected into each pod. It is the mode with the deepest documentation, and `VirtualService`/`DestinationRule` work with no extra hop. The cost is real and you will feel it on a laptop: one extra container and roughly 50–100 MB per pod, plus a restart of every workload to enroll it. Istio's newer **ambient** mode replaces per-pod sidecars with one `ztunnel` per node and would cost a fraction of that RAM, at the price of needing an explicit waypoint proxy before any L7 policy works. If you are RAM-constrained, ambient is the better laptop choice; we take sidecars because the mental model matches the documentation you'll hit everywhere else.
 
-> **We keep ingress-nginx as the edge.** Istio can serve north-south traffic itself, and in production that is usually the right call — one proxy, one config language. Here nginx already owns `hostPort` 80/443 on the kind control-plane node ([§4.3](#43-install-the-ingress-controller)), and swapping it out means rewriting every `Ingress` in the tutorial as an `HTTPRoute` and recreating the cluster. We keep nginx and **enroll it into the mesh** instead, which is the documented way to put a third-party ingress in front of meshed workloads: nginx terminates the browser's connection and re-originates it as mTLS to `order-api`.
+> **We keep ingress-nginx as the edge, and this is a deviation — read why before you copy it.**
+> Istio documents two supported ways to get traffic into the mesh: its own **Gateway** (which its
+> docs recommend, "to make use of the full feature set that Istio offers"), or a plain Kubernetes
+> `Ingress` with `ingressClassName: istio`. **Enrolling a third-party ingress controller into the
+> mesh is not one of them** — Istio's ingress documentation does not mention third-party
+> controllers at all, and the two nginx annotations this requires are documented by ingress-nginx
+> for unrelated purposes (`service-upstream` for zero-downtime deploys, `upstream-vhost` for
+> setting the `Host` header). Neither vendor documents the combination. It is a widely used
+> community pattern that lives in GitHub issues, not in anyone's docs.
+>
+> We do it here for one specific reason: nginx already owns `hostPort` 80/443 on the kind
+> control-plane node ([§4.3](#43-install-the-ingress-controller)), and it is
+> also the edge for Argo CD, Grafana, Kiali and Backstage — none of which are in the mesh. Moving
+> the two meshed hostnames to an Istio Gateway means something else has to own those ports.
+>
+> **At work, use the Istio Gateway.** The production shape is an external load balancer forwarding
+> to `istio-ingressgateway`, with `Gateway` + `VirtualService` doing the routing — which is exactly
+> what the `DestinationRule` and `VirtualService` in [§9.8](#98-canary-two-versions-of-pricing-behind-one-service)
+> already teach you to write. What you would delete is nginx's mesh enrolment and the two
+> annotations, not the Istio config.
 
 ### 9.2 Install the control plane
 
@@ -7148,7 +7178,7 @@ Two version rules worth internalising:
 | CI: `go: -race requires cgo` | Test step on an alpine Go image | `golang:1.26-alpine` is `CGO_ENABLED=0` with no gcc. Use `golang:1.26` for the test step ([§12.5](#125-the-pipeline)). |
 | Build fails cloning `buildkite-plugins/kubernetes-buildkite-plugin` | The Buildkite queue is **Hosted**, not Self-hosted | The job ran on Buildkite's machines, which don't understand the `kubernetes` plugin. Queue type can't be changed after creation — delete it and recreate as Self-hosted ([§12.2](#122-create-the-buildkite-side)). |
 | `agent-stack-k8s` logs `job tags do not match expected tags in configuration` | Same as above | A hosted agent adds `namespace-experiments=docker.builder=local`; your controller advertises only `queue=kubernetes`. |
-| ClusterSecretStore `Invalid` | OpenBao SA lacks TokenReview, or role name mismatch | `kubectl -n external-secrets logs deploy/external-secrets`. Check the `system:auth-delegator` binding and that the role is `eso` bound to SA `external-secrets` in ns `external-secrets`. |
+| ClusterSecretStore `Invalid` | A pinned `token_reviewer_jwt` expired, or the OpenBao SA lacks TokenReview, or the role name mismatches | First check `bao read auth/kubernetes/config` — if it shows a `token_reviewer_jwt`, that is the cause: the projected SA token it captured has expired. Re-run the [§7.4](#74-configure-kubernetes-authentication) config **without** that field and without `kubernetes_ca_cert`, so OpenBao reads both from its own mount on every request. Otherwise: `kubectl -n external-secrets logs deploy/external-secrets`, check the `system:auth-delegator` binding, and that the role is `eso` bound to SA `external-secrets` in ns `external-secrets`. |
 | ExternalSecret `SecretSyncedError`, `permission denied` | KV v2 path missing the `/data/` segment | The policy must be `path "shop/data/*"`, not `path "shop/*"` ([§7.4](#74-configure-kubernetes-authentication)). |
 | Kafka pods `Pending` | No PVs / insufficient resources | `kubectl -n kafka describe pod <pod>`. On kind the default local-path provisioner needs disk — check Docker's disk allocation. |
 | `kubectl wait kafka/orders` times out | Controllers haven't formed a quorum | `kubectl -n kafka logs orders-controller-0`; `kubectl -n kafka describe kafka orders` and read `.status.conditions`. |

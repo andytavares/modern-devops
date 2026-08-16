@@ -66,12 +66,11 @@ env:
   PIP_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
   PIP_TRUSTED_HOST: "nexus"
   GOPROXY: "http://nexus:8081/repository/go-proxy"
-  # The public checksum database is unreachable through a private proxy, so
-  # verification must be turned off for modules the proxy serves. In production
-  # you run an internal sumdb or vendor dependencies instead of disabling this.
-  GOSUMDB: "off"
-  GONOSUMDB: "*"
-  GOFLAGS: "-mod=mod"
+  # Nothing disables checksum verification. go.sum records a hash for every
+  # module in the build list, so the go command verifies against it locally and
+  # never reaches for the checksum database. GOSUMDB=off would not help here —
+  # it would only disarm verification for the next dependency added.
+  GOFLAGS: "-mod=readonly"
 
 steps:
   # ── 1. One step, every language ──────────────────────────────────────────
@@ -119,15 +118,13 @@ steps:
                     # read as missing there.
                     python3 checks/verify_doc_listings.py .
 
-                    # Only the deployable artifacts. `::` would also build the
-                    # frontend bundle, which the frontend image rebuilds itself.
-                    #
-                    # Discovered, not listed, for the same reason the build
-                    # steps below are: a hand-written list omits every service
-                    # the Backstage paved path (§14.6) adds, and the omission
-                    # surfaces as `COPY: no such file` in that service's image
-                    # build rather than as a missing package step.
-                    pants package $(ls -d services/*/BUILD | sed 's#/BUILD#:bin#')
+                    # `--tag` is Pants' documented way to select a subset of
+                    # targets. Every deployable target declares `deployable` in
+                    # its BUILD file, so a service the Backstage paved path
+                    # (§14.6) adds is packaged the moment it declares itself —
+                    # no list here to forget to update, and no naming
+                    # convention enforced outside the build system.
+                    pants --tag=deployable package ::
 
                     ls -la dist/
 
@@ -198,15 +195,18 @@ for SVC in $SERVICES; do
                     buildkite-agent artifact download "dist/*" .
                     ls -la dist/
 
+                    # --tls-verify=false exists only because §5.8 runs Nexus
+                    # on plain HTTP. It disables certificate verification on a
+                    # connection that carries push credentials. Behind real TLS
+                    # you delete the flag and mount the CA instead — it is not
+                    # a Buildah setting you keep.
                     buildah bud \\
                       --tls-verify=false \\
                       --file services/$SVC/Dockerfile \\
                       --tag "$REGISTRY/shop/$SVC:$SHA" \\
-                      --tag "$REGISTRY/shop/$SVC:latest" \\
                       dist
 
                     buildah push --tls-verify=false "$REGISTRY/shop/$SVC:$SHA"
-                    buildah push --tls-verify=false "$REGISTRY/shop/$SVC:latest"
 
                     echo "pushed $REGISTRY/shop/$SVC:$SHA"
 YAML
@@ -251,11 +251,9 @@ cat <<YAML
                       --tls-verify=false \\
                       --file frontend/Dockerfile \\
                       --tag "$REGISTRY/shop/frontend:$SHA" \\
-                      --tag "$REGISTRY/shop/frontend:latest" \\
                       frontend
 
                     buildah push --tls-verify=false "$REGISTRY/shop/frontend:$SHA"
-                    buildah push --tls-verify=false "$REGISTRY/shop/frontend:latest"
 YAML
 
 # The portal is not a service and does not fit the services template: a

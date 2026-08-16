@@ -1,5 +1,6 @@
 go_binary(
     name="bin",
+    tags=["deployable"],
     output_path="order-worker",
 )
 

@@ -38,7 +38,26 @@ So the honest pitch: the mesh gives you **identity-based mTLS on every HTTP hop 
 
 > **Tradeoff — sidecar vs ambient.** We use sidecars: an Envoy injected into each pod. It is the mode with the deepest documentation, and `VirtualService`/`DestinationRule` work with no extra hop. The cost is real and you will feel it on a laptop: one extra container and roughly 50–100 MB per pod, plus a restart of every workload to enroll it. Istio's newer **ambient** mode replaces per-pod sidecars with one `ztunnel` per node and would cost a fraction of that RAM, at the price of needing an explicit waypoint proxy before any L7 policy works. If you are RAM-constrained, ambient is the better laptop choice; we take sidecars because the mental model matches the documentation you'll hit everywhere else.
 
-> **We keep ingress-nginx as the edge.** Istio can serve north-south traffic itself, and in production that is usually the right call — one proxy, one config language. Here nginx already owns `hostPort` 80/443 on the kind control-plane node ([§4.3](phase-0-foundations.md#43-install-the-ingress-controller)), and swapping it out means rewriting every `Ingress` in the tutorial as an `HTTPRoute` and recreating the cluster. We keep nginx and **enroll it into the mesh** instead, which is the documented way to put a third-party ingress in front of meshed workloads: nginx terminates the browser's connection and re-originates it as mTLS to `order-api`.
+> **We keep ingress-nginx as the edge, and this is a deviation — read why before you copy it.**
+> Istio documents two supported ways to get traffic into the mesh: its own **Gateway** (which its
+> docs recommend, "to make use of the full feature set that Istio offers"), or a plain Kubernetes
+> `Ingress` with `ingressClassName: istio`. **Enrolling a third-party ingress controller into the
+> mesh is not one of them** — Istio's ingress documentation does not mention third-party
+> controllers at all, and the two nginx annotations this requires are documented by ingress-nginx
+> for unrelated purposes (`service-upstream` for zero-downtime deploys, `upstream-vhost` for
+> setting the `Host` header). Neither vendor documents the combination. It is a widely used
+> community pattern that lives in GitHub issues, not in anyone's docs.
+>
+> We do it here for one specific reason: nginx already owns `hostPort` 80/443 on the kind
+> control-plane node ([§4.3](phase-0-foundations.md#43-install-the-ingress-controller)), and it is
+> also the edge for Argo CD, Grafana, Kiali and Backstage — none of which are in the mesh. Moving
+> the two meshed hostnames to an Istio Gateway means something else has to own those ports.
+>
+> **At work, use the Istio Gateway.** The production shape is an external load balancer forwarding
+> to `istio-ingressgateway`, with `Gateway` + `VirtualService` doing the routing — which is exactly
+> what the `DestinationRule` and `VirtualService` in [§9.8](#98-canary-two-versions-of-pricing-behind-one-service)
+> already teach you to write. What you would delete is nginx's mesh enrolment and the two
+> annotations, not the Istio config.
 
 ### 9.2 Install the control plane
 
