@@ -50,6 +50,36 @@ The `nexus-push` case is instructive: Buildah wants a plain `config.json`, not a
 
 ## Gotchas
 
+> [!warning] **`Ready=True` does not mean "has the value you just wrote."** Observed 2026-08-16.
+> A fresh GitHub PAT was written to OpenBao (`shop/backstage`, version 4) and Backstage kept
+> answering `401 Unauthorized` against `api.github.com`. The `ExternalSecret` reported
+> `SecretSynced` / `Ready=True` the whole time — truthfully, because it *had* synced, to version 3,
+> 22 minutes before the write. With `refreshInterval: 1h` the cluster Secret still held the literal
+> placeholder `<your-fine-grained-pat>` (23 characters). Restarting the pod does not help: it rereads
+> the same stale Secret.
+>
+> The tell is length, not value:
+>
+> ```bash
+> kubectl -n backstage get secret backstage -o jsonpath='{.data.GITHUB_TOKEN}' | base64 -d | wc -c
+> # 23  -> placeholder, never synced
+> # 93  -> a real github_pat_ token
+> ```
+>
+> And `bao kv metadata get shop/backstage` shows the version history and write timestamps without
+> exposing any value — compare its newest `created_time` against the ExternalSecret's
+> `.status.refreshTime`. If the write is newer, the cluster has not seen it yet.
+>
+> Force it:
+>
+> ```bash
+> kubectl -n backstage annotate externalsecret backstage force-sync="$(date +%s)" --overwrite
+> kubectl -n backstage rollout restart deploy/backstage
+> ```
+>
+> This is the poll-not-push property above, met in anger. It is worth internalising because the
+> failure presents as a **credential** problem and every instinct sends you to re-check the token.
+
 - `SecretSyncedError` with `permission denied` is almost always the missing `/data/` segment in the
   OpenBao policy — see [[openbao]].
 - A store stuck `Invalid` usually means the TokenReview RBAC or a role-name mismatch.

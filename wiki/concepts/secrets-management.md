@@ -24,7 +24,12 @@ them, and writes Kubernetes Secrets → workloads consume them as env vars or fi
 
 ## The three timing facts that catch people
 
-1. **`refreshInterval` is a poll.** The Secret updates on ESO's schedule, not instantly.
+1. **`refreshInterval` is a poll.** The Secret updates on ESO's schedule, not instantly. The
+   corollary that actually bites: between your write and that poll, the `ExternalSecret` reports
+   `Ready=True` — it is synced, to the *previous* value. Observed 2026-08-16, cost an hour of
+   debugging a token that was already correct. `kubectl annotate externalsecret <name>
+   force-sync="$(date +%s)" --overwrite` collapses the wait; see
+   [[external-secrets-operator]] for how to tell the two states apart without printing the secret.
 2. **Running pods keep the old value.** Env vars are set at container start. Rotation is
    update → resync → **restart** (§15.4 ⑤). Measure your real rotation window; don't assume it.
 3. **Bootstrap always has one manual seed.** Buildkite must be able to clone before it can run the

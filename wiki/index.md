@@ -26,6 +26,12 @@ whose sections are cited throughout as `§N.M`.
 > the same lesson. Each of the three pages now names the commercial tool, what it costs, what
 > concretely transfers, and **where it does not**.
 >
+> **Two defects found by running it on 2026-08-16.** A secret written to OpenBao was invisible to the
+> cluster for up to an hour while [[external-secrets-operator]] reported `Ready=True` — the escape
+> hatch and the two non-leaking diagnostics are now on that page and in [[secrets-management]]. And
+> the [[backstage]] catalog was missing `pricing` and `frontend` entirely while declaring a relation
+> to an API entity that did not exist; both API entities now have generated, drift-tested definitions.
+>
 > One documented claim was found to be **false and has been corrected**: `-ldflags "-X
 > main.version=…"` never stamped anything, because `main.go` has no such symbol. Both §3.2 and
 > [[go]] carried it. See [[go]] for the full record.
