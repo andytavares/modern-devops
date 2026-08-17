@@ -1,0 +1,86 @@
+services/order-api/tests/test_api.py
+  s_a10aebdc52be9f::t_983d1efa6b7b08 3,12-13,16-24,29-33,35,46-48,51,58-60,70-85,92-96,99-109,140-145,147,166-170,172,175-197,201,204-211,213-228,232-251,253-260
+  s_a10aebdc52be9f::t_4ad3ed78dc809b 87,97-98,252
+  s_a10aebdc52be9f::t_d0d207044f4fbd 86
+deploy/charts/order-platform/templates/order-worker.yaml
+  s_a10aebdc52be9f::t_a43afc1d9bcfb3 65,69,73
+services/order-api/order_api/settings.py
+  s_a10aebdc52be9f::t_72ae5eba4a95bc 1-48
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/${{ values.name | replace('-', '_') }}/main.py"
+  s_a10aebdc52be9f::t_54454204e1e661 6-7
+  s_a10aebdc52be9f::t_a1e398bd21e00b 5
+  s_a10aebdc52be9f::t_b1244452b26ead 35-40
+services/pricing/Dockerfile
+  s_a10aebdc52be9f::t_e71425513eefd3 18-19
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_ff1b2702596d2e 173-180,182-203,207-208,263,265-286,290-291,331,333-354,358-359
+services/order-api/order_api/main.py
+  s_a10aebdc52be9f::t_8ef99f6a813eff 51-56
+  s_a10aebdc52be9f::t_64af6183d37fe7 57-74
+  s_a10aebdc52be9f::t_8a15bbc017f469 226-229
+  s_a10aebdc52be9f::t_6094d95263a7a4 16-23
+  s_a10aebdc52be9f::t_bcac5eab86c925 158-160
+  s_a10aebdc52be9f::t_da83135f3bcb55 257-263
+  s_a10aebdc52be9f::t_5cc7516f291315 196-200,204-205,210-212
+  s_a10aebdc52be9f::t_9413dc864dd0a6 175-180
+  s_a10aebdc52be9f::t_5e0eebd455a35d 104-129
+  s_a10aebdc52be9f::t_a1724f6097a05e 84-86,89,91
+.gitignore
+  s_a10aebdc52be9f::t_87be31e0e1426b 12
+  s_a10aebdc52be9f::t_7b2a44efc3fd98 13-16
+frontend/src/main.ts
+  s_a10aebdc52be9f::t_b99ab57e84abca 10-15,52,155,195,206
+services/pricing/pricing/settings.py
+  s_a10aebdc52be9f::t_34bdde0b802392 1,4-5,7-17
+deploy/charts/order-platform/templates/servicemonitor.yaml
+  s_a10aebdc52be9f::t_a43afc1d9bcfb3 26-31,35
+"deploy/backstage/templates/new-service/skeleton/services/${{ values.name }}/${{ values.name | replace('-', '_') }}/settings.py"
+  s_a10aebdc52be9f::t_0fb33434eba7df 1,3-8,10-14,16,19-21
+services/pricing/pricing/main.py
+  s_a10aebdc52be9f::t_074f08ec0ece6f 9
+  s_a10aebdc52be9f::t_3f4927e1019c52 20,43-50,88-90,113-144,148-149,151-154,157,165-169,173
+  s_a10aebdc52be9f::t_03ae14011fc413 10-19
+services/order-worker/main_test.go
+  s_a10aebdc52be9f::t_bf1f49f352bcd6 4-5,7,9-12,41-209
+deploy/charts/order-platform/templates/_helpers.tpl
+  s_a10aebdc52be9f::t_eb8da86f198ee3 1-12,14,16
+3rdparty/python/requirements.txt
+  s_a10aebdc52be9f::t_b4e6d3b4de631d 13-18,26-29
+services/pricing/tests/test_pricing.py
+  s_a10aebdc52be9f::t_230a20fe2fe069 228-230
+  s_a10aebdc52be9f::t_ac2675a64ff242 111,180
+  s_a10aebdc52be9f::t_c86639000d0e1b 5-10
+  s_a10aebdc52be9f::t_a6fa21795ee717 1,3-4,11-20,108-110,112-179,181-227
+services/order-api/openapi.json
+  s_a10aebdc52be9f::t_e94f044c2f24f9 163
+deploy/charts/order-platform/templates/pricing.yaml
+  s_a10aebdc52be9f::t_3468788b7a99b3 56
+  s_a10aebdc52be9f::t_df3e54cbbf80c0 69-77,79,83
+  s_a10aebdc52be9f::t_129e6d28b8e01b 115-117,119
+services/order-worker/main.go
+  s_a10aebdc52be9f::t_42ee6a53086b58 119-125,128,133,136-141,146,150-171,177-190,194,198-203,206,208,214-216,218,224,228-229,232-234,237,241-267
+  s_a10aebdc52be9f::t_9a68fd1e197b76 8,15
+  s_a10aebdc52be9f::t_ac49272bacedcc 307-310
+  s_a10aebdc52be9f::t_269182d6294056 318
+  s_a10aebdc52be9f::t_7dd3e3eb4e978d 335,337
+  s_a10aebdc52be9f::t_c1d380aa79c643 301
+  s_a10aebdc52be9f::t_527fec8b52dab3 47-66
+locks/python-default.lock
+  s_a10aebdc52be9f::t_275b2324ae639b 16-17,23,670-711,1537-1538,1542-1543,1553,1555-1556,2515-2516,2522
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "d485de9cf8e798f76527b3adf72768f575c1ce9d",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}

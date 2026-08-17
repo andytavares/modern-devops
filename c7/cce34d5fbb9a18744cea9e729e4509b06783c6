@@ -1,0 +1,39 @@
+services/order-api/BUILD
+  s_a10aebdc52be9f::t_aa383f023a1af6 39-42
+services/pricing/BUILD
+  s_a10aebdc52be9f::t_aa383f023a1af6 27
+docs/phase-4-service-mesh.md
+  s_a10aebdc52be9f::t_467467146fc442 41-60
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_98739d71dbb65d 198-202
+  s_a10aebdc52be9f::t_860bf4087dc846 69-73,121-127
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_17725f8e5423de 1750,1760,1766-1779,3906-3925,7181
+deploy/platform/istio/authorization-policy.yaml
+  s_a10aebdc52be9f::t_320364d22e704a 25-65
+pants.toml
+  s_a10aebdc52be9f::t_6d042f8c0d6ed6 80-90,93
+services/order-worker/BUILD
+  s_a10aebdc52be9f::t_aa383f023a1af6 3
+docs/phase-1-the-application.md
+  s_a10aebdc52be9f::t_3a62ed9fc2a8f7 1064,1074,1080-1092
+  s_a10aebdc52be9f::t_e96bbe95b1886d 1093
+docs/appendices.md
+  s_a10aebdc52be9f::t_3a62ed9fc2a8f7 62
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "c7cce34d5fbb9a18744cea9e729e4509b06783c6",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}

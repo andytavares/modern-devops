@@ -1,0 +1,154 @@
+deploy/platform/backstage-secrets.yaml
+  s_a10aebdc52be9f::t_8c836b8c83e3c5 18-22,32,39-52,54,56-58
+  s_a10aebdc52be9f::t_7740d2bbcd399a 23-31,33-38
+  s_a10aebdc52be9f::t_61144f89f5cd46 53,55
+docs/phase-0-foundations.md
+  s_a10aebdc52be9f::t_7d316f7acaf8d7 294,305-309
+  s_a10aebdc52be9f::t_d5b0912e1453f0 257-258
+  s_a10aebdc52be9f::t_82eb94455c8c72 478,481-485,488-490,496,499-505
+  s_a10aebdc52be9f::t_db579c274eb0f0 534
+  s_a10aebdc52be9f::t_cd3255069671cc 279,281-283
+  s_a10aebdc52be9f::t_4da17ccb246e7f 310
+deploy/charts/order-platform/templates/configmap-order-api.yaml
+  s_a10aebdc52be9f::t_7cf50a8691531a 1-19
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_838856d6b4e612 141-146,151-153
+  s_a10aebdc52be9f::t_e6b1787ce118a4 147-150,154
+  s_a10aebdc52be9f::t_a656a4bbd9634e 91-112
+  s_a10aebdc52be9f::t_a342f35da90621 75-82
+deploy/charts/order-platform/values.yaml
+  s_a10aebdc52be9f::t_d8903a3216cf88 16-38
+docs/phase-4-service-mesh.md
+  s_a10aebdc52be9f::t_3dc2942446141a 84-88
+  s_a10aebdc52be9f::t_394be9ced337dc 94-95,100-104
+  s_a10aebdc52be9f::t_1c7b6080080e0a 514,517-518,528-535,542-546
+  s_a10aebdc52be9f::t_c20649ffe5ae44 193-257,259-266,272-273,275,277,284-286,289-294,296-300,303-304,322-324
+  s_a10aebdc52be9f::t_02d569af70e848 121-122,131-132
+  s_a10aebdc52be9f::t_258f2a5bd8af58 348,399,415
+  s_a10aebdc52be9f::t_1da28e046abd1d 308-321
+  s_a10aebdc52be9f::t_0adf7cb10b1da7 424-432
+  s_a10aebdc52be9f::t_03c5caaf2c570e 114
+  s_a10aebdc52be9f::t_4bb2e46dd06291 295
+  s_a10aebdc52be9f::t_fe7ecb28e12cda 138
+  s_a10aebdc52be9f::t_74a7aadefe8533 42-47,49-55,57-67
+  s_a10aebdc52be9f::t_3770f017eee5c4 141
+  s_a10aebdc52be9f::t_d9016638925284 105-112
+  s_a10aebdc52be9f::t_47a01d4c3bb71d 31-32
+  s_a10aebdc52be9f::t_6f66f5c26ef4e1 258
+  s_a10aebdc52be9f::t_df0926141860a3 890-893
+  s_a10aebdc52be9f::t_e6739902b3795d 38
+  s_a10aebdc52be9f::t_ed1b6d47805d26 113,325,547
+pants.ci.toml
+  s_a10aebdc52be9f::t_6252ad110fbb94 1-30,37-47
+  s_a10aebdc52be9f::t_b2b2ddc80b26ce 31-36
+deploy/charts/order-platform/templates/order-api.yaml
+  s_a10aebdc52be9f::t_b647383e48816c 28-36
+  s_a10aebdc52be9f::t_5b6f4ccd0536b6 69-70,72-74,80
+  s_a10aebdc52be9f::t_79a47e36ba9a4f 15-17
+  s_a10aebdc52be9f::t_3d1edcad6a76c0 55-59
+  s_a10aebdc52be9f::t_941d1674ce5a3c 122
+mypy.ini
+  s_a10aebdc52be9f::t_5bd6d4caec5c99 29-35
+frontend/src/BUILD
+  s_a10aebdc52be9f::t_eea20e5695ca13 4-7
+deploy/charts/order-platform/templates/_helpers.tpl
+  s_a10aebdc52be9f::t_e70bd4c91ce50f 22-26,28-30,34-37,39-67,69-71,73-87,89-99
+  s_a10aebdc52be9f::t_d3fa275aab49b3 88
+checks/BUILD
+  s_a10aebdc52be9f::t_1aec1e89ebcdb9 3-6,12-13
+deploy/charts/order-platform/templates/order-worker.yaml
+  s_a10aebdc52be9f::t_935d012862c31f 15-17,31-37,52,65-66,68-70,100
+docs/phase-3-delivery.md
+  s_a10aebdc52be9f::t_268b53039d8776 824-830
+pants.toml
+  s_a10aebdc52be9f::t_c27d43bd2520a8 37-42
+docs/phase-5-developer-portal.md
+  s_a10aebdc52be9f::t_1797a34b3cf027 1148
+  s_a10aebdc52be9f::t_5649f429c13992 583-584,587,589-601
+  s_a10aebdc52be9f::t_fa6cf401256a1d 944-946,951-959
+  s_a10aebdc52be9f::t_34ff7561a3e8bd 982-1022,1101-1111,1114-1117,1149
+deploy/charts/order-platform/templates/configmap-scaffolded.yaml
+  s_a10aebdc52be9f::t_5a3c024f02db9f 1-14
+.buildkite/pants-ci.Dockerfile
+  s_a10aebdc52be9f::t_d9925fcc2dd02a 90-103,105-117
+  s_a10aebdc52be9f::t_b5aaaed9a8c6c9 78-85
+  s_a10aebdc52be9f::t_396d89f3a1fe9a 25-48,50-51,58-60,62-63
+  s_a10aebdc52be9f::t_84170ca27e2fde 8-11
+deploy/charts/order-platform/templates/scaffolded.yaml
+  s_a10aebdc52be9f::t_66e26aec2485ab 17-19,27-30,45,53,56-57,91
+  s_a10aebdc52be9f::t_24f2db28774d11 58-60
+  s_a10aebdc52be9f::t_fb3a4c6dd3c00f 94-95,98,100-112
+docs/phase-6-operating.md
+  s_a10aebdc52be9f::t_b3ee613c2e1745 214-219
+  s_a10aebdc52be9f::t_2ceeca2518c03f 235-237
+  s_a10aebdc52be9f::t_1a7fb1878ef0f2 232-234,238-240
+  s_a10aebdc52be9f::t_e8eb95a93d0398 241
+deploy/charts/order-platform/templates/pricing.yaml
+  s_a10aebdc52be9f::t_a32d0bb4b0ed29 17-19,34-38,53,64-65,67-68,108
+docs/phase-1-the-application.md
+  s_a10aebdc52be9f::t_894505e74d18cb 1267-1268
+  s_a10aebdc52be9f::t_88976e340e221c 1430-1470,1473-1603
+  s_a10aebdc52be9f::t_328deb28ca2417 1306
+  s_a10aebdc52be9f::t_1bc8156477c0aa 1336
+  s_a10aebdc52be9f::t_b4828db520baa7 1471-1472
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_ac6ecf49d65fd2 378-379,401,403-405,417,428-433,608,611-615,618-620,626,629-635,664,1978-1979,2018,2048,2143-2316,4345-4351,4413-4414,4420,4424-4437,4439-4444,4446-4449,4467-4471,4477-4478,4483-4497,4505-4506,4515-4516,4522,4525,4578-4651,4657-4658,4660,4662,4669-4671,4674-4685,4688-4689,4693-4710,4734,4785,4801,4810-4818,4902,4905-4906,4916-4923,4931-4936,5280-5283,5868-5869,5872,5874-5886,6231-6233,6238-6246,6269-6309,6388-6398,6401-6404,6435-6436,6666-6671,6684-6693,6893-6894,6918,6946-6950,6955-6961,7886,7889-7890,7901-7923,7926-7929,7955-7961,8013-8031,8076,8080-8085,8091,8096-8105,8120-8124,8227-8250,8253-8257,8262-8264,8269-8271,8273-8275,8279,8300,8339,8371,8399,8406-8409,8457-8460,8462-8467
+infra/backstage-values.yaml
+  s_a10aebdc52be9f::t_a203b5703003b6 38-48
+deploy/platform/istio/edge-gateway.yaml
+  s_a10aebdc52be9f::t_9130afdc5ff169 25-28,30
+  s_a10aebdc52be9f::t_4501ddd8b51d47 1-24,29,31-67
+deploy/charts/order-platform/templates/configmap-order-worker.yaml
+  s_a10aebdc52be9f::t_b6dabf4076ad21 1-11
+deploy/charts/order-platform/templates/frontend.yaml
+  s_a10aebdc52be9f::t_5f9f5c3b03f6dc 15-17,41
+  s_a10aebdc52be9f::t_31de0698ce79ef 26-28,85
+deploy/platform/istio/authorization-policy.yaml
+  s_a10aebdc52be9f::t_d785384c052279 40-44,59,83
+checks/verify_chart.py
+  s_a10aebdc52be9f::t_c4ba1a78e40c4e 16,18,96-135,140-142
+  s_a10aebdc52be9f::t_8cb1739df6242f 43-48,137-139
+docs/phase-7-polyglot-monorepo.md
+  s_a10aebdc52be9f::t_c18b72c8028c9a 1126-1127
+  s_a10aebdc52be9f::t_f3831817b0a4e8 1111,1114-1115,1128-1135,1151-1154
+  s_a10aebdc52be9f::t_be6db5f3d9924b 1136-1148
+  s_a10aebdc52be9f::t_33c4754e340d8d 190-196
+  s_a10aebdc52be9f::t_d3b43101343baa 1180-1186
+  s_a10aebdc52be9f::t_5ffda01c635f58 1343-1347
+  s_a10aebdc52be9f::t_02bccc9039ccba 153
+  s_a10aebdc52be9f::t_9bb3aba2b9e0d0 1314,1319-1328
+  s_a10aebdc52be9f::t_42c7d28763127b 1299,1303-1308
+  s_a10aebdc52be9f::t_eb94c276638730 181-185
+  s_a10aebdc52be9f::t_029d052a2a5476 128-129
+  s_a10aebdc52be9f::t_ba07fd3b3f24b3 1251-1253
+  s_a10aebdc52be9f::t_93d15f08a421e6 1237-1250,1254-1255
+  s_a10aebdc52be9f::t_42469d68d9fc88 1449-1472,1475-1479,1484-1486,1491-1493,1495-1497,1501
+  s_a10aebdc52be9f::t_4d9db3d0669887 1521
+docs/appendices.md
+  s_a10aebdc52be9f::t_c2eb58b0f1b7d1 22
+  s_a10aebdc52be9f::t_6020d4734fef44 54,82,89
+  s_a10aebdc52be9f::t_09ee762f333221 90-92,140-143,145-150
+deploy/platform/istio/edge-ingress.yaml
+  s_a10aebdc52be9f::t_033ba8cef65438 1-24,30-38
+  s_a10aebdc52be9f::t_9130afdc5ff169 25-29
+deploy/platform/openbao-operator-auth.yaml
+  s_a10aebdc52be9f::t_a8beea0aca5d6c 1-86
+deploy/charts/order-platform/templates/configmap-pricing.yaml
+  s_a10aebdc52be9f::t_74935df1d54e2d 1-18
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "bafb8feff403d722139d878bb5938815feaf8e3d",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
