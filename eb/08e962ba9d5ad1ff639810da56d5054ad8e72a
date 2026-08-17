@@ -1,0 +1,27 @@
+pants.ci.toml
+  s_a10aebdc52be9f::t_779dcafcb6f385 26-37,39-41
+.buildkite/pipeline.sh
+  s_a10aebdc52be9f::t_0d458f6dd44db7 130
+.buildkite/pants-ci.Dockerfile
+  s_a10aebdc52be9f::t_0d458f6dd44db7 3,5-13
+modern-devops-tutorial.md
+  s_a10aebdc52be9f::t_176d060a4ab38b 8066
+docs/phase-7-polyglot-monorepo.md
+  s_a10aebdc52be9f::t_0d458f6dd44db7 1289
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "eb08e962ba9d5ad1ff639810da56d5054ad8e72a",
+  "prompts": {},
+  "sessions": {
+    "s_a10aebdc52be9f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "68e8601f-732f-42f5-ba51-7c1972c6853d",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
