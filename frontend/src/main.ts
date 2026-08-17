@@ -7,6 +7,12 @@ interface LogEntry {
   ruleApplied: string;
   pricedBy: string;
   ok: boolean;
+  // The HTTP status the request actually failed with, or 0 when the request
+  // never reached order-api. Not every failure is a 502: order-api maps a
+  // pricing deadline to 504, an unavailable pricing to 503, a rejected order
+  // to 400 and throttling to 429, and showing the real one is the difference
+  // between "the canary is broken" and "the canary is slow".
+  status: number;
 }
 
 interface State {
@@ -43,7 +49,7 @@ app.innerHTML = `
       <div class="tally-labels" id="tally-labels"></div>
       <div class="tally-meta">
         <span id="version-count-label"></span>
-        <span class="tally-label errors"><strong id="err-count">0</strong> failed (502)</span>
+        <span class="tally-label errors"><strong id="err-count">0</strong> failed</span>
       </div>
     </section>
 
@@ -146,7 +152,7 @@ function render(): void {
         entry.totalCents === null ? "—" : `$${(entry.totalCents / 100).toFixed(2)}`;
       const priced = entry.ok
         ? `<span class="badge" style="background:${colorFor(entry.pricedBy, colors)}22;color:${colorFor(entry.pricedBy, colors)}">${escapeHtml(entry.pricedBy)}</span>`
-        : `<span class="badge error">502</span>`;
+        : `<span class="badge error">${entry.status === 0 ? "net" : entry.status}</span>`;
       return `<tr class="${rowClass}">
         <td>${state.log.length - i}</td>
         <td>${entry.quantity}</td>
@@ -186,6 +192,7 @@ async function sendOrder(): Promise<void> {
       ruleApplied: res.rule_applied,
       pricedBy: res.priced_by,
       ok: true,
+      status: 202,
     });
   } catch (err) {
     state.errors += 1;
@@ -196,6 +203,7 @@ async function sendOrder(): Promise<void> {
       ruleApplied: status === 0 ? "network error" : `HTTP ${status}`,
       pricedBy: "—",
       ok: false,
+      status,
     });
   } finally {
     render();

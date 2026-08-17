@@ -66,12 +66,19 @@ env:
   PIP_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
   PIP_TRUSTED_HOST: "nexus"
   GOPROXY: "http://nexus:8081/repository/go-proxy"
-  # The public checksum database is unreachable through a private proxy, so
-  # verification must be turned off for modules the proxy serves. In production
-  # you run an internal sumdb or vendor dependencies instead of disabling this.
-  GOSUMDB: "off"
-  GONOSUMDB: "*"
-  GOFLAGS: "-mod=mod"
+  # Nothing disables checksum verification. go.sum records a hash for every
+  # module in the build list, so the go command verifies against it locally and
+  # never reaches for the checksum database. GOSUMDB=off would not help here —
+  # it would only disarm verification for the next dependency added.
+  GOFLAGS: "-mod=readonly"
+
+  # Layers pants.ci.toml on top of pants.toml. This is the mechanism the
+  # "Using Pants in CI" guide documents, and it is why nothing in the verify
+  # step needs a wall of `--flag` arguments: colours, run stats and coverage
+  # are CI-only settings, so they live in a CI-only config file rather than in
+  # the command line or, worse, in pants.toml where they would also apply to
+  # every laptop. Harmless in the Buildah steps, which never invoke Pants.
+  PANTS_CONFIG_FILES: "pants.ci.toml"
 
 steps:
   # ── 1. One step, every language ──────────────────────────────────────────
@@ -81,6 +88,28 @@ steps:
   # `pants package` runs here too, rather than in the image build, because the
   # build steps below are daemonless Buildah pods with no toolchain: no Python,
   # no Go, no Node. They receive artifacts, they do not produce them.
+  #
+  # Deliberately NOT `--changed-since=origin/main`, which the Pants CI guide
+  # offers as the faster alternative. It does not fit this pipeline:
+  #
+  #   1. The build steps below are unconditional. Services are discovered from
+  #      the filesystem, not from the diff, so every service gets an image on
+  #      every build. Pairing that with a diff-scoped test run means shipping an
+  #      image whose code was never tested on this commit — the one outcome a
+  #      pipeline exists to prevent.
+  #   2. The deploy step rewrites every tag in values.yaml to this SHA. So even
+  #      an untouched service is redeployed from a build that may not have
+  #      tested it.
+  #   3. The guide names its own caveat: `--changed-since` "will not handle all
+  #      cases, like hooking up a new linter." A change to pants.toml or a tool
+  #      lockfile alters how everything is checked while changing almost nothing
+  #      in the diff.
+  #
+  # The speedup it buys is already bought elsewhere: Pants caches at the level
+  # of the individual process, so an unchanged test does not re-run even when
+  # `::` names it. `--changed-since` earns its keep when the *bootstrap* cost
+  # dominates, and it belongs with a build matrix that scopes packaging to the
+  # same diff. That is a different pipeline than this one.
   - label: ":hammer: lint · typecheck · test · package"
     key: verify
     agents: { queue: kubernetes }
@@ -98,7 +127,7 @@ steps:
               # pantsbuild.pants==2.33.0` fails, because modern Pants ships
               # only as the scie-pants launcher binary. Baking that binary
               # into an image keeps every build pulling from Nexus.
-              - image: nexus:8082/ci/pants:0.13.2
+              - image: nexus:8082/ci/pants:0.13.2-2
                 resources:
                   requests: { cpu: "1", memory: 2Gi }
                   limits:   { memory: 4Gi }
@@ -109,7 +138,20 @@ steps:
                     # git metadata: Pants uses it to decide what changed.
                     git config --global --add safe.directory "$PWD"
 
-                    pants lint check test ::
+                    # `update-build-files --check` is the guide's recommended
+                    # CI check for BUILD-file drift: it reformats every BUILD
+                    # file in memory and fails if the result differs from what
+                    # is committed, so a hand-edited BUILD file cannot quietly
+                    # diverge from the formatting everything else has.
+                    #
+                    # `tailor --check` is its sibling: it fails when a source
+                    # file belongs to no target, which is how a new file gets
+                    # silently excluded from lint, typecheck and test while
+                    # everything stays green.
+                    #
+                    # One invocation, not four: the goals share a single
+                    # target-set argument and Pants runs what it can in parallel.
+                    pants tailor --check update-build-files --check lint check test ::
 
                     # Runs here rather than as a Pants test because it reads
                     # the whole checkout: every file listing in docs/ must
@@ -119,15 +161,26 @@ steps:
                     # read as missing there.
                     python3 checks/verify_doc_listings.py .
 
-                    # Only the deployable artifacts. `::` would also build the
-                    # frontend bundle, which the frontend image rebuilds itself.
-                    #
-                    # Discovered, not listed, for the same reason the build
-                    # steps below are: a hand-written list omits every service
-                    # the Backstage paved path (§14.6) adds, and the omission
-                    # surfaces as `COPY: no such file` in that service's image
-                    # build rather than as a missing package step.
-                    pants package $(ls -d services/*/BUILD | sed 's#/BUILD#:bin#')
+                    # The chart is otherwise never rendered by the build. `helm
+                    # lint --strict` and `helm template` are the two commands
+                    # Helm documents for validating one, and verify_chart.py
+                    # checks what neither can see: a probe or a Service
+                    # targetPort naming a port no container declares. Both
+                    # halves are valid YAML on their own, so that defect renders
+                    # clean, lints clean, and crash-loops the pod.
+                    helm lint --strict deploy/charts/order-platform \
+                      -f deploy/env/local/values.yaml
+                    helm template order-platform deploy/charts/order-platform \
+                      -f deploy/env/local/values.yaml -n shop \
+                      | python3 checks/verify_chart.py -
+
+                    # `--tag` is Pants' documented way to select a subset of
+                    # targets. Every deployable target declares `deployable` in
+                    # its BUILD file, so a service the Backstage paved path
+                    # (§14.6) adds is packaged the moment it declares itself —
+                    # no list here to forget to update, and no naming
+                    # convention enforced outside the build system.
+                    pants --tag=deployable package ::
 
                     ls -la dist/
 
@@ -173,12 +226,42 @@ for SVC in $SERVICES; do
                 secret: { secretName: nexus-push }
             containers:
               - image: quay.io/buildah/stable:v1.40.1
-                # See the securityContext note below. This is a real trade.
+                # Not privileged. Buildah documents chroot isolation plus the
+                # vfs storage driver for running inside an unprivileged
+                # container: chroot avoids CLONE_NEWUSER, and vfs avoids the
+                # overlayfs mknod. What remains is the default OCI capability
+                # set, which Buildah hands to each RUN step and therefore has to
+                # hold itself. Naming those capabilities is the point — the pod
+                # cannot load kernel modules, ptrace, or touch host devices, all
+                # of which a privileged pod grants.
                 securityContext:
-                  privileged: true
+                  privileged: false
+                  allowPrivilegeEscalation: true
+                  capabilities:
+                    drop: ["ALL"]
+                    add:
+                      - SYS_ADMIN          # mount(2) for the build root
+                      - SYS_CHROOT         # chroot isolation
+                      - SETUID
+                      - SETGID
+                      - SETPCAP
+                      - SETFCAP
+                      - CHOWN
+                      - DAC_OVERRIDE
+                      - FOWNER
+                      - FSETID
+                      - MKNOD
+                      - KILL
+                      - NET_RAW
+                      - NET_BIND_SERVICE
+                      - AUDIT_WRITE
+                  seccompProfile:
+                    type: Unconfined
                 env:
                   - name: STORAGE_DRIVER
                     value: vfs
+                  - name: BUILDAH_ISOLATION
+                    value: chroot
                   - name: BUILDAH_FORMAT
                     value: docker
                   - name: REGISTRY_AUTH_FILE
@@ -198,15 +281,18 @@ for SVC in $SERVICES; do
                     buildkite-agent artifact download "dist/*" .
                     ls -la dist/
 
+                    # --tls-verify=false exists only because §5.8 runs Nexus
+                    # on plain HTTP. It disables certificate verification on a
+                    # connection that carries push credentials. Behind real TLS
+                    # you delete the flag and mount the CA instead — it is not
+                    # a Buildah setting you keep.
                     buildah bud \\
                       --tls-verify=false \\
                       --file services/$SVC/Dockerfile \\
                       --tag "$REGISTRY/shop/$SVC:$SHA" \\
-                      --tag "$REGISTRY/shop/$SVC:latest" \\
                       dist
 
                     buildah push --tls-verify=false "$REGISTRY/shop/$SVC:$SHA"
-                    buildah push --tls-verify=false "$REGISTRY/shop/$SVC:latest"
 
                     echo "pushed $REGISTRY/shop/$SVC:$SHA"
 YAML
@@ -230,11 +316,35 @@ cat <<YAML
                 secret: { secretName: nexus-push }
             containers:
               - image: quay.io/buildah/stable:v1.40.1
+                # Same capability set as the service build step above.
                 securityContext:
-                  privileged: true
+                  privileged: false
+                  allowPrivilegeEscalation: true
+                  capabilities:
+                    drop: ["ALL"]
+                    add:
+                      - SYS_ADMIN          # mount(2) for the build root
+                      - SYS_CHROOT         # chroot isolation
+                      - SETUID
+                      - SETGID
+                      - SETPCAP
+                      - SETFCAP
+                      - CHOWN
+                      - DAC_OVERRIDE
+                      - FOWNER
+                      - FSETID
+                      - MKNOD
+                      - KILL
+                      - NET_RAW
+                      - NET_BIND_SERVICE
+                      - AUDIT_WRITE
+                  seccompProfile:
+                    type: Unconfined
                 env:
                   - name: STORAGE_DRIVER
                     value: vfs
+                  - name: BUILDAH_ISOLATION
+                    value: chroot
                   - name: BUILDAH_FORMAT
                     value: docker
                   - name: REGISTRY_AUTH_FILE
@@ -251,11 +361,9 @@ cat <<YAML
                       --tls-verify=false \\
                       --file frontend/Dockerfile \\
                       --tag "$REGISTRY/shop/frontend:$SHA" \\
-                      --tag "$REGISTRY/shop/frontend:latest" \\
                       frontend
 
                     buildah push --tls-verify=false "$REGISTRY/shop/frontend:$SHA"
-                    buildah push --tls-verify=false "$REGISTRY/shop/frontend:latest"
 YAML
 
 # The portal is not a service and does not fit the services template: a
@@ -276,11 +384,35 @@ cat <<YAML
                 secret: { secretName: nexus-push }
             containers:
               - image: quay.io/buildah/stable:v1.40.1
+                # Same capability set as the service build step above.
                 securityContext:
-                  privileged: true
+                  privileged: false
+                  allowPrivilegeEscalation: true
+                  capabilities:
+                    drop: ["ALL"]
+                    add:
+                      - SYS_ADMIN          # mount(2) for the build root
+                      - SYS_CHROOT         # chroot isolation
+                      - SETUID
+                      - SETGID
+                      - SETPCAP
+                      - SETFCAP
+                      - CHOWN
+                      - DAC_OVERRIDE
+                      - FOWNER
+                      - FSETID
+                      - MKNOD
+                      - KILL
+                      - NET_RAW
+                      - NET_BIND_SERVICE
+                      - AUDIT_WRITE
+                  seccompProfile:
+                    type: Unconfined
                 env:
                   - name: STORAGE_DRIVER
                     value: vfs
+                  - name: BUILDAH_ISOLATION
+                    value: chroot
                   - name: BUILDAH_FORMAT
                     value: docker
                   - name: REGISTRY_AUTH_FILE

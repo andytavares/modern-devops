@@ -34,6 +34,12 @@ pants_ignore.add = [
   "/portal",          # Backstage owns its own Yarn workspace; not ours to build
   "/wiki",
   "/raw",
+  # Pants honours only the root .gitignore — `--pants-ignore-use-gitignore`
+  # "does not yet support reading nested gitignore files" — so frontend/.gitignore
+  # does not reach it and `pants tailor` walks into installed packages and build
+  # output.
+  "/frontend/node_modules",
+  "/frontend/dist",
 ]
 # `/docs` is deliberately NOT ignored: `checks/` reads the phase files to
 # assemble the single-file edition and to verify every listing still matches
@@ -77,12 +83,20 @@ indexes = ["http://nexus:8081/repository/pypi-proxy/simple"]
 # Pants silently dropped it.
 cgo_enabled = false
 
-# Go modules also resolve through Nexus. GOSUMDB is off for the same reason as
-# §12.5: the public checksum database is unreachable through a private proxy.
+# Go modules resolve through Nexus. Nothing else is overridden here, and that
+# is the point: `go.sum` records a hash for every module in the build list, so
+# verification happens locally against it and never needs the checksum
+# database. Turning GOSUMDB off would not speed that up — it would only disarm
+# verification for the next dependency someone adds. If a genuinely private
+# module ever arrives, the documented escape is scoped, not global:
+# `GOPRIVATE=github.com/yourorg/*`.
+#
+# -mod=readonly is already Go's default; it is stated because it is
+# load-bearing. Under -mod=mod a build may rewrite go.mod and succeed against a
+# dependency set nobody committed.
 subprocess_env_vars = [
   "GOPROXY=http://nexus:8081/repository/go-proxy",
-  "GOSUMDB=off",
-  "GOFLAGS=-mod=mod",
+  "GOFLAGS=-mod=readonly",
   "HOME",
   "PATH",
 ]

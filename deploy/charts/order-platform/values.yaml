@@ -13,6 +13,29 @@ aws:
   region: "us-east-1"
   s3Bucket: "orders-raw"
   ddbTable: "orders"
+  # Floci accepts any credentials and validates none, so these sentinels are what
+  # a local cluster needs to make the AWS SDKs start. They are rendered as plain
+  # env vars and are readable by anyone who can `kubectl get deploy`, which is
+  # only acceptable because they authenticate nothing.
+  #
+  # On a real cluster leave both empty. No credential env vars are then rendered
+  # and the SDK falls through to its default provider chain, which on EKS means
+  # IRSA or EKS Pod Identity: the pod's projected service account token is
+  # exchanged for short-lived STS credentials that rotate on their own. Long-lived
+  # access keys in a chart, a Secret or a ConfigMap are the thing that mechanism
+  # exists to remove — do not reach for the ExternalSecret pattern that
+  # ORDER_SIGNING_KEY uses here, because that still stores a static key.
+  accessKeyId: "test"
+  secretAccessKey: "test"
+
+# A node drain evicts every pod on the node at once, which for a two-replica
+# service means a full outage. Rendered per Deployment, and only for Deployments
+# with more than one replica: minAvailable 1 against a single replica permits no
+# voluntary eviction at all and blocks the drain forever.
+# https://kubernetes.io/docs/tasks/run-application/configure-pdb/
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
 
 orderApi:
   enabled: true
@@ -25,10 +48,6 @@ orderApi:
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits:   { memory: 256Mi }
-  ingress:
-    enabled: true
-    className: nginx
-    host: shop.localtest.me
 
 orderWorker:
   enabled: true
@@ -79,10 +98,6 @@ frontend:
   resources:
     requests: { cpu: 25m, memory: 32Mi }
     limits:   { memory: 64Mi }
-  ingress:
-    enabled: true
-    className: nginx
-    host: app.localtest.me
 
 podMonitor:
   # false until §13.2 installs kube-prometheus-stack and with it the

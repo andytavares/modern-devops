@@ -1,0 +1,47 @@
+# CI-only Pants configuration. Layered on top of pants.toml, not a replacement
+# for it: the pipeline sets
+#
+#   PANTS_CONFIG_FILES=pants.ci.toml
+#
+# which is the mechanism the "Using Pants in CI" guide documents for exactly
+# this — https://www.pantsbuild.org/stable/docs/using-pants/using-pants-in-ci
+#
+# Everything here is a setting that is right in a pod and wrong on a laptop.
+# Nothing that affects what gets built or how it is built belongs in this file;
+# a CI-only build setting is a CI-only bug waiting to happen.
+
+[GLOBAL]
+# Colors often work in CI, but the shell is usually not a TTY so Pants
+# doesn't attempt to use them by default. Buildkite renders ANSI colour in the
+# log, so turning them back on is free readability.
+colors = true
+
+[stats]
+# Logs cache hit/miss counts and timings at the end of the run. This is the
+# only visibility anyone gets into whether the Pants cache is doing anything in
+# CI — without it, a run that recompiles the world looks identical to one that
+# hits cache on everything, except slower.
+log = true
+
+# Coverage is deliberately NOT enabled here.
+#
+# `[test] use_coverage = true` is in the documented CI template, and on this
+# repo it crashes Pants 2.33.0 outright:
+#
+#   pants/backend/go/util_rules/coverage_output.py, go_render_coverage_report
+#     raw_coverage_profile=digest_contents[0].content
+#   IndexError: tuple index out of range
+#
+# The flag is global, so it turns on Go coverage too, and the Go backend
+# indexes the first element of an empty result when a test target produces no
+# profile. There is no per-language switch.
+#
+# Nothing consumed the report anyway: `artifact_paths: "dist/*"` matches one
+# level deep and the report lands two deep. Turn this on the day something
+# reads it, and scope it to Python when Pants can.
+
+[pytest]
+# -vv names each test in the log, which is what you want when the only record
+# of a failed CI run is its log. --no-header drops the platform/rootdir banner
+# that Buildkite already shows.
+args = ["-vv", "--no-header"]

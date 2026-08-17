@@ -211,7 +211,12 @@ With `replicas: 3` and `min.insync.replicas: 2`, writes continue. Strimzi recrea
 **⑤ Secret rotation.**
 
 ```bash
-BAO="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
+# The operator login from §7.5a, not the root token — rotation is exactly the
+# job shop-admin exists for.
+kubectl -n openbao exec -it openbao-0 -- env BAO_ADDR=http://127.0.0.1:8200 \
+  bao login -method=userpass username=operator
+
+BAO="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=<the token> BAO_ADDR=http://127.0.0.1:8200 bao"
 $BAO kv put shop/order-api signing_key="$(openssl rand -hex 32)"
 
 # ESO refreshes within 1m (§7.6)
@@ -223,6 +228,16 @@ kubectl -n shop rollout restart deployment/order-api
 ```
 
 That gap between "the Secret changed" and "the pod uses it" is the thing people get wrong in production. Measure your real rotation window, don't assume it.
+
+> **This loop does not work for every secret, and the exception will lock you out.** It works here because OpenBao is the only authority on the value: order-api accepts whatever key it is handed. Backstage's Postgres password has a second authority — the database itself, which was initialised with that password on first boot and does not learn a new one from a Secret. Rotate `shop/backstage`'s `postgres_password` in OpenBao alone and the ESO-managed Secret updates, Backstage restarts with the new value, Postgres rejects it, and the portal is locked out of its own database. Rotating a credential means rotating it at both ends — `ALTER ROLE` in Postgres, then the OpenBao write, then the restart:
+>
+> ```bash
+> kubectl -n backstage exec -it statefulset/backstage-postgresql -- \
+>   sh -c 'PGPASSWORD=$POSTGRES_POSTGRES_PASSWORD psql -U postgres'
+> # ALTER ROLE bn_backstage PASSWORD '<new>';
+> ```
+>
+> Before you automate rotation for anything, ask which side owns the value.
 
 **⑥ Break the mesh policy.** Add an identity that isn't allowed and watch it get refused at the proxy rather than in your code:
 

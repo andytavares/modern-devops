@@ -14,6 +14,9 @@ metadata:
   labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 4 }}
 spec:
   replicas: {{ $svc.replicas | default 1 }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ $svc.name }}
@@ -21,6 +24,10 @@ spec:
     metadata:
       labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 8 }}
       annotations:
+        # Scaffolded services read their config from the shared ConfigMap through
+        # envFrom, so nothing in the pod template changes when that config does.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-scaffolded.yaml") $ | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ $svc.port | quote }}
@@ -35,7 +42,7 @@ spec:
       enableServiceLinks: false
       serviceAccountName: {{ $svc.name }}
       imagePullSecrets:
-        - name: {{ $.Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" $ }}
       securityContext:
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
@@ -43,11 +50,14 @@ spec:
         - name: {{ $svc.name }}
           # Every scaffolded service is built from the same commit, so they all
           # carry the same tag. CI writes it once, in deploy/env/local/values.yaml.
-          image: "{{ $.Values.global.registry }}/shop/{{ $svc.name }}:{{ $.Values.scaffolded.tag }}"
+          image: {{ include "op.image" (dict "root" $ "img" (dict "repository" (printf "shop/%s" $svc.name) "tag" $.Values.scaffolded.tag)) }}
           ports:
             - { name: http, containerPort: {{ $svc.port }} }
-          env:
-            {{- include "op.commonEnv" $ | nindent 12 }}
+          envFrom:
+            - configMapRef: { name: scaffolded-config }
+          {{- with include "op.awsCredentialEnv" $ }}
+          env: {{- . | nindent 12 }}
+          {{- end }}
           readinessProbe:
             httpGet: { path: /readyz, port: http }
           resources:
@@ -78,32 +88,27 @@ spec:
     app.kubernetes.io/name: {{ $svc.name }}
   ports:
     - { name: http, port: 80, targetPort: http }
+{{- include "op.pdb" (dict "name" $svc.name "root" $ "replicas" ($svc.replicas | default 1) "selector" (dict "app.kubernetes.io/name" $svc.name)) }}
 {{- if $svc.ingress.enabled }}
 ---
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: networking.istio.io/v1
+kind: VirtualService
 metadata:
   name: {{ $svc.name }}
-  annotations:
-    # Same pair as order-api and frontend, and for the same reason: the edge is
-    # outside the mesh, the backend is inside it under STRICT mTLS. Without
-    # these, every scaffolded service comes up healthy and answers the browser
-    # with "upstream connect error ... connection termination" — which is the
-    # worst possible first experience of a paved path (§14.6), because the
-    # service is fine and the template is what's broken.
-    nginx.ingress.kubernetes.io/service-upstream: "true"
-    nginx.ingress.kubernetes.io/upstream-vhost: "{{ $svc.name }}.{{ $.Release.Namespace }}.svc.cluster.local"
+  labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 4 }}
 spec:
-  ingressClassName: nginx
-  rules:
-    - host: {{ $svc.ingress.host }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ $svc.name }}
-                port: { name: http }
+  hosts:
+    - {{ $svc.ingress.host | quote }}
+  # The shared edge Gateway in istio-system accepts *.localtest.me, so a
+  # scaffolded service becomes reachable by declaring this route and nothing
+  # else. No Ingress, and no annotations teaching one proxy about another.
+  gateways:
+    - istio-system/edge
+  http:
+    - route:
+        - destination:
+            host: {{ $svc.name }}.{{ $.Release.Namespace }}.svc.cluster.local
+            port:
+              number: 80
 {{- end }}
 {{- end }}

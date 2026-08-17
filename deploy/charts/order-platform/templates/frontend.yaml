@@ -12,6 +12,9 @@ metadata:
   labels: {{- include "op.labels" (dict "name" "frontend" "root" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.frontend.replicas }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: frontend
@@ -20,9 +23,10 @@ spec:
     rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   template:
     metadata:
+      # No checksum/config annotation: the frontend consumes no chart-managed
+      # config, so there is no ConfigMap to hash and nothing that can change
+      # without changing the pod template itself.
       labels: {{- include "op.labels" (dict "name" "frontend" "root" $) | nindent 8 }}
-      annotations:
-        checksum/config: {{ toJson .Values | sha256sum }}
     spec:
       # Kubernetes injects a Docker-link env var per Service in this namespace:
       # ORDER_API_PORT, ORDER_WORKER_PORT, PRICING_PORT, FRONTEND_PORT — each
@@ -34,7 +38,7 @@ spec:
       enableServiceLinks: false
       serviceAccountName: frontend
       imagePullSecrets:
-        - name: {{ .Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" . }}
       securityContext:
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
@@ -78,48 +82,5 @@ spec:
     app.kubernetes.io/name: frontend
   ports:
     - { name: http, port: 80, targetPort: http }
-{{- if .Values.frontend.ingress.enabled }}
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: frontend
-  annotations:
-    # Both annotations exist for one reason: this Ingress terminates outside the
-    # mesh and its backend is inside it, with PeerAuthentication STRICT (§9.4).
-    #
-    # `service-upstream` stops NGINX load-balancing across raw pod IPs and sends
-    # everything to the Service ClusterIP instead. Istio cannot identify a
-    # service from a bare endpoint IP, so without this the sidecar has nothing
-    # to originate mTLS *to*.
-    #
-    # `upstream-vhost` is the half that actually fixes it. NGINX preserves the
-    # browser's `Host:` — `{{ .Values.frontend.ingress.host }}` — and Envoy routes HTTP by authority, not by
-    # address. That hostname matches no service in the mesh, so the request
-    # falls through to PassthroughCluster and leaves as plaintext, which the
-    # destination sidecar resets. What you see at the edge is:
-    #
-    #   upstream connect error or disconnect/reset before headers.
-    #   reset reason: connection termination
-    #
-    # …which reads like the backend is down. It is not; it is refusing an
-    # unauthenticated connection, exactly as instructed. Rewriting the upstream
-    # Host to the service FQDN lets Envoy match the real cluster and issue a
-    # proper mTLS connection. Confirmed by
-    # `connection_security_policy.mutual_tls` at the destination reporter.
-    nginx.ingress.kubernetes.io/service-upstream: "true"
-    nginx.ingress.kubernetes.io/upstream-vhost: "frontend.{{ .Release.Namespace }}.svc.cluster.local"
-spec:
-  ingressClassName: {{ .Values.frontend.ingress.className }}
-  rules:
-    - host: {{ .Values.frontend.ingress.host }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: frontend
-                port: { name: http }
-{{- end }}
+{{- include "op.pdb" (dict "name" "frontend" "root" $ "replicas" .Values.frontend.replicas "selector" (dict "app.kubernetes.io/name" "frontend")) }}
 {{- end }}

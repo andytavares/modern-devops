@@ -15,6 +15,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 USER 10001
-# 50051 gRPC, 9090 the health/metrics HTTP server.
+# 50051 gRPC (application, health checking and reflection), 9090 Prometheus
+# metrics. Probes speak the gRPC health protocol on 50051, not HTTP.
 EXPOSE 50051 9090
 ENTRYPOINT ["python", "/app/pricing.pex"]

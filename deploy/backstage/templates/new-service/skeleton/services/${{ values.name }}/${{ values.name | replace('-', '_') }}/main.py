@@ -2,9 +2,9 @@ import logging
 import sys
 import time
 
-import uvicorn
-from fastapi import FastAPI, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+import uvicorn  # pants: no-infer-dep  (via fastapi[standard])
+from fastapi import FastAPI
+from prometheus_client import Counter, Histogram, make_asgi_app
 
 from .settings import settings
 
@@ -32,6 +32,12 @@ LATENCY = Histogram(
 
 app = FastAPI(title=SERVICE, version=settings.service_version)
 
+# prometheus_client ships an ASGI app for this; mounting it is what its docs
+# prescribe. It negotiates content type and compression, and a mount is not a
+# route, so /metrics stays out of the OpenAPI document Backstage renders.
+# https://prometheus.github.io/client_python/exporting/http/fastapi-gunicorn/
+app.mount("/metrics", make_asgi_app())
+
 
 @app.get("/healthz")
 def healthz() -> dict:
@@ -48,11 +54,6 @@ def readyz() -> dict:
     downstream's outage into a restart loop across every one of your pods.
     """
     return {"status": "ready"}
-
-
-@app.get("/metrics")
-def metrics() -> Response:
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/")

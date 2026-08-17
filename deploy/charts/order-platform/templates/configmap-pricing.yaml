@@ -1,0 +1,18 @@
+{{- if .Values.pricing.enabled }}
+{{/*
+v1 and v2 share one ConfigMap because they share one config; what differs
+between them — PRICING_VERSION and the image tag — stays inline on each
+Deployment, where it belongs to the pod template rather than to the config.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pricing-config
+  labels: {{- include "op.labels" (dict "name" "pricing" "root" $) | nindent 4 }}
+data:
+  PRICING_GRPC_PORT: {{ .Values.pricing.grpcPort | quote }}
+  PRICING_HTTP_PORT: {{ .Values.pricing.httpPort | quote }}
+  # PEX unpacks its dependency closure here; see the /tmp volumeMount note on the
+  # Deployment.
+  PEX_ROOT: "/tmp/pex"
+{{- end }}

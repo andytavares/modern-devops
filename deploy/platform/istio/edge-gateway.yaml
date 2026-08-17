@@ -1,0 +1,67 @@
+# The mesh's own entry point, which is what Istio documents for north-south
+# traffic. A Gateway describes the port and hostnames the edge proxy accepts;
+# the VirtualServices below describe where those hostnames go. Routing lives in
+# the same objects and the same language as the canary in §9.8, rather than
+# being split between an Ingress controller's annotations and Istio's config.
+#
+# ingress-nginx still owns hostPort 80/443 on the kind node and forwards these
+# two hostnames here (see edge-ingress.yaml). That is the same shape as the
+# production topology Istio documents: an external load balancer in front of
+# istio-ingressgateway.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: edge
+  namespace: istio-system
+spec:
+  # Matches the pod labels the istio/gateway chart applies.
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      # Wildcard, so a service the paved path (§14.6) adds needs only a
+      # VirtualService — no edit to this file and no edit to the nginx Ingress
+      # in front of it. A hostname with no VirtualService gets a 404 from the
+      # gateway, which is the correct answer for a route nobody declared.
+      hosts:
+        - "*.localtest.me"
+---
+# A VirtualService binds a hostname to the Gateway and routes it to a Service.
+# `gateways` names the Gateway in namespace/name form because the Gateway lives
+# in istio-system and these route to workloads in shop.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: frontend
+  namespace: shop
+spec:
+  hosts:
+    - "app.localtest.me"
+  gateways:
+    - istio-system/edge
+  http:
+    - route:
+        - destination:
+            host: frontend.shop.svc.cluster.local
+            port:
+              number: 80
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: order-api
+  namespace: shop
+spec:
+  hosts:
+    - "shop.localtest.me"
+  gateways:
+    - istio-system/edge
+  http:
+    - route:
+        - destination:
+            host: order-api.shop.svc.cluster.local
+            port:
+              number: 80

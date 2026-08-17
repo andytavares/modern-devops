@@ -24,6 +24,7 @@ python_tests(
 
 pex_binary(
     name="bin",
+    tags=["deployable"],
     entry_point="pricing/main.py:main",
     dependencies=[":lib"],
     # The cluster runs linux/aarch64 CPython 3.13, not this macOS laptop. grpcio

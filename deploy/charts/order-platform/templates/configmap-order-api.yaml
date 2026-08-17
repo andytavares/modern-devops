@@ -1,0 +1,19 @@
+{{- if .Values.orderApi.enabled }}
+{{/*
+One ConfigMap per service, each in its own template file, so that the
+checksum/config annotation on a Deployment can hash exactly the file that holds
+that service's configuration and nothing else. A single shared config file would
+put every service's values back into every service's hash.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-api-config
+  labels: {{- include "op.labels" (dict "name" "order-api" "root" $) | nindent 4 }}
+data:
+  {{- include "op.commonConfig" . | nindent 2 }}
+  S3_BUCKET: {{ .Values.aws.s3Bucket | quote }}
+  # PEX unpacks its dependency closure here; see the /tmp volumeMount note on the
+  # Deployment.
+  PEX_ROOT: "/tmp/pex"
+{{- end }}

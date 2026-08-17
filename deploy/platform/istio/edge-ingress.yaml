@@ -1,0 +1,38 @@
+# ingress-nginx owns hostPort 80/443 on the kind control-plane node and is the
+# edge for everything that is not in the mesh — Argo CD, Grafana, Kiali,
+# Backstage, Nexus. It keeps that job. This Ingress hands the two meshed
+# hostnames straight to istio-ingressgateway and does nothing else with them:
+# no rewriting, no per-service annotations, no knowledge of what is behind it.
+#
+# That split is the point. Each proxy does the job its own documentation
+# describes — nginx routes a hostname to a Service, Istio owns everything from
+# the mesh boundary inward — and neither is asked to understand the other. It is
+# also the shape of the production topology Istio documents, with nginx standing
+# in for the cloud load balancer that would forward to the gateway there.
+#
+# Nothing here needs `service-upstream` or `upstream-vhost`. istio-system has no
+# STRICT PeerAuthentication, so the gateway accepts this plaintext hop exactly as
+# it would from a cloud load balancer; mTLS begins at the gateway, which is
+# in the mesh and calls shop workloads with a real workload identity.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mesh-edge
+  namespace: istio-system
+spec:
+  ingressClassName: nginx
+  rules:
+    # A wildcard host, so a scaffolded service reaches the mesh without anyone
+    # editing this file. The platform's own UIs — Argo CD, Grafana, Kiali,
+    # Backstage — keep their exact-host Ingresses, and an exact host always wins
+    # over a wildcard, so they never come through here.
+    - host: "*.localtest.me"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: istio-ingressgateway
+                port:
+                  number: 80

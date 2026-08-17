@@ -580,31 +580,25 @@ spec:
     - { name: http, port: 80, targetPort: http }
 {{- if $svc.ingress.enabled }}
 ---
-apiVersion: networking.k8s.io/v1
-kind: Ingress
+apiVersion: networking.istio.io/v1
+kind: VirtualService
 metadata:
   name: {{ $svc.name }}
-  annotations:
-    # Same pair as order-api and frontend, and for the same reason: the edge is
-    # outside the mesh, the backend is inside it under STRICT mTLS. Without
-    # these, every scaffolded service comes up healthy and answers the browser
-    # with "upstream connect error ... connection termination" — which is the
-    # worst possible first experience of a paved path (§14.6), because the
-    # service is fine and the template is what's broken.
-    nginx.ingress.kubernetes.io/service-upstream: "true"
-    nginx.ingress.kubernetes.io/upstream-vhost: "{{ $svc.name }}.{{ $.Release.Namespace }}.svc.cluster.local"
+  labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 4 }}
 spec:
-  ingressClassName: nginx
-  rules:
-    - host: {{ $svc.ingress.host }}
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ $svc.name }}
-                port: { name: http }
+  hosts:
+    - {{ $svc.ingress.host | quote }}
+  # The shared edge Gateway in istio-system accepts *.localtest.me, so a
+  # scaffolded service becomes reachable by declaring this route and nothing
+  # else. No Ingress, and no annotations teaching one proxy about another.
+  gateways:
+    - istio-system/edge
+  http:
+    - route:
+        - destination:
+            host: {{ $svc.name }}.{{ $.Release.Namespace }}.svc.cluster.local
+            port:
+              number: 80
 {{- end }}
 {{- end }}
 ```
@@ -947,13 +941,22 @@ Create a **fine-grained** personal access token at <https://github.com/settings/
 
 Nothing else. Generate it and copy the `github_pat_…` value — GitHub shows it once.
 
-The token comes into the cluster from OpenBao through ESO, exactly like every other secret ([§7.6](phase-1-the-application.md#76-let-kubernetes-pull-from-nexus)). Store it at `shop/backstage` under the key `github_token`, which is what the `ExternalSecret` below reads:
+The token comes into the cluster from OpenBao through ESO, exactly like every other secret ([§7.6](phase-1-the-application.md#76-let-kubernetes-pull-from-nexus)). Backstage's database password goes the same way — a password in a values file is a password in git, and this database is where the PAT ends up — so `shop/backstage` holds three keys, and this is the write that most deserves a non-root identity.
+
+Log in as the operator from [§7.5a](phase-1-the-application.md#75a-give-humans-an-auth-method-too) and write all three in one command. `kv put` replaces the version wholesale, so a second `put` naming only `github_token` would destroy the two passwords:
 
 ```bash
 kubectl create namespace backstage
 
-kubectl -n openbao exec -it openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 \
-  bao kv put shop/backstage github_token='github_pat_...'
+kubectl -n openbao exec -it openbao-0 -- env BAO_ADDR=http://127.0.0.1:8200 \
+  bao login -method=userpass username=operator
+
+BAO_OP="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=<the token> BAO_ADDR=http://127.0.0.1:8200 bao"
+
+$BAO_OP kv put shop/backstage \
+  github_token='github_pat_...' \
+  postgres_password="$(openssl rand -hex 16)" \
+  postgres_admin_password="$(openssl rand -hex 16)"
 ```
 
 **`deploy/platform/backstage-secrets.yaml`**
@@ -975,6 +978,47 @@ spec:
   data:
     - secretKey: GITHUB_TOKEN
       remoteRef: { key: backstage, property: github_token }
+---
+# Backstage's own database credential goes through OpenBao like every other
+# credential on this platform — a password in a values file is a password in
+# git, and this database is where the GitHub PAT ends up.
+#
+# The Bitnami PostgreSQL subchart stops generating its own Secret the moment
+# `postgresql.auth.existingSecret` is set, and then reads fixed key names out of
+# the Secret named there. The key names are NOT the ones in the Secret the chart
+# generates for itself: that Secret has `password` and `postgres-password`, but
+# those literals are hardcoded in the no-existingSecret branch of the subchart's
+# helpers. With existingSecret set, the names come from
+# `postgresql.auth.secretKeys.*`, and the Backstage chart overrides the Bitnami
+# defaults there to `user-password` and `admin-password`. Copying the key names
+# off the generated Secret fails the render with
+# `PASSWORDS ERROR: The secret ... does not contain the key "user-password"`.
+#
+# Both keys are required. The admin key is not optional — `auth.enablePostgresUser`
+# defaults to true. `replication-password` is read only when
+# `architecture: replication`, which this is not.
+#
+# The Backstage backend reads its POSTGRES_PASSWORD from the same Secret and the
+# same `user-password` key, so one Secret serves both.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: backstage-postgresql-auth
+  namespace: backstage
+spec:
+  refreshInterval: "1h"
+  secretStoreRef:
+    name: openbao
+    kind: ClusterSecretStore
+  target:
+    name: backstage-postgresql-auth
+    creationPolicy: Owner
+  data:
+    - secretKey: user-password
+      remoteRef: { key: backstage, property: postgres_password }
+    - secretKey: admin-password
+      remoteRef: { key: backstage, property: postgres_admin_password }
+
 ---
 # The portal is pulled from Nexus like everything else, so the `backstage`
 # namespace needs its own pull secret. Secrets do not cross namespaces — §7's
@@ -1054,8 +1098,22 @@ postgresql:
   enabled: true
   auth:
     username: bn_backstage
-    password: backstage-change-me
+    # The password lives in OpenBao and reaches the cluster as the
+    # `backstage-postgresql-auth` Secret (deploy/platform/backstage-secrets.yaml).
+    # Setting existingSecret stops the subchart generating a Secret of its own,
+    # so the ExternalSecret must exist before this chart is installed.
+    #
+    # The data directory is initialised once, on first boot, with whatever
+    # password it saw then. Changing the value in OpenBao afterwards changes only
+    # what the clients present, not what the server accepts — the two drift apart
+    # and Backstage is locked out of its own database. Rotating means rotating in
+    # Postgres too, not in OpenBao alone.
+    existingSecret: backstage-postgresql-auth
 ```
+
+> **The Secret's key names are not the Bitnami defaults, and getting them wrong fails the install outright.** The generated Secret the subchart makes for itself holds `password` and `postgres-password`, but those literals only exist in the no-`existingSecret` branch of its helpers. Once `postgresql.auth.existingSecret` is set, the names come from `postgresql.auth.secretKeys.*` — and the Backstage chart overrides the Bitnami defaults there to **`user-password`** and **`admin-password`**. Copy the names off the generated Secret and `helm upgrade` dies with `PASSWORDS ERROR: The secret "backstage-postgresql-auth" does not contain the key "user-password"`. Both keys are required, because `auth.enablePostgresUser` defaults to true; `replication-password` is not, because it is read only under `architecture: replication`, and this is standalone.
+
+> **Apply the `ExternalSecret` before `helm upgrade --install`, not after.** With `existingSecret` set the subchart no longer creates the Secret, and it does not wait for one either — it reads the keys at render time and fails if the object is absent. The install order below is a dependency, not a preference.
 
 > **Do not add `POSTGRES_*` to `extraEnvVars`.** With `postgresql.enabled: true` the chart already
 > emits those four variables, and a second copy makes the install fail outright — server-side apply
@@ -1086,6 +1144,8 @@ helm upgrade --install backstage backstage/backstage \
   --namespace backstage --version 2.10.0 \
   --values infra/backstage-values.yaml --wait
 ```
+
+> **Rotating this password is not a vault-only operation.** Postgres initialises its data directory once, on first boot, with the password it saw then. Changing `postgres_password` in OpenBao changes only what Backstage presents, not what the server accepts, and the two drift apart into `password authentication failed for user "bn_backstage"`. Rotating means `ALTER ROLE` inside Postgres as well — see [§15.4](phase-6-operating.md#154-break-it-on-purpose).
 
 ESO refreshes on its own schedule, so restart the portal once to be certain it is running with the token you just stored:
 

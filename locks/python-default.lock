@@ -13,11 +13,14 @@
 //     "boto3==1.40.11",
 //     "fastapi[standard]==0.139.2",
 //     "grpcio",
+//     "grpcio-health-checking",
+//     "grpcio-reflection",
 //     "grpcio-tools",
 //     "httpx==0.28.1",
 //     "mypy",
 //     "prometheus-client==0.23.1",
 //     "protobuf",
+//     "pydantic-settings==2.7.1",
 //     "pydantic==2.11.7",
 //     "pytest==8.4.1",
 //     "types-grpcio",
@@ -660,6 +663,48 @@
           "requires_dists": [
             "grpcio-tools>=1.83.0; extra == \"protobuf\"",
             "typing-extensions~=4.12"
+          ],
+          "requires_python": ">=3.10",
+          "version": "1.83.0"
+        },
+        {
+          "artifacts": [
+            {
+              "algorithm": "sha256",
+              "hash": "7d8b47a5bfbc699d4aee0fc7a27f5d0265eb23a6a64db5ac2d8b749a0f8a9911",
+              "url": "http://nexus:8081/repository/pypi-proxy/packages/grpcio-health-checking/1.83.0/grpcio_health_checking-1.83.0-py3-none-any.whl"
+            },
+            {
+              "algorithm": "sha256",
+              "hash": "ad6bc4d5a1103ad704d25ccd82def300dfa27996b185cab3e4cceeef2c6867d4",
+              "url": "http://nexus:8081/repository/pypi-proxy/packages/grpcio-health-checking/1.83.0/grpcio_health_checking-1.83.0.tar.gz"
+            }
+          ],
+          "project_name": "grpcio-health-checking",
+          "requires_dists": [
+            "grpcio>=1.83.0",
+            "protobuf<8.0.0,>=7.35.1"
+          ],
+          "requires_python": ">=3.10",
+          "version": "1.83.0"
+        },
+        {
+          "artifacts": [
+            {
+              "algorithm": "sha256",
+              "hash": "9d4151f68f18a85aa5b0eff5d493ad13f9421f96c8d9c01c840b353dc979be93",
+              "url": "http://nexus:8081/repository/pypi-proxy/packages/grpcio-reflection/1.83.0/grpcio_reflection-1.83.0-py3-none-any.whl"
+            },
+            {
+              "algorithm": "sha256",
+              "hash": "6a2a30a462ac2c3c6d149734a8fe655fa7617c17fa2cda9949006f3bf07f5b3e",
+              "url": "http://nexus:8081/repository/pypi-proxy/packages/grpcio-reflection/1.83.0/grpcio_reflection-1.83.0.tar.gz"
+            }
+          ],
+          "project_name": "grpcio-reflection",
+          "requires_dists": [
+            "grpcio>=1.83.0",
+            "protobuf<8.0.0,>=7.35.1"
           ],
           "requires_python": ">=3.10",
           "version": "1.83.0"
@@ -1489,29 +1534,26 @@
           "artifacts": [
             {
               "algorithm": "sha256",
-              "hash": "0ba092c291c94baceb5eff768aa0d56400a457585bc0175925a5a5510303da42",
-              "url": "http://nexus:8081/repository/pypi-proxy/packages/pydantic-settings/2.15.0/pydantic_settings-2.15.0-py3-none-any.whl"
+              "hash": "590be9e6e24d06db33a4262829edef682500ef008565a969c73d39d5f8bfb3fd",
+              "url": "http://nexus:8081/repository/pypi-proxy/packages/pydantic-settings/2.7.1/pydantic_settings-2.7.1-py3-none-any.whl"
             },
             {
               "algorithm": "sha256",
-              "hash": "694b793e84f766ba76a90ebdefc01d0a9a045dab0382bee70393da93712ad117",
-              "url": "http://nexus:8081/repository/pypi-proxy/packages/pydantic-settings/2.15.0/pydantic_settings-2.15.0.tar.gz"
+              "hash": "10c9caad35e64bfb3c2fbf70a078c0e25cc92499782e5200747f942a065dec93",
+              "url": "http://nexus:8081/repository/pypi-proxy/packages/pydantic-settings/2.7.1/pydantic_settings-2.7.1.tar.gz"
             }
           ],
           "project_name": "pydantic-settings",
           "requires_dists": [
             "azure-identity>=1.16.0; extra == \"azure-key-vault\"",
             "azure-keyvault-secrets>=4.8.0; extra == \"azure-key-vault\"",
-            "boto3>=1.35.0; extra == \"aws-secrets-manager\"",
-            "google-cloud-secret-manager>=2.23.1; extra == \"gcp-secret-manager\"",
             "pydantic>=2.7.0",
             "python-dotenv>=0.21.0",
             "pyyaml>=6.0.1; extra == \"yaml\"",
-            "tomli>=2.0.1; extra == \"toml\"",
-            "typing-inspection>=0.4.0"
+            "tomli>=2.0.1; extra == \"toml\""
           ],
-          "requires_python": ">=3.10",
-          "version": "2.15.0"
+          "requires_python": ">=3.8",
+          "version": "2.7.1"
         },
         {
           "artifacts": [
@@ -2470,11 +2512,14 @@
     "boto3==1.40.11",
     "fastapi[standard]==0.139.2",
     "grpcio",
+    "grpcio-health-checking",
+    "grpcio-reflection",
     "grpcio-tools",
     "httpx==0.28.1",
     "mypy",
     "prometheus-client==0.23.1",
     "protobuf",
+    "pydantic-settings==2.7.1",
     "pydantic==2.11.7",
     "pytest==8.4.1",
     "types-grpcio",

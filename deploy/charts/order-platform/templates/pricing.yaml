@@ -14,6 +14,9 @@ metadata:
     version: {{ $version }}
 spec:
   replicas: {{ $cfg.replicas }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: pricing
@@ -28,7 +31,11 @@ spec:
         # live on the pod template, not just the Deployment.
         version: {{ $version }}
       annotations:
-        checksum/config: {{ toJson $.Values | sha256sum }}
+        # Both versions read the same ConfigMap, so both hash the same file.
+        # Hashing the rendered ConfigMap rather than `.Values` keeps an image-tag
+        # rewrite for an unrelated service out of this Deployment's pod template.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-pricing.yaml") $ | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ $.Values.pricing.httpPort | quote }}
@@ -43,7 +50,7 @@ spec:
       enableServiceLinks: false
       serviceAccountName: pricing
       imagePullSecrets:
-        - name: {{ $.Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" $ }}
       securityContext:
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
@@ -53,25 +60,31 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - { name: grpc, containerPort: {{ $.Values.pricing.grpcPort }} }
-            - { name: metrics, containerPort: {{ $.Values.pricing.httpPort }} }
+            - { name: http-metrics, containerPort: {{ $.Values.pricing.httpPort }} }
+          envFrom:
+            - configMapRef: { name: pricing-config }
           env:
+            # The two values that differ between v1 and v2 stay inline: they are
+            # per-Deployment identity, not shared config.
             - name: PRICING_VERSION
               value: {{ $version | quote }}
-            - name: PRICING_GRPC_PORT
-              value: {{ $.Values.pricing.grpcPort | quote }}
-            - name: PRICING_HTTP_PORT
-              value: {{ $.Values.pricing.httpPort | quote }}
-            # PEX unpacks its dependency closure here; see the volumeMount note.
-            - name: PEX_ROOT
-              value: "/tmp/pex"
             - name: SERVICE_VERSION
               value: {{ $cfg.image.tag | quote }}
+          # The kubelet speaks the gRPC health checking protocol itself, so the
+          # app needs no HTTP endpoint and no grpc_health_probe binary in the
+          # image. GRPCAction.port is an int32, not an IntOrString — a port
+          # NAME is rejected by the API server, so this must be the number.
+          #
+          # Liveness asks for the empty service (overall server health);
+          # readiness asks for the one service that has to work for this pod to
+          # be worth routing to. SIGTERM flips both to NOT_SERVING before the
+          # listener closes.
           livenessProbe:
-            httpGet: { path: /healthz, port: metrics }
+            grpc: { port: {{ $.Values.pricing.grpcPort }} }
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
-            httpGet: { path: /readyz, port: metrics }
+            grpc: { port: {{ $.Values.pricing.grpcPort }}, service: shop.v1.Pricing }
             periodSeconds: 5
             failureThreshold: 2
           resources: {{- toYaml $.Values.pricing.resources | nindent 12 }}
@@ -92,6 +105,7 @@ spec:
             - { name: tmp, mountPath: /tmp }
       volumes:
         - { name: tmp, emptyDir: {} }
+{{- include "op.pdb" (dict "name" "pricing" "pdbName" (printf "pricing-%s" $version) "root" $ "replicas" $cfg.replicas "selector" (dict "app.kubernetes.io/name" "pricing" "version" $version)) }}
 ---
 {{- end }}
 apiVersion: v1
@@ -103,6 +117,9 @@ spec:
   selector:
     app.kubernetes.io/name: pricing
   ports:
+    # Istio reads the protocol off the port name (`protocol[-suffix]`) or off
+    # appProtocol. A port named `metrics` matches no protocol, so Istio falls
+    # back to plain TCP and istioctl analyze reports IST0118.
     - { name: grpc, port: 50051, targetPort: grpc }
-    - { name: metrics, port: 9090, targetPort: metrics }
+    - { name: http-metrics, port: 9090, targetPort: http-metrics }
 {{- end }}
