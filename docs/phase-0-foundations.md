@@ -98,7 +98,8 @@ modern-devops/
 ├── .buildkite/
 │   ├── pipeline.sh             # generates the pipeline YAML for this commit
 │   └── upload.sh               # validates it, then uploads it
-└── infra/                      # host-side scripts: kind config, nexus bootstrap
+└── infra/                      # host-side config: kind cluster, Helm values for
+                                #   charts we install by hand (monitoring, Buildkite, Backstage)
 ```
 
 > **Tradeoff — mono-repo vs. split app/config repos.** Putting manifests next to code means one PR can change both, and there is no cross-repo version skew to reason about. The cost: CI writes a commit back into the same repo it just built from, so you must guard against the deploy commit re-triggering a build (we do, in [§12.5](phase-3-delivery.md#125-the-pipeline)). At scale, teams split them — a separate `*-deploy` repo gives config its own review rules, its own access control, and no build/deploy commit loop. For one person on one laptop, mono-repo is strictly simpler. Take the split when more than one team writes to the manifests.
@@ -200,9 +201,9 @@ kubectl config use-context kind-devops
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.13.0/deploy/static/provider/kind/deploy.yaml
 
-# REQUIRED as of controller-v1.13.0 — see the explanation below. Without this the
-# controller can land on a worker node, bind hostPort 80 there, and be
-# unreachable from your laptop.
+# REQUIRED. The kind manifest only tolerates the control plane, it doesn't
+# require it, so without this patch the controller can land on a worker node,
+# bind hostPort 80 there, and be unreachable from your laptop.
 kubectl -n ingress-nginx patch deployment ingress-nginx-controller --type=strategic -p \
   '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/os":"linux","ingress-ready":"true"}}}}}'
 
@@ -221,28 +222,12 @@ declares `hostPort` 80 and 443. Combined with kind's `extraPortMappings`, that i
 your laptop's port 80 — but **only if the pod is scheduled on the node those mappings belong to**,
 which is the control plane. Hence the patch.
 
-> **Why the patch is needed, and why the tutorial can't just describe the manifest.** Up to
-> **v1.11.x** the kind manifest pinned the controller itself: `type: NodePort` plus
-> `nodeSelector: ingress-ready: "true"`, matching the label we set in `infra/kind-cluster.yaml`. As of
-> **v1.13.0 upstream dropped both**: the Service is now `type: LoadBalancer` (which stays `<pending>`
-> forever on kind, harmlessly) and the pod carries only `nodeSelector: kubernetes.io/os: linux` plus
-> *tolerations* for the control plane. Tolerations permit scheduling there; they do not require it. So
-> the scheduler is free to place the controller on any node, and on a multi-node kind cluster it
-> usually won't pick the one with the port mappings.
->
-> The symptom is `curl http://localhost` returning **`000`** — not a 404, not a 502. `000` is curl
-> saying it never established a connection, because on your host's port 80 there is genuinely nothing
-> listening. `kubectl get pods` shows `1/1 Running` throughout, which is the part that makes this
-> expensive to debug: **the controller is perfectly healthy, just on the wrong node.**
->
-> Diagnose it in one command — compare where the pod is with where the ports are:
-> ```bash
-> kubectl -n ingress-nginx get pods -o wide          # NODE
-> docker ps --format '{{.Names}}\t{{.Ports}}'        # which container publishes 80
-> ```
-> The general lesson outrides ingress-nginx: **`hostPort` is a property of a node, not of a cluster.**
-> Any workload you reach through a fixed host port must be pinned to the node that exposes it, and a
-> pod that merely *tolerates* a node is not pinned to it.
+The Service will sit at `EXTERNAL-IP <pending>` forever. That is harmless on kind: traffic arrives
+via `hostPort`, not through the Service. Don't install MetalLB to "fix" it.
+
+> **`hostPort` is a property of a node, not of a cluster.** Any workload you reach through a fixed
+> host port must be pinned to the node that exposes it, and a pod that merely *tolerates* a node is
+> not pinned to it.
 
 We'll use `*.localtest.me` hostnames throughout. `localtest.me` and every subdomain of it resolve to `127.0.0.1` from public DNS, so you get real hostname-based routing with zero `/etc/hosts` edits.
 
@@ -251,7 +236,8 @@ Verify:
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost
 # 404 is correct — nginx is up and has no matching Ingress yet.
-# 000 means nothing is listening: the controller is on the wrong node (see above).
+# 000 means nothing is listening on port 80: the controller is on the wrong node.
+# Re-check `kubectl -n ingress-nginx get pods -o wide` — NODE must be devops-control-plane.
 ```
 
 ---
@@ -326,30 +312,25 @@ docker exec nexus cat /nexus-data/admin.password && echo
 Open <http://localhost:8081>, sign in as `admin` with that password. You'll be walked through:
 
 1. **New password** — set something you'll remember. This tutorial assumes `admin123`.
-2. **Enable anonymous access?** — choose **Enable anonymous access**.
+2. **Enable anonymous access?** — choose **Enable anonymous access**. This is required: CI resolves
+   dependencies through the PyPI, Go and npm proxies with no credentials at all (`PIP_INDEX_URL` and
+   `GOPROXY` are bare URLs), so without it every build fails on `401 Unauthorized`.
 
 > **Anonymous *read on the proxies*, authenticated *everything on the registry*.** This is a narrower
-> setting than it sounds, and the distinction is the whole point. Nexus controls Docker anonymous
-> pulls with a **second, per-repository** switch — *"Allow anonymous docker pull"* on the Docker
-> repository itself, which we leave **unchecked** in [§5.4](#54-create-the-docker-hosted-registry).
-> Sonatype's docs are explicit: *"enabling global anonymous access is necessary, but you also need to
-> enable a repository-level setting on each individual Docker repository for anonymous pulls to
-> function correctly"* ([anonymous access](https://help.sonatype.com/en/anonymous-access.html)).
-> So global anonymous access does **not** give away `docker pull`, and [§7](phase-1-the-application.md#7-openbao-and-external-secrets)'s
+> setting than it sounds. Nexus controls Docker anonymous pulls with a **second, per-repository**
+> switch — *"Allow anonymous docker pull"* on the Docker repository itself, which we leave
+> **unchecked** in [§5.4](#54-create-the-docker-hosted-registry). Sonatype's docs are explicit:
+> *"enabling global anonymous access is necessary, but you also need to enable a repository-level
+> setting on each individual Docker repository for anonymous pulls to function correctly"*
+> ([anonymous access](https://help.sonatype.com/en/anonymous-access.html)). So global anonymous access
+> does **not** give away `docker pull`, and [§7](phase-1-the-application.md#7-openbao-and-external-secrets)'s
 > OpenBao → ExternalSecret → `imagePullSecret` chain stays exactly as valuable as it was.
 >
 > Tighten it properly once you're through §5: **⚙ → Security → Roles → `nx-anonymous`** and cut its
 > privileges down to `nx-repository-view-pypi-pypi-proxy-*` and `nx-repository-view-go-go-proxy-*`.
 > Sonatype recommends precisely this — *"modify the default anonymous role (`nx-anonymous`) to
 > restrict access to only necessary content"* ([users](https://help.sonatype.com/en/users.html)).
-> Anonymous can then read the two language proxies and nothing else.
-
-> [!warning] Earlier revisions of this tutorial said **Disable anonymous access** here.
-> That made [§12](phase-3-delivery.md#12-buildkite-ci-that-runs-on-your-infrastructure) unrunnable. The build steps fetch from the PyPI and Go proxies
-> with **no credentials** — `PIP_INDEX_URL` and `GOPROXY` are bare URLs — so every dependency
-> resolution failed with `401 Unauthorized`, surfacing as `go: ... 401 Unauthorized` and, for `uv`,
-> as a step that hangs rather than fails. Disabling anonymous access and then not authenticating CI
-> are two instructions that cannot both be followed.
+> Anonymous can then read the language proxies and nothing else.
 
 ### 5.4 Create the Docker hosted registry
 

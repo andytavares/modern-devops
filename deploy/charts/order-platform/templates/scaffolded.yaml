@@ -57,6 +57,16 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
+          # A scaffolded service is packaged as a PEX, which unpacks its
+          # dependency closure on first run and therefore needs somewhere
+          # writable. Under readOnlyRootFilesystem it has nowhere and dies in the
+          # PEX bootstrap before any application log line appears:
+          #   FileNotFoundError: No usable temporary directory found
+          # Same mount order-api and pricing carry, for the same reason.
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
 ---
 apiVersion: v1
 kind: Service

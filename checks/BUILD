@@ -1,11 +1,19 @@
+python_sources(
+    name="lib",
+    sources=["build_single_edition.py", "verify_doc_listings.py"],
+)
+
 python_tests(
     name="tests",
     sources=["test_*.py"],
-    # Config files from two other directories, read as plain text. Nothing
-    # infers these — there is no import to follow, which is exactly why the two
-    # were free to drift apart in the first place.
+    # Config and prose read as plain text from three other directories. None of
+    # it is reachable by import, which is exactly why these files were free to
+    # drift apart in the first place.
     dependencies=[
+        ":lib",
         "frontend:nginx_conf",
-        "deploy/charts/order-platform/templates:order-api-template",
+        "deploy/charts/order-platform:order-api-template",
+        "docs:docs",
+        "//:single-edition",
     ],
 )

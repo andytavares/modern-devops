@@ -3,8 +3,8 @@
 Every page in this wiki, grouped by the slot it fills in the platform. Start here.
 
 Ask a question with `/wiki-ask`; add a source with `/wiki-ingest`; check for rot with `/wiki-lint`.
-The rules live in [`CLAUDE.md`](../CLAUDE.md). The primary source is `modern-devops-tutorial.md`,
-whose sections are cited throughout as `§N.M`.
+The rules live in [`CLAUDE.md`](../CLAUDE.md). The source is `docs/`, whose sections are cited
+throughout as `§N.M`; `modern-devops-tutorial.md` is assembled from it and carries the same numbers.
 
 > [!info] Status as of 2026-08-16
 > The platform has now been **built and run on a live kind cluster** through §13, and CI executes real
@@ -15,8 +15,12 @@ whose sections are cited throughout as `§N.M`.
 >
 > **The build system changed on 2026-08-16.** [[pants]] replaced per-language toolchains, one
 > `.proto` now generates Python and Go stubs ([[grpc]]), and a third service (`pricing`) runs as a
-> two-version [[istio]] canary. §17–§19 in `docs/phase-7-polyglot-monorepo.md`; those sections do not
-> exist in the single-document edition yet.
+> two-version [[istio]] canary. §17–§19 in `docs/phase-7-polyglot-monorepo.md`.
+>
+> **`docs/` is now the source, and `modern-devops-tutorial.md` is assembled from it.** They had
+> drifted badly as hand-maintained copies — 43 of 76 shared sections diverged, and §17–§19 existed
+> only in `docs/`, so anyone reading the single file built half a platform. Cite either; they cannot
+> disagree any more.
 >
 > **The tool-choice arguments were reframed on 2026-08-16.** [[floci]], [[openbao]] and
 > [[sonatype-nexus]] were previously justified on *licensing*, which read like dodging fees around
@@ -29,8 +33,9 @@ whose sections are cited throughout as `§N.M`.
 > **The edge was broken the whole time and the platform never said so (2026-08-16).** Every Ingress
 > returned `upstream connect error … connection termination` while all nine pods were `2/2 Running`
 > and Argo read `Synced`/`Healthy`. [[ingress-nginx]] in the mesh under STRICT mTLS needs *two*
-> annotations — `service-upstream` **and** `upstream-vhost` — and fixing one alone does nothing. New
-> §9.4 subsection in both editions; full diagnosis on [[ingress-nginx]] and [[istio]].
+> annotations — `service-upstream` **and** `upstream-vhost` — and fixing one alone does nothing. The
+> annotations are now part of the Ingress §9.4 tells you to write; full diagnosis on
+> [[ingress-nginx]] and [[istio]].
 >
 > **Two defects found by running it on 2026-08-16.** A secret written to OpenBao was invisible to the
 > cluster for up to an hour while [[external-secrets-operator]] reported `Ready=True` — the escape

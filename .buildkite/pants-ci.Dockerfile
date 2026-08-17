@@ -9,8 +9,7 @@
 #
 # Pants 2.x is NOT on PyPI. `pip install pantsbuild.pants==2.33.0` fails —
 # the package stops at 2.18 on the public index and 2.9.2 upstream, because
-# modern Pants ships only as the scie-pants launcher binary. That mistake cost
-# a red build, so it is written down here rather than left to be rediscovered.
+# modern Pants ships only as the scie-pants launcher binary.
 #
 # The launcher has to come from GitHub, which is outside the §5.1 choke point.
 # Fetching it once, verifying its published checksum, and baking it into an

@@ -24,7 +24,7 @@ spec:
   template:
     metadata:
       labels: {{- include "op.labels" (dict "name" "pricing" "root" $) | nindent 8 }}
-        # Istio subsets select on this label (§9.6 DestinationRule) — it must
+        # Istio subsets select on this label (§9.8 DestinationRule) — it must
         # live on the pod template, not just the Deployment.
         version: {{ $version }}
       annotations:

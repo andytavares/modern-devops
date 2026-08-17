@@ -61,8 +61,8 @@ dev = [
 
 # Declared here, not only as a CI env var, so `uv.lock` records this registry
 # and the lock validates identically on a laptop and in the build pod. uv
-# refuses a lockfile whose registries aren't in the current index config, which
-# is what `uv sync --locked` was failing on when only CI set UV_INDEX_URL.
+# refuses a lockfile whose registries aren't in the current index config, so
+# setting UV_INDEX_URL in CI alone is not enough.
 [[tool.uv.index]]
 url = "http://nexus:8081/repository/pypi-proxy/simple"
 default = true
@@ -79,7 +79,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["app"]
+packages = ["order_api"]
 ```
 
 > **Why the index lives here and not in the CI environment.** It is tempting to leave `pyproject.toml`
@@ -104,11 +104,14 @@ packages = ["app"]
 Create the package directories:
 
 ```bash
-mkdir -p services/order-api/app services/order-api/tests
-touch services/order-api/app/__init__.py services/order-api/tests/__init__.py
+mkdir -p services/order-api/order_api services/order-api/tests
+touch services/order-api/order_api/__init__.py services/order-api/tests/__init__.py
 ```
 
-**`services/order-api/app/settings.py`**
+The package is `order_api`, not `app`. Name it after the service from the start: a generic top-level
+package name collides with every other service's the moment they share a source root.
+
+**`services/order-api/order_api/settings.py`**
 
 ```python
 import os
@@ -140,7 +143,7 @@ settings = Settings()
 
 > **Why fail at import.** A pod that starts successfully and then 500s on every request is much harder to diagnose than one that crash-loops with `required environment variable KAFKA_BROKERS is not set`. Crash-loop is a *good* failure mode: `kubectl get pods` shows it, Argo CD shows it degraded, and the alert fires immediately. Degrading quietly is the bad one.
 
-**`services/order-api/app/main.py`**
+**`services/order-api/order_api/main.py`**
 
 ```python
 import hashlib
@@ -299,7 +302,7 @@ os.environ.setdefault("ORDER_SIGNING_KEY", "test-key")
 import pytest  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
-from app.main import OrderIn, app, healthz, state  # noqa: E402
+from order_api.main import OrderIn, app, healthz, state  # noqa: E402
 
 
 def test_healthz_needs_no_dependencies():
@@ -354,7 +357,7 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-install-project --no-dev
 
-COPY app ./app
+COPY order_api ./order_api
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev
 
@@ -368,7 +371,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1
 USER 10001
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "order_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 > **Tradeoff — multi-stage build.** The builder stage carries uv and build caches; the runtime stage carries only the virtualenv and your code. Costs you ~15 lines of Dockerfile, saves ~200 MB per image and removes the build toolchain from the attack surface. Always worth it. The `--mount=type=cache` lines require BuildKit, which is the default in Docker 23+ and is supported by Buildah — but note that cache mounts are *builder-local*, so they help your laptop and do nothing for a cold CI pod. Real CI caching means a shared cache backend, which is out of scope here.
@@ -719,88 +722,33 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY . .
-# CGO_ENABLED=0 → a static binary that runs on scratch/distroless.
-# -trimpath and the ldflags strip build paths and debug info for a smaller,
-# more reproducible artifact.
-ARG VERSION=dev
+# CGO_ENABLED=0 → a static binary, which is the only kind that runs on
+# distroless/static. -trimpath and -s -w strip build paths and debug info for a
+# smaller, more reproducible artifact.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
-      -ldflags="-s -w -X main.version=${VERSION}" \
+      -ldflags="-s -w" \
       -o /out/order-worker .
 
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=builder /out/order-worker /order-worker
+# --chmod=0755, not a bare COPY. Once the binary is built outside this Dockerfile
+# and shipped in as a CI artifact (Phase 3), the executable bit does not survive
+# the transfer, and the pod fails at `exec: "/order-worker": permission denied`
+# with no application output at all. Setting it here is correct either way.
+COPY --chmod=0755 --from=builder /out/order-worker /order-worker
 USER 65532:65532
 EXPOSE 9090
 ENTRYPOINT ["/order-worker"]
 ```
 
-> [!warning] **`-X main.version` in that `-ldflags` has never done anything. Corrected 2026-08-16.**
-> `-ldflags "-X importpath.name=value"` sets a **string variable that already exists** in the compiled
-> package. `main.go` above declares no `var version string` — it reads the environment:
->
-> ```go
-> version: getenv("SERVICE_VERSION", "dev"),
-> ```
->
-> When the target symbol is absent, Go's linker does not error and does not warn. It silently does
-> nothing. So the `ARG VERSION`, the `--build-arg VERSION=$SHA` the pipeline passed in, and the claim
-> that the build SHA is stamped into the binary at link time were all describing a mechanism that
-> never ran once.
->
-> **What actually reports the version** is `SERVICE_VERSION`, set from the image tag by the Helm chart
-> (§10.1). That has worked the whole time, which is why nothing looked broken.
->
-> Recorded rather than quietly edited, per the repo's rule on contradictions: the earlier text was
-> wrong, this is the correction, and the `-ldflags` line is left in the listing above because it is
-> what the file said when this section was written. **`-s -w` and `-trimpath` are real and do what the
-> comment says**; only the `-X` was inert.
->
-> The general lesson is about linker flags specifically: **`-X` fails open.** Anything that
-> misconfigures silently while still producing a plausible artifact needs a test asserting the
-> *outcome*. One `assert version != "dev"` in a smoke test would have caught this on day one.
->
-> This machinery has since been deleted rather than fixed —
-> [§19.6](phase-7-polyglot-monorepo.md#196-the-version-stamp-that-never-was) is the full account, and
-> `services/order-worker/Dockerfile` in the repo today is the four-line form Phase 7 produced, not the
-> multi-stage build shown above.
-
-> [!warning] **Fully qualify every `FROM`, or CI hangs forever with no error.**
-> `docker.io/library/golang:1.26-alpine`, not `golang:1.26-alpine`. Docker silently assumes Docker
-> Hub for an unqualified name; **Buildah does not**, and [§12.5](phase-3-delivery.md#125-the-pipeline) builds with
-> Buildah. `quay.io/buildah/stable` ships:
->
-> ```
-> unqualified-search-registries = ["registry.fedoraproject.org", "registry.access.redhat.com", "docker.io"]
-> short-name-mode = "enforcing"
-> ```
->
-> so a short name is genuinely ambiguous and Buildah asks which registry you meant:
->
-> ```
-> [1/2] STEP 1/7: FROM golang:1.26-alpine AS builder
-> ? Please select an image:
->   ▸ registry.fedoraproject.org/golang:1.26-alpine
->     registry.access.redhat.com/golang:1.26-alpine
->     docker.io/library/golang:1.26-alpine
-> ```
->
-> The build pod has a TTY, so Buildah waits for an answer that will never come — the step runs until
-> the pipeline times out, and stuck jobs pile up against your Buildkite concurrency limit. Run the same
-> thing on your laptop without a TTY and it fails in one second with
-> `short-name resolution enforced but cannot prompt without a TTY`, which is why this is hard to
-> reproduce outside CI.
->
-> **Do not rely on it working by accident.** `python:3.13-slim` resolves silently only because
-> Buildah's bundled `000-shortnames.conf` happens to alias `"python" = "docker.io/library/python"`.
-> There is no such alias for `golang`. That list is a convenience, not a contract.
->
-> There is a supply-chain argument too, and it is the same one as [§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for):
-> an unqualified name is a name whose *meaning depends on the machine resolving it*. Pinning the
-> registry is the same discipline as pinning the tag.
+> [!warning] **Fully qualify every `FROM`.**
+> `docker.io/library/golang:1.26-alpine`, never `golang:1.26-alpine`. Docker assumes Docker Hub for a
+> short name; Buildah — which [§12.5](phase-3-delivery.md#125-the-pipeline) builds with — runs
+> `short-name-mode = "enforcing"` and refuses to guess, so an unqualified name that works on your
+> laptop stalls or fails in CI. Pinning the registry is the same discipline as pinning the tag.
 
 > **Tradeoff — distroless vs alpine vs scratch.** Distroless static gives you a non-root user, CA certificates and timezone data, and nothing else — no shell, no package manager, so `kubectl exec` into it is impossible. That's the point: it's a ~2 MB attack surface. The cost is real, though — when something breaks in production you cannot shell in, and you must debug via `kubectl debug --image=busybox` ephemeral containers instead. Alpine keeps a shell at the price of a package manager and musl libc quirks. For a compiled static Go binary, distroless is the right default.
 
@@ -1314,32 +1262,6 @@ kubectl -n shop run smoke --rm -it --restart=Never \
 
 > **`refreshInterval` is a rotation budget, not a preference.** ESO re-reads OpenBao on this interval; if the value changed, it rewrites the Secret. But **an already-running pod does not see the change** — env vars are set at container start and mounted secret volumes update lazily. So the real rotation window is `refreshInterval` + however long until the pod restarts. If you need fast rotation, either mount the secret as a volume and re-read it in-process, or add [Reloader](https://github.com/stakater/Reloader) to restart Deployments when their secrets change. Setting `refreshInterval: 1m` and assuming rotation takes a minute is a mistake people make in production.
 
-> [!warning] **This one will get you, and it will not look like a secrets problem.**
-> Writing a new value into OpenBao does nothing to a running cluster until ESO's next
-> poll — up to `refreshInterval` later, an hour here. In between, the `ExternalSecret`
-> reports `SecretSynced` / `Ready=True`, because it *is* synced: to the value it read
-> last time. Restarting the pod does not help either; it rereads the same stale Secret.
-> The symptom is a credential you are certain you just set being rejected, which sends
-> people to check the credential rather than the clock.
->
-> Force the poll, then restart the consumer:
->
-> ```bash
-> kubectl -n backstage annotate externalsecret backstage \
->   force-sync="$(date +%s)" --overwrite
-> kubectl -n backstage rollout restart deploy/backstage
-> ```
->
-> Any change to the annotation triggers an immediate reconcile; the timestamp is just a
-> convenient way to guarantee the value differs from last time. Confirm it landed before
-> blaming anything else — length is enough, and does not print the secret:
->
-> ```bash
-> kubectl -n backstage get secret backstage \
->   -o jsonpath='{.data.GITHUB_TOKEN}' | base64 -d | wc -c
-> ```
-
-
 Commit:
 
 ```bash
@@ -1595,25 +1517,12 @@ scaffolded:
   tag: "dev"     # CI overwrites this in the env overlay, same as the other two
 ```
 
-> [!warning] **A missing CRD fails the whole Application, not just the one resource.**
-> This is the ordering trap in this chart, and it is worth internalising because it generalises. The
-> `PodMonitor` needs `monitoring.coreos.com/v1`, which arrives with kube-prometheus-stack in
-> [§13.2](phase-2-observability.md#132-install) — two whole sections after Argo CD starts syncing this app in
-> [§11.4](phase-3-delivery.md#114-the-app-of-apps). If `podMonitor.enabled` is `true` before then, the sync fails with:
->
-> ```
-> The Kubernetes API could not find monitoring.coreos.com/PodMonitor for requested
-> resource shop/order-platform. Make sure the "PodMonitor" CRD is installed.
-> ```
->
-> and **`order-api`, `order-worker`, both Services, both ServiceAccounts and the Ingress all stay
-> `Missing`.** Argo CD syncs an Application as a unit: one invalid task and none of them are applied.
-> `kubectl -n shop get pods` returns nothing, which reads like a scheduling or image problem and is
-> neither. Sections §11.4 to §12.6 simply cannot work with this left on.
->
-> Note the flag belongs in the **chart's** `values.yaml`, not in `deploy/env/local/values.yaml` —
-> Buildkite rewrites that overlay wholesale on every deploy ([§12.5](phase-3-delivery.md#125-the-pipeline)) and anything
-> else you put there is lost on the next green build.
+> [!warning] **Leave `podMonitor.enabled: false` until [§13.3](phase-2-observability.md#133-confirm-your-app-is-being-scraped).**
+> Argo CD syncs an Application as a unit, so a resource whose CRD is missing fails the *entire* sync —
+> with `podMonitor.enabled: true`, `monitoring.coreos.com/v1` does not exist until
+> [§13.2](phase-2-observability.md#132-install) and every workload in `shop` stays `Missing`. The flag
+> belongs in the **chart's** `values.yaml`, not in `deploy/env/local/values.yaml`, which Buildkite
+> rewrites wholesale on every deploy ([§12.5](phase-3-delivery.md#125-the-pipeline)).
 
 **`deploy/charts/order-platform/templates/_helpers.tpl`**
 
@@ -1689,6 +1598,12 @@ spec:
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ .Values.orderApi.port | quote }}
     spec:
+      # Kubernetes injects a Docker-link env var per Service in this namespace:
+      # ORDER_API_PORT, ORDER_WORKER_PORT — each set to "tcp://<clusterIP>:<port>".
+      # Any app reading a variable of that name as its own config gets a URL where
+      # it expected an integer, and env vars outrank every other config source.
+      # Service links are a Docker-links relic nothing here uses.
+      enableServiceLinks: false
       serviceAccountName: order-api
       imagePullSecrets:
         - name: {{ .Values.global.imagePullSecret }}
@@ -1803,6 +1718,8 @@ spec:
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ .Values.orderWorker.metricsPort | quote }}
     spec:
+      # Same reason as order-api: no Docker-link env vars in this pod.
+      enableServiceLinks: false
       serviceAccountName: order-worker
       imagePullSecrets:
         - name: {{ .Values.global.imagePullSecret }}
@@ -1926,7 +1843,8 @@ helm template order-platform deploy/charts/order-platform \
   | kubectl apply --dry-run=server -f -
 ```
 
-The server dry-run will complain about `ServiceMonitor` — that CRD doesn't exist yet ([§13](phase-2-observability.md#13-observability-with-grafana) installs it). Everything else should validate.
+Everything should validate. With `podMonitor.enabled: false` the chart renders nothing that needs a
+CRD the cluster doesn't have yet — which is exactly why the flag starts off.
 
 ### 10.4 Build the images, by hand, once
 

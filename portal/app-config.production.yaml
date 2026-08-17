@@ -1,18 +1,22 @@
 app:
-  baseUrl: http://backstage.localtest.me
+  # https, not http. The UI calls crypto.randomUUID, which the browser only
+  # exposes in a secure context — over plain http Backstage renders a blank
+  # page. And once the page is served over https, a backend baseUrl on http
+  # gets every API call blocked as mixed content, so all three URLs here have
+  # to agree.
+  baseUrl: https://backstage.localtest.me
 
 backend:
-  baseUrl: http://backstage.localtest.me
+  baseUrl: https://backstage.localtest.me
   listen:
-    # Object form. The string shorthand (`listen: ':7007'`) was valid in older
-    # Backstage and is now rejected outright:
+    # Object form. The string shorthand (`listen: ':7007'`) is rejected:
     #   Invalid type in config for key 'backend.listen', got string, wanted object
     # host must be 0.0.0.0, not the 127.0.0.1 default, or the container binds to
     # loopback and the kubelet's probes never reach it.
     host: 0.0.0.0
     port: 7007
   cors:
-    origin: http://backstage.localtest.me
+    origin: https://backstage.localtest.me
   database:
     client: pg
     connection:
@@ -31,7 +35,7 @@ auth:
   providers:
     guest:
       # Backstage refuses guest sign-in outside development unless you say this
-      # out loud. Read §14.7 before you copy this line anywhere real.
+      # out loud. Read the end of §14.8 before you copy this line anywhere real.
       dangerouslyAllowOutsideDevelopment: true
 
 catalog:

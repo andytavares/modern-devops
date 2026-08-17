@@ -22,10 +22,8 @@ This phase replaces both with a monorepo build system ([[pants]]) and a real int
 test of whether it worked: **change a field in a `.proto` and watch two languages fail in the same
 command, on your laptop, before anything reaches a cluster.**
 
-> **This phase is numbered 7 and sits before Phase 6.** The number records when it was built —
-> after the platform was already running — and the position records where it belongs when reading.
-> Phase 6 ends by deleting the cluster; nothing sensibly comes after that. See
-> [Why this order](README.md#why-this-order).
+> **Phase 7 sits before Phase 6 when reading.** Phase 6 ends by deleting the cluster; nothing
+> sensibly comes after that. See [Why this order](README.md#why-this-order).
 
 ---
 
@@ -76,46 +74,35 @@ before you build a platform on them:
 | `pants.backend.experimental.javascript` | **experimental** | the frontend's npm install |
 | `pants.backend.experimental.typescript` | **experimental** | the frontend's sources |
 
-Five of the eight are experimental, as of Pants 2.33.0 / 2026-08. That is a real risk and it is taken
+Five of the eight are experimental in Pants 2.33.0. That is a real risk and it is taken
 knowingly: the entire value of a polyglot monorepo is that one tool builds everything, so refusing the
 experimental backends means not doing this at all. The mitigation is that **every one of them has a
 one-command escape hatch** — `go build`, `npm run build`, `ruff check` — because Pants delegates to
 the language's own toolchain rather than reimplementing it. If a backend breaks on upgrade, you lose
 orchestration, not the ability to ship.
 
-> [!warning] **In 2.33 the ruff backend path is not where the docs' muscle memory puts it, and the wrong path fails as a `ModuleNotFoundError`.**
-> It is `pants.backend.experimental.python.lint.ruff.check` and
-> `pants.backend.experimental.python.lint.ruff.format`, **not** `pants.backend.python.lint.ruff.*`.
-> The trap is that the non-experimental path is not simply absent: it exists on disk as a directory
-> containing `rules.py` but **no `register.py`**. So Pants does not say "unknown backend" — it tries
-> to import a module that is not a backend and dies with:
->
-> ```
-> ModuleNotFoundError: No module named 'pants.backend.python.lint.ruff.register'
-> ```
->
-> which reads like a broken Pants installation rather than a typo in your config.
->
-> Related, same session: `[ruff]` takes **no** `install_from_resolve`. Ruff ships as a downloaded
-> binary, not a resolved Python package, so it is not in the lockfile and does not want to be. `mypy`
-> is the opposite — it *is* a resolved package and *does* take `install_from_resolve`. Two linters,
-> two mechanisms, one config file.
-
 ### 17.3 `pants.toml`
 
-Install Pants the same way CI will — from PyPI **through Nexus**, so the build system crosses the same
-supply-chain choke point as everything it builds ([§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for)):
+Pants 2.x is **not** on PyPI. It ships as `scie-pants`, a self-bootstrapping launcher binary that
+reads `pants_version` out of `pants.toml` and fetches the matching Pants itself. Install the launcher
+from its GitHub release, checksum-verified:
 
 ```bash
-pip install "pantsbuild.pants==2.33.0"
+curl -fsSL -o /usr/local/bin/pants \
+  https://github.com/pantsbuild/scie-pants/releases/download/v0.13.2/scie-pants-macos-aarch64
+echo "a6f3231413ca1f793caffa621171a4b1a0158e7488cd0b5bb3e742cb99cc72a8  /usr/local/bin/pants" \
+  | shasum -a 256 -c -
+chmod 755 /usr/local/bin/pants
 ```
 
-> **Not `curl … | bash`.** Pants' documented install is a shell launcher fetched from the internet.
-> That is a build system entering your supply chain through a door you spent [§5](phase-0-foundations.md#5-sonatype-nexus-the-artifact-choke-point)
-> closing. Installing the wheel from Nexus costs nothing and keeps the rule intact: **nothing enters
-> this platform except through the choke point**, including the thing that builds it.
+> **This one binary comes from outside the choke point, deliberately and once.** Everything Pants
+> then resolves — Python wheels, Go modules — goes through [[sonatype-nexus]]
+> ([§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for)), and CI does not repeat this
+> download at all: `.buildkite/pants-ci.Dockerfile` bakes the same checksum-verified launcher into an
+> image that lives in Nexus ([§19.5](#195-one-ci-step-instead-of-two)). A pinned, hashed, one-time
+> fetch is an honest compromise; `curl … | bash` on every build is not.
 
-The configuration is short, and every non-obvious line is there because something failed without it:
+The configuration, comments stripped:
 
 ```toml
 [GLOBAL]
@@ -133,7 +120,13 @@ backend_packages = [
   "pants.backend.experimental.typescript",
 ]
 
-pants_ignore.add = ["/portal", "/wiki", "/raw", "/docs"]
+pants_ignore.add = [
+  "/deploy/backstage/templates",
+  "/portal",
+  "/wiki",
+  "/raw",
+  "/docs",
+]
 
 [source]
 root_patterns = ["/", "/services/*", "/protos"]
@@ -146,10 +139,14 @@ default_resolve = "python-default"
 [python.resolves]
 python-default = "locks/python-default.lock"
 
+[python-bootstrap]
+search_path = ["<PYENV>", "<PATH>", "/opt/homebrew/opt/python@3.13/libexec/bin"]
+
 [python-repos]
 indexes = ["http://nexus:8081/repository/pypi-proxy/simple"]
 
 [golang]
+cgo_enabled = false
 subprocess_env_vars = [
   "GOPROXY=http://nexus:8081/repository/go-proxy",
   "GOSUMDB=off",
@@ -160,17 +157,38 @@ subprocess_env_vars = [
 
 [python-protobuf]
 generate_type_stubs = true
+
+[mypy]
+install_from_resolve = "python-default"
+
+[test]
+timeout_default = 60
+
+[anonymous-telemetry]
+enabled = false
 ```
 
-Four of those deserve a sentence:
+The non-obvious lines:
 
-- **`pants_ignore` excludes `/portal`.** Backstage owns a Yarn workspace with its own build; putting
-  it under Pants' JS backend means two tools fighting over one `node_modules`. It is not ours to build
+- **Ruff's backend path is `pants.backend.experimental.python.lint.ruff.check` / `.format`.** In 2.33
+  there is no non-experimental ruff backend to point at.
+- **`[mypy] install_from_resolve` but no `[ruff]` equivalent.** mypy is a resolved Python package and
+  belongs in the lockfile; ruff is a downloaded binary and does not.
+- **`pants_ignore` excludes `/deploy/backstage/templates` and `/portal`.** The scaffolder skeleton's
+  `BUILD` file contains nunjucks placeholders and is not valid Python until Backstage renders it;
+  Backstage's own Yarn workspace is not ours to build
   ([§14.8](phase-5-developer-portal.md#148-build-and-deploy-the-portal)).
+- **`[python-bootstrap] search_path` names the Homebrew path explicitly.** `brew install python@3.13`
+  puts the unversioned `python` in `libexec/bin`, which is deliberately off `PATH`, and Pants' default
+  search will not find it. `<PYENV>` and `<PATH>` are the defaults and must be repeated, not replaced.
 - **`[python-repos]` and `[golang]` both point at Nexus**, for the same reason `uv` did
   ([§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for)). `GOSUMDB=off`
   because the public checksum database is unreachable through a private proxy — the same trade, and
   the same caveat, as [§12.5](phase-3-delivery.md#125-the-pipeline).
+- **`[golang] cgo_enabled = false` is mandatory.** Pants defaults it to *true*, which links
+  `order-worker` dynamically against libc. `gcr.io/distroless/static-debian12` has neither libc nor a
+  dynamic loader, so the pod dies with `exec /order-worker: no such file or directory` on a file that
+  is present and executable.
 - **`enable_resolves` with a single named lockfile** means every Python target in the repo resolves
   against `locks/python-default.lock`. One lock, one resolution, no chance of two services
   disagreeing about `protobuf`. Pants still computes per-target dependencies from imports, so a
@@ -184,25 +202,6 @@ pants generate-lockfiles --resolve=python-default
 git add locks/python-default.lock 3rdparty/python
 ```
 
-> [!warning] **`brew install python@3.13` puts the interpreter somewhere Pants cannot see.**
-> Pants reported:
->
-> ```
-> No working interpreter compatible with the requested constraints was found
-> ```
->
-> with a perfectly good CPython 3.13 installed. Homebrew puts the unversioned `python` in
-> `libexec/bin`, which is deliberately **not** on `PATH` — so `python3.13` exists and Pants' search
-> still finds nothing. The fix is to tell it where to look:
->
-> ```toml
-> [python-bootstrap]
-> search_path = ["<PYENV>", "<PATH>", "/opt/homebrew/opt/python@3.13/libexec/bin"]
-> ```
->
-> `<PYENV>` and `<PATH>` are the defaults and must be repeated, not replaced. The message names the
-> constraint, which sends you to `interpreter_constraints` — the wrong file entirely.
-
 ### 17.4 Source roots, and the duplicate-module trap
 
 `root_patterns = ["/", "/services/*", "/protos"]` declares the import roots. `/services/*` means
@@ -213,40 +212,24 @@ a path that leaks the directory layout.
 That second root is worth doing deliberately. Without it, both services would import their shared
 contract by a path — and a path is a thing that changes when someone reorganises a directory.
 
-> [!warning] **Every service with a top-level `app` package collides, and mypy refuses outright.**
-> `order-api` shipped its code in `app/` — the FastAPI convention, and what
-> [§3.1](phase-1-the-application.md#31-order-api-python--fastapi) wrote. When `pricing` arrived with its own
-> `app/`, both sat under the shared `/services/*` source root as the module `app`, and:
->
-> ```
-> Duplicate module named "app"
-> ```
->
-> mypy does not degrade here; it declines to run at all. Pants also cannot infer intra-service
-> imports, because `from app.settings import settings` is genuinely ambiguous — there are two.
->
-> The fix is a rename, not a config flag: `app/` → `order_api/` and `app/` → `pricing/`. Once a
-> package name is unique across the repo, inference works and mypy is happy.
->
-> **This is a property of the source-root layout, not of these two services.** Any repo that gives
-> each service its own source root must also give each service a unique top-level package name. The
-> FastAPI tutorial convention — every project has an `app` — is exactly wrong at more than one
-> project.
+One rule follows from that layout, and it is not optional: **every service needs a unique top-level
+package name.** A shared `/services/*` source root puts them all in the same module namespace, so two
+services shipping their code in `app/` — the FastAPI tutorial convention — become the same module
+`app`. mypy does not degrade there, it refuses to run at all (`Duplicate module named "app"`), and
+Pants cannot infer intra-service imports either, because `from app.settings import settings` is
+genuinely ambiguous.
 
-> [!warning] **The paved path was a machine for producing that failure, and it is only half fixed.**
-> The Backstage skeleton ([§14.6](phase-5-developer-portal.md#146-paved-path-1--a-new-service))
-> emitted `app/` too, so the *first* scaffolded service would work and the *second* would break
-> `pants check` for the whole repo — including for people who had never used the portal. The skeleton
-> now templates its package directory as `${{ values.name | replace("-", "_") }}`, the same way its
-> metric prefix already was, because service names are hyphenated and Python packages may not be.
-> Verified by rendering it as `quotes-api` and running its tests.
->
-> **Still open:** the skeleton emits `pyproject.toml` and `uv.lock`, not a `BUILD` file. A scaffolded
-> service therefore arrives *outside* the monorepo this phase just built — and since
-> [§19.5](#195-one-ci-step-instead-of-two) makes CI discover services by the presence of `BUILD`, a
-> scaffolded service is currently not built at all by the pipeline. Making the paved path emit a
-> `BUILD` file is the obvious next commit and deliberately is not this one. Tracked in
-> [`wiki/open-questions.md`](../wiki/open-questions.md).
+So the packages are named for their services:
+
+```
+services/order-api/order_api/     # main.py, settings.py
+services/pricing/pricing/         # main.py
+```
+
+Underscores, not hyphens: service names are hyphenated and Python packages may not be. The Backstage
+skeleton ([§14.6](phase-5-developer-portal.md#146-paved-path-1--a-new-service)) templates its package
+directory as `${{ values.name | replace('-', '_') }}` for exactly this reason, so a scaffolded
+`quotes-api` arrives with a `quotes_api/` package and collides with nothing.
 
 ### 17.5 One command, and what it actually does
 
@@ -419,12 +402,364 @@ about the mesh having no request path to secure between them). `pricing` is the 
 service-to-service hop in this platform, which is what makes retries, timeouts, traffic shifting and
 outlier detection mean anything at all.
 
+#### Wiring `order-api` to it
+
+A pricing service nothing calls is a pricing service you cannot canary. The rest of this section is
+the caller side: the address, the client, the metric, the call, and the tests. Do it now — everything
+downstream ([§19.4](#194-the-frontend-vite-and-a-live-tally),
+[§9.8](phase-4-service-mesh.md#98-canary-two-versions-of-pricing-behind-one-service)) depends on it.
+
+**Address and deadline.** Two settings, appended to `Settings.__init__`:
+
+**`services/order-api/order_api/settings.py`**
+
+```python
+        self.pricing_addr = os.getenv(
+            "PRICING_ADDR", "pricing.shop.svc.cluster.local:50051"
+        )
+        self.pricing_timeout_seconds = float(
+            os.getenv("PRICING_TIMEOUT_SECONDS", "2.0")
+        )
+```
+
+The default matches the `Service` the chart creates in [§19.3](#193-a-pex-needs-somewhere-to-write-and-readonlyrootfilesystem-gives-it-nowhere)
+(`pricing`, namespace `shop`, port 50051), so `order-api.yaml` needs no new env entry. The timeout is
+a setting rather than a constant because it is the number you tune when
+[§9.8](phase-4-service-mesh.md#98-canary-two-versions-of-pricing-behind-one-service) starts injecting
+delays.
+
+**The client.** Add the imports and the metric to `main.py`:
+
+**`services/order-api/order_api/main.py`**
+
+```python
+import grpc
+
+from shop.v1 import pricing_pb2, pricing_pb2_grpc
+```
+
+```python
+PRICING_CALLS = Counter(
+    "pricing_calls_total",
+    "Outcomes of calls to the pricing service",
+    ["result", "served_by"],
+)
+```
+
+`served_by` as a metric label is safe here only because its cardinality is bounded by the number of
+deployed pricing versions. Do not label metrics with anything a caller controls.
+
+```python
+class PricingClient:
+    """Thin async wrapper around the generated Pricing stub.
+
+    Uses grpc.aio so a slow or unavailable pricing service can't block the
+    event loop. Deliberately has no fallback path: a failed price is a failed
+    order, not a locally guessed one.
+    """
+
+    def __init__(self, address: str, timeout_seconds: float) -> None:
+        self._channel = grpc.aio.insecure_channel(address)
+        self._stub = pricing_pb2_grpc.PricingStub(self._channel)
+        self._timeout_seconds = timeout_seconds
+
+    async def price_order(
+        self, *, sku: str, quantity: int, unit_amount_cents: int, customer: str
+    ) -> pricing_pb2.PriceOrderResponse:
+        request = pricing_pb2.PriceOrderRequest(
+            sku=sku,
+            quantity=quantity,
+            unit_amount_cents=unit_amount_cents,
+            customer=customer,
+        )
+        return await self._stub.PriceOrder(request, timeout=self._timeout_seconds)
+
+    def is_ready(self) -> bool:
+        state = self._channel.get_state(try_to_connect=True)
+        return state not in (
+            grpc.ChannelConnectivity.TRANSIENT_FAILURE,
+            grpc.ChannelConnectivity.SHUTDOWN,
+        )
+
+    async def close(self) -> None:
+        await self._channel.close()
+```
+
+`insecure_channel` is correct in this platform: the sidecar terminates mTLS, so TLS in the
+application would be a second, redundant layer
+([§9.4](phase-4-service-mesh.md#94-mtls-and-proving-it-is-actually-on)). The `timeout=` argument is the
+deadline. Without it a synchronous hop turns a slow dependency into an outage — every request parks
+on the event loop until the client gives up, and `order-api` stops answering for reasons that have
+nothing to do with `order-api`.
+
+**One channel per process, not per request.** Build it in the lifespan and drain it on shutdown, next
+to Kafka and S3:
+
+```python
+state: dict = {"producer": None, "s3": None, "pricing": None, "ready": False}
+```
+
+```python
+    state["pricing"] = PricingClient(
+        settings.pricing_addr, settings.pricing_timeout_seconds
+    )
+    state["ready"] = True
+    log.info("order-api started version=%s", settings.service_version)
+    try:
+        yield
+    finally:
+        state["ready"] = False
+        await producer.stop()
+        await state["pricing"].close()
+        log.info("order-api stopped")
+```
+
+A gRPC channel is a long-lived, multiplexing object that manages its own connection pool and
+reconnection. Creating one per request throws away the connection and pays a TCP and HTTP/2 handshake
+on every order.
+
+**Readiness gets a second condition.** If the channel cannot connect, this pod cannot serve orders and
+should be pulled out of the Service rather than answering 502s:
+
+```python
+@app.get("/readyz")
+def readyz() -> dict:
+    """Readiness: dependencies are up. Kubernetes pulls us out of the Service if this fails."""
+    if not state["ready"]:
+        raise HTTPException(status_code=503, detail="dependencies not ready")
+    pricing = state["pricing"]
+    if pricing is None or not pricing.is_ready():
+        raise HTTPException(status_code=503, detail="pricing channel not ready")
+    return {"status": "ready"}
+```
+
+`get_state(try_to_connect=True)` both reads the channel state and nudges an idle channel into
+connecting, so readiness is what recovers a pod after `pricing` comes back.
+
+**The call.** One helper, so there is exactly one place that decides what a pricing failure means:
+
+```python
+async def _price_order(order: OrderIn) -> pricing_pb2.PriceOrderResponse:
+    """Call shop.v1.Pricing/PriceOrder. Raises HTTPException(502) on any failure —
+    never falls back to a locally computed price, so a pricing outage is a visible
+    order failure rather than a silently wrong total."""
+    pricing = state["pricing"]
+    try:
+        response = await pricing.price_order(
+            sku=order.sku,
+            quantity=order.quantity,
+            unit_amount_cents=order.amount_cents,
+            customer=order.customer,
+        )
+    except grpc.RpcError as exc:
+        code = exc.code()
+        result = "timeout" if code == grpc.StatusCode.DEADLINE_EXCEEDED else "error"
+        PRICING_CALLS.labels(result=result, served_by="unknown").inc()
+        log.warning("pricing call failed sku=%s code=%s", order.sku, code)
+        raise HTTPException(status_code=502, detail="pricing unavailable") from exc
+    PRICING_CALLS.labels(result="ok", served_by=response.served_by).inc()
+    return response
+```
+
+`DEADLINE_EXCEEDED` is split out from every other status because "we were too slow" and "it was
+broken" have different fixes, and a single `result="error"` bucket hides which one you have.
+
+**In `create_order`**, price first, then persist. The price is part of the record, so an order that
+cannot be priced must not reach S3 or Kafka at all:
+
+```python
+    try:
+        pricing = await _price_order(order)
+
+        payload = order.model_dump() | {
+            "order_id": order_id,
+            "created_at": created_at,
+            "total_amount_cents": pricing.total_amount_cents,
+            "priced_by": pricing.served_by,
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+```
+
+The exception handling needs a clause it did not have before, and its order matters:
+
+```python
+    except HTTPException:
+        ORDERS_RECEIVED.labels(result="error").inc()
+        raise
+    except Exception:
+        ORDERS_RECEIVED.labels(result="error").inc()
+        log.exception("failed to ingest order_id=%s", order_id)
+        raise HTTPException(status_code=502, detail="downstream failure")
+```
+
+Without the first clause the bare `except Exception` swallows the 502 from `_price_order` and
+re-raises a generic one, losing `detail="pricing unavailable"` and logging a stack trace for a
+downstream failure that was already handled and counted.
+
+Finally, the response carries the pricing result through:
+
+```python
+    return {
+        "order_id": order_id,
+        "status": "accepted",
+        "s3_key": key,
+        "total_amount_cents": pricing.total_amount_cents,
+        "discount_cents": pricing.discount_cents,
+        "rule_applied": pricing.rule_applied,
+        "priced_by": pricing.served_by,
+    }
+```
+
+**`priced_by` is the field [§19.4](#194-the-frontend-vite-and-a-live-tally) tallies.** The frontend
+places orders against `order-api`, counts `priced_by` across the responses and draws the ratio. That is the entire
+mechanism by which an Istio weight change becomes something you watch in a browser — it is `served_by`
+off the wire ([§18.1](#181-the-contract)), renamed once on the way out and never aggregated in
+between.
+
+**Nothing to add to `services/order-api/BUILD`.** Pants resolves `from shop.v1 import pricing_pb2` to
+the generated target from the import itself
+([§17.1](#171-the-problem-with-a-build-tool-per-language)), and `grpcio` is already in
+`3rdparty/python/requirements.txt`. Confirm rather than assume:
+
+```bash
+pants dependencies --transitive services/order-api:bin | grep protos
+# protos/shop/v1/pricing.proto:protos
+```
+
+**The tests.** A fake client, so the suite never opens a socket:
+
+**`services/order-api/tests/test_api.py`**
+
+```python
+class _FakePricingClient:
+    """Stands in for PricingClient so tests never touch the network."""
+
+    def __init__(self, *, response=None, error: grpc.RpcError | None = None):
+        self._response = response
+        self._error = error
+
+    async def price_order(self, **kwargs):
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+
+class _FakeRpcError(grpc.RpcError):
+    def __init__(self, code: grpc.StatusCode):
+        self._code = code
+
+    def code(self) -> grpc.StatusCode:
+        return self._code
+```
+
+`grpc.RpcError` is a bare `Exception` subclass with no constructor of its own, so a real one cannot be
+raised with a chosen status code — `_FakeRpcError` exists only to make `code()` answer.
+
+The happy path asserts the response actually carries the price through:
+
+```python
+def test_order_response_includes_pricing_result():
+    state["s3"] = _FakeS3()
+    state["producer"] = _FakeProducer()
+    state["pricing"] = _FakePricingClient(
+        response=pricing_pb2.PriceOrderResponse(
+            total_amount_cents=4499,
+            discount_cents=500,
+            rule_applied="volume-discount",
+            served_by="pricing-v1",
+        )
+    )
+
+    result = asyncio.run(create_order(_order()))
+
+    assert result["status"] == "accepted"
+    assert result["total_amount_cents"] == 4499
+    assert result["discount_cents"] == 500
+    assert result["rule_applied"] == "volume-discount"
+    assert result["priced_by"] == "pricing-v1"
+```
+
+And both failure modes get their own test, because they take different branches through
+`_price_order`:
+
+```python
+def test_pricing_timeout_returns_502():
+    from fastapi import HTTPException
+
+    state["s3"] = _FakeS3()
+    state["producer"] = _FakeProducer()
+    state["pricing"] = _FakePricingClient(
+        error=_FakeRpcError(grpc.StatusCode.DEADLINE_EXCEEDED)
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(create_order(_order()))
+
+    assert exc_info.value.status_code == 502
+
+
+def test_pricing_unavailable_returns_502():
+    from fastapi import HTTPException
+
+    state["s3"] = _FakeS3()
+    state["producer"] = _FakeProducer()
+    state["pricing"] = _FakePricingClient(
+        error=_FakeRpcError(grpc.StatusCode.UNAVAILABLE)
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(create_order(_order()))
+
+    assert exc_info.value.status_code == 502
+```
+
+These are the tests that keep the no-fallback decision from being quietly reversed later. A fallback
+added without touching them would leave both passing only if it still returned 502, which is the
+point.
+
+```bash
+pants test services/order-api:tests
+```
+
+Once the images are built and Argo CD has synced, the call is visible end to end:
+
+```bash
+curl -s -X POST http://shop.localtest.me/orders \
+  -H 'content-type: application/json' \
+  -d '{"customer":"ada","sku":"W-1","quantity":3,"amount_cents":4999}' | jq .
+```
+
+A `priced_by` of `pricing-v1` or `pricing-v2` in that response means the hop works. Repeat it and
+watch which version answers — that is the canary, in one command, before the frontend exists.
+
 ### 19.2 `pex_binary`, and the one flag that decides whether it runs
 
 A PEX is a single executable zip containing your code and its entire dependency closure. `python
 order-api.pex` runs it; there is no `pip install` step at any point after Pants.
 
-**`services/pricing/BUILD`** (abridged):
+First, describe the platform the PEX will actually run on. Generate it from a real container rather
+than writing it by hand:
+
+```bash
+docker run --rm python:3.13-slim sh -c \
+  'pip install pex && pex3 interpreter inspect --markers --tags' > 3rdparty/python/linux.json
+```
+
+**`3rdparty/python/BUILD`** (comments stripped):
+
+```python
+python_requirements(
+    name="reqs",
+    source="requirements.txt",
+)
+
+file(
+    name="linux-platform",
+    source="linux.json",
+)
+```
+
+**`services/pricing/BUILD`**, the `pex_binary` (comments stripped):
 
 ```python
 pex_binary(
@@ -436,51 +771,33 @@ pex_binary(
 )
 ```
 
+`complete_platforms` goes on **every** `pex_binary` in the repo, including the one the Backstage
+skeleton emits. The cluster is `linux/aarch64`; the laptop is not, and `grpcio`, `pydantic-core`,
+`uvloop` and `watchfiles` are all native extensions — without it `pants package` resolves macOS wheels
+into an artifact that builds, tests and pushes cleanly and then fails to import inside the container.
+Check the result:
+
+```bash
+unzip -l dist/pricing.pex | grep -E 'manylinux|macosx' | head
+```
+
+You want `manylinux2014_aarch64` in the wheel filenames, not `macosx`.
+
 `output_path` exists so the artifact lands at `dist/pricing.pex` rather than the default
 `dist/services.pricing/bin.pex`, which is what lets `dist/` be used directly as a Buildah build
 context and the Dockerfile `COPY` by name.
 
-> [!warning] **Without `complete_platforms`, the PEX builds clean, passes every check, and dies on import inside the container.**
-> `pants package` on a macOS laptop resolves **macOS** wheels. `grpcio`, `pydantic-core`, `uvloop` and
-> `watchfiles` are all native extensions, so the PEX you just built contains `.so` files for the wrong
-> operating system and architecture entirely. Nothing local tells you: it builds, `pants test` passes,
-> the image builds, the push succeeds. The failure is a Python `ImportError` at container start —
-> maximum distance from the cause, in the one environment where you have the least visibility.
->
-> The fix is to describe the target platform explicitly. Generate it from a real container rather than
-> writing it by hand:
->
-> ```bash
-> docker run --rm python:3.13-slim sh -c \
->   'pip install pex && pex3 interpreter inspect --markers --tags' > 3rdparty/python/linux.json
-> ```
->
-> ```python
-> file(name="linux-platform", source="linux.json")
-> ```
->
-> and reference it from **every** `pex_binary`. Verify by unzipping the result — you want
-> `manylinux2014_aarch64` in the wheel filenames, not `macosx`:
->
-> ```bash
-> unzip -l dist/pricing.pex | grep -E 'manylinux|macosx' | head
-> ```
->
-> One constraint that follows and will eventually bite: when building for a platform other than the
-> local one, **every platform-specific dependency must be available as a prebuilt wheel** for the
-> target. Pants can only build sdists for the local machine. A dependency that ships source-only for
-> `linux/aarch64` cannot be cross-packaged at all — you would have to build the wheel yourself and
-> host it in [[sonatype-nexus]].
->
-> **This is not a Pants quirk.** Any tool that resolves wheels on the build host and ships them to a
-> different host has it — it is the same class of mistake as building a Go binary with `CGO_ENABLED=1`
-> and putting it in `scratch`. The reason it bites *here* and did not bite before is that the old
-> Dockerfile resolved dependencies **inside** a `linux/arm64` container, where the question could not
-> arise.
+> **One constraint follows from cross-packaging.** Every platform-specific dependency must be
+> available as a **prebuilt wheel** for the target — Pants can only build sdists for the local
+> machine. A dependency that ships source-only for `linux/aarch64` cannot be cross-packaged at all;
+> you would have to build the wheel yourself and host it in [[sonatype-nexus]]. This is not a Pants
+> quirk. Any tool that resolves wheels on the build host and ships them elsewhere has it, and it is
+> the same class of mistake as building a Go binary with `CGO_ENABLED=1` and putting it in `scratch`.
 
 The Dockerfile that consumes it is the whole payoff:
 
 ```dockerfile
+# syntax=docker/dockerfile:1.7
 FROM docker.io/library/python:3.13-slim
 
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
@@ -492,6 +809,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
 USER 10001
+# 50051 gRPC, 9090 the health/metrics HTTP server.
 EXPOSE 50051 9090
 ENTRYPOINT ["python", "/app/pricing.pex"]
 ```
@@ -502,50 +820,49 @@ argument makes itself.
 
 ### 19.3 A PEX needs somewhere to write, and `readOnlyRootFilesystem` gives it nowhere
 
-This one was found by deploying it, not by reading it. `pricing` crash-looped with:
+A PEX is a zip that **unpacks its dependency closure on first run**. The bootstrap extracts wheels to
+`PEX_ROOT`, which must be writable, and falls back to the temp directory when it is not — so under
+`readOnlyRootFilesystem: true` every candidate fails and the process dies before importing a line of
+your code. None of your logging configuration has run at that point, so `kubectl logs` shows nothing
+at all.
 
+Give it a writable `/tmp` and point `PEX_ROOT` at it explicitly, keeping the root filesystem
+read-only. From `deploy/charts/order-platform/templates/pricing.yaml`:
+
+```yaml
+          env:
+            # ... the service's own config ...
+            - name: PEX_ROOT
+              value: "/tmp/pex"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
 ```
-FileNotFoundError: [Errno 2] No usable temporary directory found in
-['/tmp', '/var/tmp', '/usr/tmp', '/app']
+
+Set `PEX_ROOT` rather than relying on `/tmp` being writable by default — the fallback order is an
+implementation detail, and an explicit path is a thing a reader can find. **Every service packaged as
+a PEX needs both halves** — `order-api.yaml`, `pricing.yaml` and `scaffolded.yaml` all carry them, so
+a service that arrives through the paved path gets them without anyone remembering to ask.
+
+It is the same class of problem as `nginx-unprivileged` needing writable `/tmp`, `/var/cache/nginx`
+and `/var/run`: both render perfectly under `helm template`, pass `kubectl apply --dry-run=server`,
+and fail only at runtime. **Dry-run validates schema, not whether the process can start.**
+
+```bash
+kubectl -n shop get pods -l app.kubernetes.io/name=pricing
+# pricing-v1-... 2/2 Running     (2/2 — the sidecar is the second container)
+# pricing-v2-... 2/2 Running
 ```
-
-> [!warning] **A PEX unpacks its dependency closure on first run, so `readOnlyRootFilesystem: true` breaks it — with no application log line at all.**
-> The zip is not executed in place. On first run the PEX bootstrap extracts its wheels to `PEX_ROOT`
-> — which Pex documents as defaulting to `~/.cache/pex` and which **must be writable** — falling back
-> to the temp directory when it is not. Under `readOnlyRootFilesystem: true` every candidate fails, so
-> it dies before importing a single line of your code, which means **none of your logging
-> configuration has run** and nothing you wrote appears in `kubectl logs`. It reads exactly like a
-> broken image rather than a pod spec that is one `emptyDir` short.
->
-> The fix keeps the root filesystem read-only, which is the point:
->
-> ```yaml
->           env:
->             - name: PEX_ROOT
->               value: "/tmp/pex"
->           securityContext:
->             readOnlyRootFilesystem: true
->           volumeMounts:
->             - { name: tmp, mountPath: /tmp }
->       volumes:
->         - { name: tmp, emptyDir: {} }
-> ```
->
-> Set `PEX_ROOT` **explicitly** rather than relying on `/tmp` being writable — the default search
-> order is an implementation detail, and an explicit path is a thing a reader can find.
->
-> **Every service that moves to PEX packaging inherits this.** It is the same class of problem as
-> `nginx-unprivileged` needing writable `/tmp`, `/var/cache/nginx` and `/var/run` — both render
-> perfectly under `helm template`, pass `kubectl apply --dry-run=server`, and fail only at runtime.
-> **Dry-run validates schema, not whether the process can start.**
-
-Verified: `pricing-v1` and `pricing-v2` went from `CrashLoopBackOff` to `2/2 Running`, sidecars
-included.
 
 ### 19.4 The frontend: Vite, and a live tally
 
-`frontend/` is a [[vite]] + TypeScript page with no framework. It polls `order-api`, tallies which
-pricing version served each order, and draws a bar. A 90/10 → 50/50 weight change is visible in a
+`frontend/` is a [[vite]] + TypeScript page with no framework. It POSTs orders to `order-api`,
+tallies the `priced_by` on each response, and draws a bar. A 90/10 → 50/50 weight change is visible in a
 browser within seconds.
 
 It is a demo dashboard, and it earns its place for one reason: **it makes the canary a thing you watch
@@ -576,20 +893,18 @@ file(name="npmrc", source=".npmrc")
 file(name="tsconfig", source="tsconfig.json")
 file(name="vite_config", source="vite.config.ts")
 file(name="index_html", source="index.html")
+
+# Not part of the Vite build — it is COPYed into the image and read by the
+# port-consistency check in `checks/`.
+file(name="nginx_conf", source="nginx.conf")
 ```
 
-> [!warning] **Pants' JS/TS backend does not infer that a build script needs its config files or its non-TS assets, and a missing asset produces no error whatsoever.**
-> Dependency inference works on **imports**, and a build script's inputs are not imports.
-> `tsconfig.json`, `vite.config.ts`, `index.html` and `src/style.css` are all invisible to it, so they
-> have to be listed by hand as `file` and `resource` targets.
->
-> The missing `style.css` is the instructive one. Vite did not fail — it built successfully, in a
-> sandbox that simply did not contain the file, and produced a bundle with no styles. The output was a
-> **broken page and a green build**. A missing `tsconfig.json` at least fails loudly; a missing asset
-> does not fail at all.
->
-> **Rule: for any non-Python target, enumerate the build's inputs explicitly and do not trust
-> inference.** Inference is a Python-first feature that the experimental backends inherit unevenly.
+**Every dependency there is listed by hand, and that is the rule for non-Python targets.** Pants
+infers dependencies from *imports*, and a build script's inputs are not imports: `tsconfig.json`,
+`vite.config.ts`, `index.html` and `src/style.css` are invisible to inference. Omitting a config file
+fails loudly. Omitting an asset does not fail at all — Vite builds successfully in a sandbox that
+simply does not contain `style.css` and emits a bundle with no styles, which is a broken page and a
+green build. Enumerate the inputs; do not trust inference outside Python.
 
 One deliberate inconsistency: the frontend's Dockerfile runs the Vite build itself in a `node` stage
 rather than copying a Pants artifact, unlike the other three. The reason is that a static bundle is
@@ -605,103 +920,193 @@ ingress-nginx's admission webhook rejects a duplicate host/path outright.
 
 ### 19.5 One CI step instead of two
 
-The Python step and the Go step are gone. In their place:
+The Python step and the Go step are gone. In their place, one step in `.buildkite/pipeline.sh`:
 
 ```yaml
   - label: ":hammer: lint · typecheck · test · package"
     key: verify
+    agents: { queue: kubernetes }
     artifact_paths: "dist/*"
-    # ... python:3.13-slim pod ...
-    command:
-      - |
-        pip install --quiet "pantsbuild.pants==2.33.0"
-        git config --global --add safe.directory "$PWD"
+    plugins:
+      - kubernetes:
+          podSpec:
+            imagePullSecrets:
+              - name: nexus-pull
+            containers:
+              - image: nexus:8082/ci/pants:0.13.2
+                resources:
+                  requests: { cpu: "1", memory: 2Gi }
+                  limits:   { memory: 4Gi }
+                command:
+                  - |
+                    set -euo pipefail
 
-        pants lint check test ::
+                    git config --global --add safe.directory "$PWD"
 
-        pants package \
-          services/order-api:bin \
-          services/order-worker:bin \
-          services/pricing:bin
+                    pants lint check test ::
 
-        ls -la dist/
+                    pants package $(ls -d services/*/BUILD | sed 's#/BUILD#:bin#')
+
+                    ls -la dist/
 ```
 
-Three things about this are load-bearing:
+Four things about this are load-bearing:
+
+**The step runs a prebuilt Pants image out of Nexus**, `.buildkite/pants-ci.Dockerfile`, rather than
+installing Pants per build. It carries the checksum-verified `scie-pants` launcher from
+[§17.3](#173-pantstoml), a Go toolchain matching `services/order-worker/go.mod` (Pants *searches* for
+`go`, it does not download one), and `unzip`/`zip`/`xz`, which Pants needs to unpack the tools it does
+download — protoc, ruff, the Go SDK.
 
 **`pants package` runs here, not in the image build.** The Buildah pods below it contain Buildah and
 nothing else — no Python, no Go, no Node, no compiler. They `buildkite-agent artifact download` the
 artifacts and copy them into an image. That is why every Dockerfile under `services/` is now four
-lines, and why the build context is `dist/` rather than the source tree.
-
-> [!warning] **The build context change breaks `COPY` in a way that reads as a missing file.**
-> The context is `dist/`, so `COPY order-api.pex /app/` works and `COPY services/order-api/... `
-> fails with "no such file or directory" — naming a path that exists perfectly well in the repo you
-> are looking at. If you see that, check the context argument before you check the path.
-
-**Service discovery now keys off `services/*/BUILD`**, not `Dockerfile`:
+lines, and why the **build context is `dist/`** rather than the source tree:
 
 ```sh
-SERVICES="$(cd services && ls -d */ | sed 's#/##' | while read -r s; do
+buildah bud \
+  --tls-verify=false \
+  --file services/$SVC/Dockerfile \
+  --tag "$REGISTRY/shop/$SVC:$SHA" \
+  --tag "$REGISTRY/shop/$SVC:latest" \
+  dist
+```
+
+The last argument is the context. Each Dockerfile therefore `COPY`s its artifact by bare name —
+`order-api.pex`, `pricing.pex`, `order-worker` — which is what the `output_path` on each Pants target
+exists to guarantee. A `COPY services/order-api/…` would fail with "no such file or directory" on a
+path that exists perfectly well in the repo.
+
+`order-worker`'s Dockerfile is the whole of it, and it has one flag the PEX images do not need:
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --chmod=0755 order-worker /order-worker
+USER 65532:65532
+EXPOSE 9090
+ENTRYPOINT ["/order-worker"]
+```
+
+`--chmod=0755` is required, not cosmetic. `pants package` writes an executable binary, but the verify
+step uploads it as a Buildkite artifact and the build step downloads it, and **artifact transfer does
+not preserve file modes** — the bit is lost between the two pods and the container fails at runtime
+with `exec: "/order-worker": permission denied`, with no application output at all. The PEX services
+are immune only because they are invoked as `python /app/x.pex` rather than executed directly.
+
+**Both the package targets and the build steps are discovered, not listed.** A directory under
+`services/` with a `BUILD` file and a `Dockerfile` is a service, and that is the whole contract:
+
+```sh
+SERVICES="$(cd services && ls -d */ 2>/dev/null | sed 's#/##' | while read -r s; do
   [ -f "$s/BUILD" ] && [ -f "$s/Dockerfile" ] && echo "$s"
 done | sort | tr '\n' ' ')"
 ```
 
-A directory Pants does not know about cannot be built, tested or packaged — so it is not a service
-this pipeline can deliver, and pretending otherwise produces a build step that fails at `COPY`. See
-the open item in [§17.4](#174-source-roots-and-the-duplicate-module-trap): the Backstage skeleton does
-not yet emit a `BUILD` file, so a scaffolded service does not currently satisfy this test.
+`BUILD` rather than `Dockerfile` alone is the honest signal: a directory Pants does not know about
+cannot be linted, tested or packaged, so it is not a service this pipeline can deliver. The Backstage
+skeleton emits both files, which is what lets the paved path
+([§14.6](phase-5-developer-portal.md#146-paved-path-1--a-new-service)) add a service without anyone
+editing CI.
 
-**The `--build-arg VERSION` plumbing is gone entirely**, and it was never doing anything. See
-[§19.6](#196-the-version-stamp-that-never-was).
+**There are no `--build-arg`s.** The version a running service reports comes from `SERVICE_VERSION`,
+set by the Helm chart from the image tag
+([§10.1](phase-1-the-application.md#101-one-chart-two-workloads)) — one mechanism, applied uniformly
+to Python and Go alike, rather than a Go-specific link-time stamp that only one of the four images
+could ever have carried.
 
-### 19.6 The version stamp that never was
+The frontend and the portal get their own steps: neither consumes a Pants artifact, and the portal's
+build is measured in double-digit minutes, so it is `branches: "main"` only.
 
-The old `order-worker` Dockerfile did this:
+### 19.6 Two checks nothing else would catch
 
-```dockerfile
-ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build \
-      -trimpath \
-      -ldflags="-s -w -X main.version=${VERSION}" \
-      -o /out/order-worker .
+Some facts span two files in two languages with nothing connecting them. Those get a test.
+
+**The OpenAPI spec is derived, not authored.** Backstage's catalog reads `services/order-api/openapi.json`
+from git, but FastAPI builds that document from route signatures at runtime, so the checked-in copy
+can only ever be a snapshot. `services/order-api/BUILD` makes regenerating it a target, and a test
+fails when the two drift:
+
+```python
+python_sources(
+    name="tools",
+    sources=["openapi_dump.py"],
+    dependencies=[":lib"],
+)
+
+pex_binary(
+    name="dump-openapi",
+    entry_point="openapi_dump.py",
+    dependencies=[":tools"],
+)
+
+resource(
+    name="openapi-spec",
+    source="openapi.json",
+)
 ```
 
-and CI passed `--build-arg VERSION=$SHA` into it.
+```bash
+pants run services/order-api:dump-openapi > services/order-api/openapi.json
+```
 
-> [!warning] **`-X main.version` was a silent no-op for the entire life of this tutorial.**
-> `-ldflags "-X importpath.name=value"` sets a **string variable that already exists** in the compiled
-> package. `main.go` has no `var version string` — it reads `SERVICE_VERSION` from the environment at
-> startup, defaulting to `"dev"`:
->
-> ```go
-> version: getenv("SERVICE_VERSION", "dev"),
-> ```
->
-> When the symbol is absent, Go's linker does not error. It does not warn. It silently does nothing.
-> So the `ARG`, the `--build-arg`, the per-service `BUILD_ARGS` special case in the pipeline, and the
-> claim in [§3.2](phase-1-the-application.md#32-order-worker-go) that the SHA is stamped into the
-> binary were all describing a mechanism that had never once run.
->
-> The version a running `order-worker` actually reports comes from `SERVICE_VERSION`, set by the Helm
-> chart from the image tag ([§10.1](phase-1-the-application.md#101-one-chart-two-workloads)).
->
-> **The general lesson is about linker flags specifically: `-X` fails open.** Anything that
-> misconfigures silently and produces a plausible artifact needs a test that asserts the *outcome*,
-> not the flag. One `assert version != "dev"` in a smoke test would have caught this on day one.
->
-> Pants' `go_binary` does support `linker_flags`, so this is reinstatable — but the honest fix was to
-> delete the dead machinery, since `SERVICE_VERSION` from the chart already works and one mechanism
-> beats two.
+`:openapi-spec` is a `resource`, not code, so nothing infers it — the drift test reads it off disk by
+path, which is why `python_tests` lists it explicitly in `dependencies`. A hand-maintained API spec is
+a lie with a timestamp on it.
+
+**The frontend's proxy port must match the port `order-api`'s Service publishes.** `frontend/nginx.conf`
+says `proxy_pass http://order-api.shop.svc.cluster.local:80/orders`; the chart says
+`- { name: http, port: 80, targetPort: http }`. Point nginx at 8000 — order-api's *container* port,
+which nothing serves on the ClusterIP — and every order in the dashboard reads `HTTP 502` while a
+direct `curl` at order-api returns 202, sending you to look at the wrong service entirely. The chart
+is valid, the nginx config is valid, both images build, every pod is Ready. So `checks/` at the repo
+root asserts the two agree:
+
+```python
+python_tests(
+    name="tests",
+    sources=["test_*.py"],
+    # Config files from two other directories, read as plain text. Nothing
+    # infers these — there is no import to follow, which is exactly why the two
+    # were free to drift apart in the first place.
+    dependencies=[
+        "frontend:nginx_conf",
+        "deploy/charts/order-platform:order-api-template",
+    ],
+)
+```
+
+**`deploy/charts/order-platform/BUILD`**, and note where it is *not*:
+
+```python
+# Deliberately NOT in templates/. Helm renders every file under templates/ as a
+# manifest, so a BUILD file there fails the whole chart with
+# `YAML parse error on order-platform/templates/BUILD`.
+file(name="order-api-template", source="templates/order-api.yaml")
+```
+
+That is the pattern worth taking away: **when a fact is duplicated across a language boundary, the
+monorepo lets you assert it in a unit test.** It is the same argument as
+[§18.2](#182-generate-and-look-at-what-came-out), applied to config instead of to a `.proto`.
 
 ### 19.7 Commit
+
+Two files are now dead. `order-api`'s dependencies are resolved from `locks/python-default.lock`
+by Pants, so the uv pair that used to do it describes a build nobody runs — and a stale lockfile is
+worse than none, because the next person to read it will believe it.
+
+```bash
+git rm services/order-api/pyproject.toml services/order-api/uv.lock
+```
+
+Then verify and commit:
 
 ```bash
 pants lint check test ::
 pants package services/order-api:bin services/order-worker:bin services/pricing:bin
 ls -la dist/
 
-git add pants.toml 3rdparty locks protos services frontend .buildkite deploy
+git add pants.toml 3rdparty locks protos services frontend checks .buildkite deploy
 git commit -m "build: pants as the monorepo build system, one proto for two languages"
 git push
 ```

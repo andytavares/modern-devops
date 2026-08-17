@@ -344,3 +344,27 @@ Append-only. Newest last. One line per operation: date — what happened — pag
   the new tag and the app went `Healthy`. Worth knowing because the *correct* reading of
   `Synced`/`Degraded` here was "Argo's cache is lying", and every other signal pointed at the
   workload.
+
+- **2026-08-16** — **The tutorial was rewritten to read as one linear path, and the two editions were
+  collapsed into one source.** The brief: no sidebars narrating problems we hit, and a reader who
+  follows it step by step ends up with a working system on the first attempt. Twenty-three
+  `> [!warning]` callouts were removed — including the §9.4 subsection added earlier the same day —
+  and each correct setting now appears inline in the file the reader writes, with at most one
+  sentence of justification. Diagnostic content moved to Appendix B, which gained eight rows.
+  Two structural defects surfaced while doing it, both of which made the "works first try" claim
+  false. **`modern-devops-tutorial.md` was 19 sections behind `docs/`** — all of §17–§19, the entire
+  [[pants]]/[[grpc]]/[[vite]] phase — and 43 of its 76 shared sections had diverged, so anyone
+  reading the single file built half a platform and had no way to know. It is now *assembled* from
+  the phase files, in **build order rather than section-number order**: sorting by number puts §9's
+  STRICT mTLS before §10.5's "the pods come up 1/1 with no sidecar", and the document would
+  contradict itself. And **phase 7 never told the reader to wire `order-api` to `pricing`**, so the
+  canary had nothing to shift — §19.1 now covers the gRPC client, the deadline, and the no-fallback
+  502.
+  Three repo bugs were found by the same pass: a Pants `BUILD` file inside the Helm `templates/`
+  directory, which Helm renders as a manifest and which broke `helm template` outright; the portal's
+  `app-config` serving `http://` URLs to a page that must be loaded over `https`, so every API call
+  would be blocked as mixed content; and the scaffolded-service template running
+  `readOnlyRootFilesystem` with no writable `/tmp`, which would have crash-looped every service the
+  paved path produced. `checks/` now enforces what can be enforced: the single-file edition is
+  regenerated and compared, every listing must name a real path, and a listing showing a whole file
+  must show the current one. Pages: [[pants]], [[ingress-nginx]], [[backstage]], [[paved-paths]].

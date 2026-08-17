@@ -81,18 +81,10 @@ kubectl label namespace ingress-nginx istio-injection=enabled --overwrite
 kubectl get namespace -L istio-injection
 ```
 
-> [!warning] **A `kubectl label` on a namespace Argo CD manages does not survive.**
-> If you enrol `shop` and `floci` imperatively instead, it works — until the next teardown. Argo CD
-> recreates those namespaces from the manifests, which is exactly what `CreateNamespace=true` and the
-> `Namespace` objects in `deploy/platform/` are for, and the label does not come back with them.
-> Everything then starts *looking* fine and behaving wrongly: pods come up `1/1` instead of `2/2`, so
-> they have no sidecar, so STRICT mTLS refuses their traffic, so [[kiali]]'s graph is empty and the
-> `PodMonitor` — which addresses the sidecar's telemetry port — matches nothing at all. No error is
-> printed anywhere in that chain.
->
-> This is the general GitOps rule the hard way: **once a resource is under Argo CD, every field of it
-> is, including the ones you set by hand.** `ingress-nginx` is the exception here only because nothing
-> in `deploy/` declares that namespace.
+> **Put `istio-injection: enabled` in the namespace manifest in git, never on the command line.**
+> Once a namespace is under Argo CD, every field of it is — a hand-set label is dropped the next time
+> Argo CD recreates the namespace from `deploy/platform/`, and the pods that come back have no sidecar.
+> `ingress-nginx` is the exception above only because nothing in `deploy/` declares that namespace.
 
 | Namespace | Enrolled | Why |
 |---|---|---|
@@ -155,6 +147,39 @@ spec:
     mode: STRICT
 ```
 
+Before you apply it, every `Ingress` in the chart needs two annotations. `ingress-nginx` is enrolled
+in the mesh and `shop` is about to become STRICT, so the edge has to address its backend in a way
+Envoy can identify as a service — by ClusterIP rather than raw pod IPs, and with the upstream `Host:`
+rewritten to the service FQDN, because Envoy routes HTTP by authority, not by address. This is the
+`order-api` Ingress from [§10.1](phase-1-the-application.md#101-one-chart-two-workloads), with the
+annotations in place (the chart file carries the same pair under a longer comment); `frontend` and
+every scaffolded service carry them too, with their own name substituted:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: order-api
+  annotations:
+    # The edge is outside the mesh, the backend is inside it under STRICT mTLS:
+    # send to the ClusterIP, and rewrite the upstream Host to the service FQDN
+    # so Envoy can match the cluster and originate mTLS to it.
+    nginx.ingress.kubernetes.io/service-upstream: "true"
+    nginx.ingress.kubernetes.io/upstream-vhost: "order-api.{{ .Release.Namespace }}.svc.cluster.local"
+spec:
+  ingressClassName: {{ .Values.orderApi.ingress.className }}
+  rules:
+    - host: {{ .Values.orderApi.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: order-api
+                port: { name: http }
+```
+
 ```bash
 mkdir -p deploy/platform/istio
 kubectl apply -f deploy/platform/istio/peer-authentication.yaml
@@ -175,62 +200,6 @@ kubectl -n floci run probe --rm -it --restart=Never --image=curlimages/curl:8.11
 ```
 
 The first command runs in `default`, which has no injection, so its traffic arrives as plaintext and Envoy drops it. The second runs in `floci`, gets a sidecar, and speaks mTLS without a single line of application code knowing about it. **That difference is the entire value proposition** — identity is a property of the platform, not of your services.
-
-#### The one thing STRICT breaks that nobody warns you about
-
-You just enrolled `ingress-nginx` in the mesh and turned on STRICT. Both were correct.
-Together, they break every Ingress you have, and the error message points at the wrong thing:
-
-```
-upstream connect error or disconnect/reset before headers.
-reset reason: connection termination
-```
-
-That reads like the backend is down. It is not. Every pod is `2/2 Running` and answers
-fine from inside the cluster. What is actually happening is two separate mismatches, and
-you need both fixes:
-
-**1. NGINX talks to pod IPs, not Services.** By default the controller load-balances
-across raw endpoint addresses — `10.244.1.222:8000`, not the ClusterIP. Istio identifies
-destinations by *service*, and a bare pod IP does not name one, so the sidecar has nothing
-to originate mTLS to and falls back to plaintext.
-
-**2. NGINX preserves the browser's `Host:` header.** This is the half people miss. Envoy
-routes HTTP by authority, not by address — so even after you fix (1) and the connection is
-addressed to the ClusterIP, the header still says `app.localtest.me`. That hostname matches
-no service in the mesh. Envoy hands it to `PassthroughCluster`, which means "I do not know
-what this is, send it as-is" — plaintext, into a port that was just told to accept nothing
-but mTLS. The destination sidecar resets the connection, exactly as instructed.
-
-Two annotations, both required:
-
-```yaml
-metadata:
-  annotations:
-    nginx.ingress.kubernetes.io/service-upstream: "true"
-    nginx.ingress.kubernetes.io/upstream-vhost: "order-api.shop.svc.cluster.local"
-```
-
-Prove it worked, and do not accept a `200` as proof — a `200` only tells you bytes moved.
-Ask the destination sidecar what security policy it applied:
-
-```bash
-kubectl -n shop exec deploy/order-api -c istio-proxy -- \
-  pilot-agent request GET 'stats?filter=istio_requests_total' \
-  | grep reporter.destination | grep -o 'connection_security_policy\.[a-z_]*'
-# connection_security_policy.mutual_tls
-```
-
-`mutual_tls` — with `source_principal` reading
-`spiffe://cluster.local/ns/ingress-nginx/sa/ingress-nginx` — is the evidence. Anything
-reporting `none` or `unknown` means you have a working website and no mTLS at the edge,
-which is the outcome most people ship without noticing.
-
-> [!warning] Why this is worth a whole section: the failure is silent until it isn't.
-> Nothing warns you at apply time. `kubectl get pods` is green, `helm lint` passes, the
-> Ingress reports an address, and Argo says `Synced`/`Healthy`. The platform is telling
-> you it is fine, and the only component that disagrees is a browser.
-
 
 ### 9.5 Authorization: deny by default, then allow the paths that exist
 
@@ -371,6 +340,21 @@ git commit -m "feat(platform): istio with strict mtls and default-deny authz"
 
 `order-api` and `order-worker` don't exist yet, so §9.4's proof covers Floci only. The rest of the mesh — the ingress path, the authorization policies keyed on those two service accounts — becomes verifiable in [§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery), when Argo CD deploys the chart into the now-enrolled `shop` namespace. If a page load returns `RBAC: access denied` at that point, the policy in §9.5 is what to read first, and `istioctl analyze -n shop` is what to run.
 
+When it is running, do not accept a `200` from the browser as proof that the edge is meshed — a `200`
+only tells you bytes moved. Ask the destination sidecar which security policy it applied:
+
+```bash
+kubectl -n shop exec deploy/order-api -c istio-proxy -- \
+  pilot-agent request GET 'stats?filter=istio_requests_total' \
+  | grep reporter.destination | grep -o 'connection_security_policy\.[a-z_]*'
+# connection_security_policy.mutual_tls
+```
+
+`mutual_tls`, with `source_principal` reading
+`spiffe://cluster.local/ns/ingress-nginx/sa/ingress-nginx`, is the evidence. `none` or `unknown` means
+a working website with no mTLS at the edge, which is what you get without the two Ingress annotations
+in §9.4.
+
 ### 9.8 Canary: two versions of `pricing` behind one Service
 
 Everything above secures traffic. This section *steers* it — and it is the half of a service mesh that
@@ -414,21 +398,15 @@ spec:
     - { name: metrics, port: 9090, targetPort: metrics }
 ```
 
-> [!warning] **Istio detects gRPC from the Service **port name**. Get it wrong and this entire section silently does nothing.**
-> There is no `grpc:` stanza in a `VirtualService` — gRPC rides HTTP/2 and is routed by the ordinary
-> `http:` block. What tells Istio to treat this Service's traffic as HTTP/2 with gRPC semantics in the
-> first place is the **name of the port**: Istio's protocol selection maps the `grpc` / `grpc-*`
-> prefix to HTTP/2.
->
-> Name it `pricing`, or `tcp-grpc`, or leave it unnamed, and Istio falls back to **plain TCP
-> passthrough**. Weights, retries, timeouts and gRPC-status-aware outlier detection are all L7
-> features; under TCP passthrough none of them apply. The manifests still `kubectl apply` cleanly,
-> Kiali still draws a line, and traffic still flows — it just flows round-robin, ignoring every
-> number you wrote. **A config that applies successfully and does nothing is the worst failure mode
-> in this phase**, and it is one character of a port name away.
->
-> Check it with `istioctl analyze -n shop`, or directly:
-> `kubectl -n shop get svc pricing -o jsonpath='{.spec.ports[*].name}'`.
+**The port must be named `grpc`.** There is no `grpc:` stanza in a `VirtualService` — gRPC rides
+HTTP/2 and is routed by the ordinary `http:` block, and what tells Istio to treat this Service's
+traffic as HTTP/2 with gRPC semantics is the port name: Istio's protocol selection maps the `grpc` /
+`grpc-*` prefix to HTTP/2. Name it anything else and Istio falls back to plain TCP passthrough, where
+weights, retries, timeouts and gRPC-status-aware outlier detection — all L7 features — simply do not
+apply, while the manifests still apply cleanly and traffic still flows round-robin.
+
+Confirm with `kubectl -n shop get svc pricing -o jsonpath='{.spec.ports[*].name}'`, or
+`istioctl analyze -n shop`.
 
 #### `DestinationRule` — subsets, and the pool policy
 
@@ -623,13 +601,6 @@ interval, and because v2 discounts 10% at `quantity >= 3` the totals visibly cha
 between two identical builds proves the routing works; a canary between two *different behaviours*
 proves you would have noticed if the new one were wrong.
 
-> [!warning] **A stale citation in the chart, recorded rather than corrected here.**
-> `deploy/charts/order-platform/templates/pricing.yaml` carries the comment *"Istio subsets select on
-> this label (§9.6 DestinationRule)"*. The `DestinationRule` is **§9.8**, this section; §9.6 is the
-> metrics problem. The manifest comment is wrong, the section number here is right, and the fix
-> belongs in the manifest — noted rather than silently changed, because a documentation pass should
-> not be editing deployed YAML.
-
 ### 9.9 Break it on purpose: fault injection
 
 A canary tells you the routing works. It tells you nothing about what happens when `pricing` is slow —
@@ -675,13 +646,13 @@ What to watch, in the order it becomes visible:
 | [[kiali]] | elevated error rate on `pricing`, and pods being **ejected** from the pool |
 
 That last row is the subtle one and the reason this drill is worth running. A client-side injected
-delay is observed by `order-api`'s **own sidecar** as a gateway timeout against the `pricing` cluster
+delay registers in `order-api`'s **own sidecar** as a gateway timeout against the `pricing` cluster
 — so it counts toward `consecutive5xxErrors: 3`, and Envoy starts ejecting pricing pods that are
 perfectly healthy. The fault is in the proxy, not the pod, and outlier detection cannot tell the
 difference.
 
 **That is not a bug in the drill; it is the lesson.** Outlier detection ejects on *observed symptoms*,
-and a symptom observed at the client cannot distinguish "this pod is sick" from "the path to this pod
+and a symptom seen at the client cannot distinguish "this pod is sick" from "the path to this pod
 is sick". In production this is how a network problem turns into a capacity problem: every client
 independently decides the backends are bad and ejects them, and a service with no failing pods loses
 half its pool.

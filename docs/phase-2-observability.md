@@ -31,7 +31,7 @@ helm repo update
 helm search repo prometheus-community/kube-prometheus-stack --versions | head -3
 ```
 
-Pin whatever the top line reports; `82.14.1` is known-good.
+Pin whatever the top line reports; `88.3.0` is known-good and is the version used below.
 
 **`infra/monitoring-values.yaml`**
 
@@ -89,7 +89,7 @@ helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
 kubectl -n monitoring get pods
 ```
 
-> **`serviceMonitorSelectorNilUsesHelmValues: false` is the single most useful line in that file.** With the default (`true`), Prometheus only picks up ServiceMonitors labelled `release: monitoring`. Our chart sets that label deliberately — but any chart that doesn't will be silently ignored, with no error anywhere. Turning the restriction off trades a little namespace hygiene for not losing an afternoon.
+> **`serviceMonitorSelectorNilUsesHelmValues: false` is the single most useful line in that file.** With the default (`true`), Prometheus only picks up ServiceMonitors labelled `release: monitoring`. Our chart sets that label deliberately — but any chart that doesn't will be silently ignored, with no error anywhere. Turning the restriction off trades a little namespace hygiene for monitors that get discovered whoever shipped them.
 
 Grafana is now at <http://grafana.localtest.me> (`admin` / `admin`).
 
@@ -98,7 +98,7 @@ Grafana is now at <http://grafana.localtest.me> (`admin` / `admin`).
 The CRDs exist now, so turn the monitor on. **Which one depends on where you are in the build**, and
 right now there is no service mesh, so Prometheus can talk to your pods directly:
 
-```bash
+```yaml
 # In deploy/charts/order-platform/values.yaml — NOT the env/local overlay,
 # which Buildkite rewrites once you reach Phase 3.
 serviceMonitor:
@@ -300,13 +300,20 @@ git push
 
 Everything in [§9](phase-4-service-mesh.md#9-istio-the-service-mesh) is invisible. mTLS either works or it doesn't; an `AuthorizationPolicy` either matches or it doesn't; and when it doesn't, the symptom is a 403 in a log somewhere. Kiali reads the same Prometheus you just installed plus Istio's configuration, and draws the answer.
 
-It goes here, not in §9, for one reason: **without Prometheus there is no graph.** Kiali's topology is derived entirely from `istio_requests_total` — the metric the merged endpoint in [§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created) gets you. Install Kiali before Prometheus and you get an empty page with no error.
+It is documented here, next to Prometheus, because **without Prometheus there is no graph**: Kiali's
+topology is derived entirely from `istio_requests_total`, and it reads that metric out of the
+Prometheus you just installed.
+
+**Run this section after [Phase 4](phase-4-service-mesh.md), not now.** Kiali installs into
+`istio-system` and needs that namespace, the mesh, and the merged-metrics scrape from
+[§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created) to exist first. Come back to
+it when [§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created) is done.
 
 ```bash
 helm repo add kiali https://kiali.org/helm-charts
 helm repo update
 
-helm install kiali-server kiali/kiali-server \
+helm upgrade --install kiali-server kiali/kiali-server \
   --namespace istio-system --version 2.30.0 \
   --set auth.strategy=anonymous \
   --set external_services.prometheus.url=http://monitoring-kube-prometheus-prometheus.monitoring:9090 \
