@@ -1,9 +1,16 @@
 # syntax=docker/dockerfile:1.7
 #
-# The CI image for the verify step. Built once by hand and pushed to Nexus:
+# The CI image for the verify step. Built by hand and pushed to Nexus:
 #
-#   buildah bud --file .buildkite/pants-ci.Dockerfile -t nexus:8082/ci/pants:0.13.2 .
-#   buildah push nexus:8082/ci/pants:0.13.2
+#   buildah bud --file .buildkite/pants-ci.Dockerfile -t nexus:8082/ci/pants:0.13.2-2 .
+#   buildah push nexus:8082/ci/pants:0.13.2-2
+#
+# The tag is the scie-pants version plus a build revision, and the revision is
+# not decoration: the pipeline pins this tag, so anything added to the image —
+# helm, pyyaml, a Go bump — is a new tag and a matching edit to pipeline.sh.
+# Rebuilding over the existing tag would make it mutable, which is the one
+# thing §10.3 says a tag must never be, and the failure it produces is a step
+# that worked yesterday failing today with `helm: not found`.
 #
 # That builds for the host's architecture. The Dockerfile also builds for the
 # other one — pass `--platform linux/amd64` (or linux/arm64) if the machine you

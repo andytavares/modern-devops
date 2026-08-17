@@ -8063,7 +8063,7 @@ The Python step and the Go step are gone. In their place, one step in `.buildkit
             imagePullSecrets:
               - name: nexus-pull
             containers:
-              - image: nexus:8082/ci/pants:0.13.2
+              - image: nexus:8082/ci/pants:0.13.2-2
                 resources:
                   requests: { cpu: "1", memory: 2Gi }
                   limits:   { memory: 4Gi }

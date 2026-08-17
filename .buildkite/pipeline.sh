@@ -127,7 +127,7 @@ steps:
               # pantsbuild.pants==2.33.0` fails, because modern Pants ships
               # only as the scie-pants launcher binary. Baking that binary
               # into an image keeps every build pulling from Nexus.
-              - image: nexus:8082/ci/pants:0.13.2
+              - image: nexus:8082/ci/pants:0.13.2-2
                 resources:
                   requests: { cpu: "1", memory: 2Gi }
                   limits:   { memory: 4Gi }

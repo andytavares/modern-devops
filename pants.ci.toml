@@ -23,22 +23,22 @@ colors = true
 # hits cache on everything, except slower.
 log = true
 
-[test]
-use_coverage = true
-
-[coverage-py]
-# XML because it is the format every coverage service and Buildkite annotation
-# plugin reads. It lands in dist/coverage/python/coverage.xml.
+# Coverage is deliberately NOT enabled here.
 #
-# Note that the verify step's `artifact_paths: "dist/*"` does NOT pick it up —
-# that glob matches one level and coverage.xml is two deep. Deliberate for now:
-# widening the glob would also change what the Buildah steps download into the
-# image build context. Widen it the day something actually consumes the report.
-report = ["xml"]
-# Report over every file Pants knows about, not just the ones the tests that
-# ran happened to import. Without this a module with no tests at all is simply
-# absent from the report rather than showing as 0%.
-global_report = true
+# `[test] use_coverage = true` is in the documented CI template, and on this
+# repo it crashes Pants 2.33.0 outright:
+#
+#   pants/backend/go/util_rules/coverage_output.py, go_render_coverage_report
+#     raw_coverage_profile=digest_contents[0].content
+#   IndexError: tuple index out of range
+#
+# The flag is global, so it turns on Go coverage too, and the Go backend
+# indexes the first element of an empty result when a test target produces no
+# profile. There is no per-language switch.
+#
+# Nothing consumed the report anyway: `artifact_paths: "dist/*"` matches one
+# level deep and the report lands two deep. Turn this on the day something
+# reads it, and scope it to Python when Pants can.
 
 [pytest]
 # -vv names each test in the log, which is what you want when the only record
