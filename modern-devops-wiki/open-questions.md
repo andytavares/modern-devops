@@ -65,6 +65,15 @@ them.
   (~1.32–1.36)? Appendix A gives the window but not the pinned version. *To settle:*
   `kind create cluster` then `kubectl version`.
 
+## Networking
+
+- **Would swapping `kindnetd` for Calico or Cilium break anything else here?** [[cni]] establishes that
+  NetworkPolicy is inert on this cluster and that changing the CNI is the prerequisite for closing
+  Appendix C's gap. What that costs is unmeasured: kind documents `disableDefaultCNI` as an advanced
+  feature with limited support, and the interaction with [[istio]]'s iptables redirection and with
+  `hostPort` on the control-plane node ([[ingress-nginx]]) is untested here. *To settle:* stand up a
+  second cluster with `disableDefaultCNI: true` plus Calico and run §15's end-to-end checks.
+
 ## Nexus
 
 - **Minimum privilege set for a push-only CI user.** §5.5 uses `nx-admin` and Appendix C calls this the

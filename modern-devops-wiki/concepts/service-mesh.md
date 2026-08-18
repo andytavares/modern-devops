@@ -42,6 +42,10 @@ attacker with a shell in another namespace cannot mint a certificate for `sa/ord
 this platform restricts packets. **Use both.** Appendix C names default-deny NetworkPolicies as a real
 gap and is explicit that they are complementary, not a substitute.
 
+With one caveat specific to this cluster: **the CNI here is `kindnetd`, which does not enforce
+NetworkPolicy at all**, so a policy written today would apply cleanly and do nothing. Closing that gap
+means changing the CNI first — see [[cni]].
+
 ## The costs, all of which this repo pays
 
 - **RAM.** One Envoy per pod, ~50–100 MB, plus `istiod` at ~500 MB. Most of a gigabyte on this
@@ -68,4 +72,4 @@ live in one language, one API, one place to read the whole picture.
 
 ## Related
 
-[[istio]] · [[mtls]] · [[kiali]] · [[observability]] · [[apache-kafka]] · [[ingress-nginx]] · [[timeouts-and-retries]] · [[port-naming]]
+[[istio]] · [[mtls]] · [[cni]] · [[kiali]] · [[observability]] · [[apache-kafka]] · [[ingress-nginx]] · [[timeouts-and-retries]] · [[port-naming]]

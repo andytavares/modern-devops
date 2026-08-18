@@ -64,3 +64,18 @@ files, a record of what was learned.
   The other `wiki` mentions in `docs/` were left alone deliberately: `docs/README.md` and §14.1's
   *"a wiki page titled How to add a service"* are generic prose about wikis, not references to this
   directory.
+
+- **2026-08-17** — **Asked: what is the CNI, in simple terms.** The wiki had **nothing** — no mention of
+  CNI, kindnet, or pod networking anywhere in `modern-devops-wiki/`, `docs/` or `infra/`. Researched
+  against kind's configuration docs via Context7 and confirmed against the repo.
+
+  New page [[cni]], plus sections on [[kind]] and [[kubernetes]] and a caveat added to
+  [[service-mesh]]. Verified facts: kind's default CNI is **`kindnetd`**, the default pod subnet is
+  **`10.244.0.0/16`**, and `disableDefaultCNI: true` is the documented (advanced, limited-support)
+  replacement path. `infra/kind-cluster.yaml` has no `networking:` block, so all defaults apply.
+
+  **The finding worth having asked for:** `kindnetd` does not enforce NetworkPolicy, so Appendix C's
+  "no NetworkPolicies" gap cannot be closed by writing one — the object would apply cleanly and do
+  nothing. Closing it means replacing the CNI first. That is now stated on [[cni]] and cross-linked
+  from [[service-mesh]], which previously said "use both" without noting that half of it is currently
+  unavailable on this cluster.

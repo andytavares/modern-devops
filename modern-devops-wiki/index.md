@@ -112,6 +112,7 @@ that span tools — read those when the question is "why is it like this", not "
 - [[observability]] — what exists, the Istio interaction, and the gaps
 - [[paved-paths]] — the rule that makes a golden path actually get used
 - [[kraft]] — Kafka without ZooKeeper
+- [[cni]] — how pods get networking at all, and why NetworkPolicy is inert on this cluster
 - [[enterprise-substitution]] — why OpenBao, Nexus CE and Floci, and exactly where each stops being equivalent
 - [[progressive-build]] — why a listing in `docs/` that disagrees with the repo is usually correct
 - [[dependency-inference]] — what Pants infers, and where to stop trusting it

@@ -40,6 +40,12 @@ every namespace boundary here would be a *cluster* boundary in production):
 | `buildkite` | [[buildkite]] agent-stack-k8s controller and its build Jobs | no |
 | `backstage` | [[backstage]] and its [[postgresql]] | no |
 
+## Networking is delegated, not implemented
+
+Kubernetes defines the pod-network contract and hands the work to a **CNI** plugin. On this platform
+that is [[kind]]'s built-in `kindnetd`, unconfigured. See [[cni]] for what that does and does not buy
+you — the short version is that it satisfies the contract and enforces no NetworkPolicy.
+
 ## Things this platform makes you learn the hard way
 
 **A Deployment's `selector` is immutable.** The chart's `op.labels` helper emits the full recommended
@@ -72,4 +78,4 @@ fails only at runtime. That gap is why `checks/verify_chart.py` exists — see [
 
 ## Related
 
-[[kind]] · [[containerd]] · [[reconciliation]] · [[helm]] · [[argo-cd]] · [[istio]]
+[[kind]] · [[cni]] · [[containerd]] · [[reconciliation]] · [[helm]] · [[argo-cd]] · [[istio]]

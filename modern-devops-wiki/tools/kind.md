@@ -55,6 +55,27 @@ via `hostPort`, not through the Service. Do not install MetalLB to "fix" it (App
 **`deleteClaim: true` on the Kafka node pools is a kind-ism** — right for a laptop, catastrophic in
 production (§8.3). See [[strimzi]].
 
+## The CNI, which this repo never configures
+
+Kubernetes does not implement pod networking. It states a contract — every pod gets its own IP and can
+reach every other pod without NAT — and delegates the work to a **CNI (Container Network Interface)**
+plugin. See [[cni]].
+
+kind ships its own, **`kindnetd`**, and installs it unless told otherwise. `infra/kind-cluster.yaml`
+has no `networking:` block at all, so the defaults apply: kindnetd, pod subnet `10.244.0.0/16`
+(https://kind.sigs.k8s.io/docs/user/configuration, as of 2026-08).
+
+Replacing it is one field, and kind documents it as an advanced feature with limited support:
+
+```yaml
+networking:
+  disableDefaultCNI: true    # then install Calico, Cilium, etc. yourself
+```
+
+**kindnetd is deliberately minimal and does not enforce NetworkPolicy.** That is worth knowing before
+you read Appendix C's "no NetworkPolicies" gap as something you could close by writing one — on this
+cluster the object would apply cleanly and do nothing. See [[cni]] and [[service-mesh]].
+
 ## Cost of the choice
 
 The cluster is imperative: `kind create cluster` is a command, not a manifest, so the one thing this
