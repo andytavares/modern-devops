@@ -23,7 +23,7 @@ rules — they are binding.
 
 ### 1. Orient (always, cheaply)
 
-Read `wiki/index.md`. It is the map. Pick the 1–4 pages most likely to hold the answer and read them.
+Read `modern-devops-wiki/index.md`. It is the map. Pick the 1–4 pages most likely to hold the answer and read them.
 Do not read the whole wiki. Do not read `modern-devops-tutorial.md` in full — it is ~4700 lines;
 grep it for the section you need (`grep -n "§9.5" -A 30`) or read a specific line range.
 
@@ -82,9 +82,9 @@ If step 3 produced anything the wiki didn't have, integrate it **before you fini
   frontmatter and section layout of a sibling page in the same directory.
 - **Cross-reference**: add `[[wikilinks]]` both ways. A new page needs at least one inbound link from
   an existing page, or it is an orphan.
-- **Update `wiki/index.md`** if you created a page or meaningfully changed what one covers.
-- **Append to `wiki/log.md`** — one line, dated: what was asked, what changed, which pages.
-- **Update `wiki/open-questions.md`** — remove anything you just answered; add anything you hit and
+- **Update `modern-devops-wiki/index.md`** if you created a page or meaningfully changed what one covers.
+- **Append to `modern-devops-wiki/log.md`** — one line, dated: what was asked, what changed, which pages.
+- **Update `modern-devops-wiki/open-questions.md`** — remove anything you just answered; add anything you hit and
   could not resolve, with a note on what it would take to resolve it.
 
 Then tell the user, in one or two lines, what the wiki gained. If nothing was learned, say that too —
@@ -103,7 +103,7 @@ Then tell the user, in one or two lines, what the wiki gained. If nothing was le
 
 > **User:** "why does Prometheus scrape 15020 instead of the app port?"
 
-1. Read `wiki/index.md` → `wiki/tools/istio.md`, `wiki/concepts/observability.md`.
+1. Read `modern-devops-wiki/index.md` → `modern-devops-wiki/tools/istio.md`, `modern-devops-wiki/concepts/observability.md`.
 2. `istio.md` covers merged metrics but doesn't say whether 15020 is exempt from STRICT mTLS or why.
 3. Context7 → `/websites/istio_io` → query "merged metrics port 15020 and mTLS". Confirms the
    telemetry port and that securing it is opt-in (the 15091 task), i.e. plaintext by default.

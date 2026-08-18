@@ -6888,7 +6888,7 @@ backend_packages = [
 pants_ignore.add = [
   "/deploy/backstage/templates",
   "/portal",
-  "/wiki",
+  "/modern-devops-wiki",
   "/raw",
   "/frontend/node_modules",
   "/frontend/dist",

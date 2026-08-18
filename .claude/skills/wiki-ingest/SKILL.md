@@ -17,8 +17,8 @@ and rules first — they are binding. The human curates sources; you do the book
 
 | Source | Where it lands |
 |---|---|
-| A tool, library, framework, CLI | `wiki/tools/<kebab-name>.md` |
-| An idea spanning tools (GitOps, mTLS, paved paths) | `wiki/concepts/<kebab-name>.md` |
+| A tool, library, framework, CLI | `modern-devops-wiki/tools/<kebab-name>.md` |
+| An idea spanning tools (GitOps, mTLS, paved paths) | `modern-devops-wiki/concepts/<kebab-name>.md` |
 | A URL, article, release note, doc excerpt | Save the *content* under `raw/`, then integrate into the pages it affects |
 | A decision the user just made | The `## Why this, not the alternative` section of the affected tool page, plus a `log.md` line |
 
@@ -35,7 +35,7 @@ where it came from and when. **`raw/` is append-only: never edit or delete what'
 
 ### 2. Check for a home before making one
 
-Read `wiki/index.md`. If a page already covers this, **update it** — a second page on the same
+Read `modern-devops-wiki/index.md`. If a page already covers this, **update it** — a second page on the same
 subject is worse than a stale one. Only create when there is genuinely no home.
 
 ### 3. Write the page
@@ -86,9 +86,9 @@ it compete with, what concept does it instantiate? A new page with no inbound li
 
 ### 6. Update the bookkeeping
 
-- `wiki/index.md` — add the page under the right grouping, with its one-line description.
-- `wiki/log.md` — append one dated line: source, what changed, which pages.
-- `wiki/open-questions.md` — add anything the source raised and didn't settle.
+- `modern-devops-wiki/index.md` — add the page under the right grouping, with its one-line description.
+- `modern-devops-wiki/log.md` — append one dated line: source, what changed, which pages.
+- `modern-devops-wiki/open-questions.md` — add anything the source raised and didn't settle.
 
 ### 7. Report
 
