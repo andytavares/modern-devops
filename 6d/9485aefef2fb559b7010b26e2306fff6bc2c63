@@ -1,0 +1,150 @@
+modern-devops-wiki/concepts/port-naming.md
+  s_24b2d14dde4faa::t_8d45be39359176 3-5,8,11,13,15-17,19,21-26,28,30,32-33,35-39,41,43-46,48-51,53,55-57,59-75
+  s_24b2d14dde4faa::t_b352feb22b2ba0 1-2,6-7,9-10,12,14,18,20,27,29,31,34,40,42,47,52,54,58
+modern-devops-wiki/concepts/enterprise-substitution.md
+  s_24b2d14dde4faa::t_b88402d5dee7b6 3-5,8,11,13,15-18,20-21,23-24,26,28,30-32,34,36,38-45,47-77
+  s_24b2d14dde4faa::t_442cdf1acd102c 1-2,6-7,9-10,12,14,19,22,25,27,29,33,35,37,46
+.claude/skills/wiki-ingest/SKILL.md
+  s_24b2d14dde4faa::t_0e80101534616b 20-21,38,89-91
+modern-devops-wiki/concepts/health-checks.md
+  s_24b2d14dde4faa::t_8d45be39359176 2-5,8,11,13,15-19,21-23,25,27-31,33-35,37-46,48-78,80,82-84,86,88
+  s_24b2d14dde4faa::t_ba441d42304ae0 1,6-7,9-10,12,14,20,24,26,32,36,47,79,81,85,87
+modern-devops-wiki/concepts/timeouts-and-retries.md
+  s_24b2d14dde4faa::t_8d45be39359176 3-5,8,11,13,15-17,19-23,25,27-31,33-35,37-39,41-44,46,48-50,52-54,56-106
+.claude/skills/wiki-lint/SKILL.md
+  s_24b2d14dde4faa::t_9282a5103fff04 23
+  s_24b2d14dde4faa::t_0e80101534616b 50,115
+modern-devops-wiki/tools/argo-cd.md
+  s_24b2d14dde4faa::t_1551ee683cf29b 3-8,12,15-103
+  s_24b2d14dde4faa::t_2a6c72dba61771 1-2,9-11,13-14
+CLAUDE.md
+  s_24b2d14dde4faa::t_9282a5103fff04 18-19,36-37,53-54
+  s_24b2d14dde4faa::t_0e80101534616b 59
+pants.toml
+  s_24b2d14dde4faa::t_fec9c7994c5d06 35
+modern-devops-wiki/concepts/cross-compilation.md
+  s_24b2d14dde4faa::t_b88402d5dee7b6 3-5,8,11,13,15-32,34-49,52-55,57,59-65,67-69,71-72,74,76-79,81,83
+  s_24b2d14dde4faa::t_f1ba7d5418b4d2 1-2,6-7,9-10,12,14,33,50-51,56,58,66,70,73,75,80,82
+modern-devops-wiki/index.md
+  s_24b2d14dde4faa::t_40dcd2fa069e53 1,3,5-8,10-26,28,30-32,34,36-50,52,54-59,61-66,68-71,73-75,77-127
+  s_24b2d14dde4faa::t_de2c2b5bc2257c 9
+modern-devops-wiki/log.md
+  s_24b2d14dde4faa::t_e2177148452f1f 1-66
+modern-devops-wiki/open-questions.md
+  s_24b2d14dde4faa::t_e2177148452f1f 1-124
+modern-devops-wiki/concepts/at-least-once-delivery.md
+  s_24b2d14dde4faa::t_8d45be39359176 2-5,8,11,13,15-16,18-20,22,24-25,27-30,32,34-36,38-40,42,44-45,47-49,51-52,54,56-58,60-61,63-80
+modern-devops-tutorial.md
+  s_24b2d14dde4faa::t_31e02952e3673e 6891
+modern-devops-wiki/tools/fastapi.md
+  s_24b2d14dde4faa::t_1551ee683cf29b 3-5,7-8,15,17,19-21,23,25-27,29-31,33-35,37-38,40-84
+modern-devops-wiki/concepts/dependency-inference.md
+  s_24b2d14dde4faa::t_b88402d5dee7b6 2-5,8,11-38,40-55,57-59,61,63-66,68,70
+  s_24b2d14dde4faa::t_b9e2917889f745 1,6-7,9-10,39,56,60,62,67,69
+docs/phase-7-polyglot-monorepo.md
+  s_24b2d14dde4faa::t_fec9c7994c5d06 126
+.claude/skills/wiki-ask/SKILL.md
+  s_24b2d14dde4faa::t_0e80101534616b 26,85-87,106
+modern-devops-wiki/concepts/progressive-build.md
+  s_24b2d14dde4faa::t_b88402d5dee7b6 2-5,8,11,13,15-17,19-21,23,25-31,33,35-37,39-41,43-46,48,50-52,54,56-59,61-73
+modern-devops-wiki/tools/buildkite.md
+  s_24b2d14dde4faa::t_1551ee683cf29b 3-4,6-8,15-108
+modern-devops-wiki/concepts/dynamic-pipelines.md
+  s_24b2d14dde4faa::t_139d123145cf02 3-5,11,13,15-21,23,25-27,29-32,34,36-38,40-42,44,46-48,50-51,53-70
+modern-devops-wiki/concepts/gitops.md
+  s_24b2d14dde4faa::t_ef2e4fc056d1e9 3,5-6,16-19,21,23-25,27-29,31,33-35,37-38,40-42,44,46-68
+modern-devops-wiki/concepts/immutable-image-tags.md
+  s_24b2d14dde4faa::t_91a771b460c242 3-5,11,13,15-18,20,22-25,27,29-32,34-36,38,40-44,46-61
+modern-devops-wiki/concepts/kraft.md
+  s_24b2d14dde4faa::t_d3ff487d6c0f36 3,5-6,9,12,14,16-18,20-21,23,25,27-30,32-33,35-36,38-56
+modern-devops-wiki/concepts/mtls.md
+  s_24b2d14dde4faa::t_1c2c24ebdbda7f 3-5,11,13,15-16,18-40,43-56,58-62,64-65,67,69-73,75,77-78,80,82
+modern-devops-wiki/concepts/observability.md
+  s_24b2d14dde4faa::t_dda58bc975ec46 1-83
+modern-devops-wiki/concepts/paved-paths.md
+  s_24b2d14dde4faa::t_b02f1c8b421c8e 4-5,8,11,13,15-18,20-21,23,25-26,28-35,37,39-42,44,46-80
+modern-devops-wiki/concepts/reconciliation.md
+  s_24b2d14dde4faa::t_0a2a39222659bc 3,5-6,9,12,14,17,20,22-27,29-31,33-48,50-51,53-54,56,58-61,63,65
+modern-devops-wiki/concepts/secrets-management.md
+  s_24b2d14dde4faa::t_adaa8e95250cc6 3-5,11,13,15-20,22-23,25,27-28,30-34,36,38,40-89
+modern-devops-wiki/concepts/service-mesh.md
+  s_24b2d14dde4faa::t_8a3adcf9ab0d5b 1-71
+modern-devops-wiki/concepts/supply-chain-choke-point.md
+  s_24b2d14dde4faa::t_ac8bcb503a04c8 4-5,11,13,15-17,19-22,24,26-33,35,37-38,40-61,63,65-68,70,72-73,75,77
+modern-devops-wiki/tools/apache-kafka.md
+  s_24b2d14dde4faa::t_2340f6da3ef0aa 4-5,7-8,15,17,19-21,23-24,26-45,47-50,52-55,57,59-61,63,65-69,71-72,74,76
+modern-devops-wiki/tools/backstage.md
+  s_24b2d14dde4faa::t_ce326df0787927 3-9,15,18-153
+modern-devops-wiki/tools/buildah.md
+  s_24b2d14dde4faa::t_8ac4353262d24c 3-4,7-8,15,19,21-24,27-94
+modern-devops-wiki/tools/containerd.md
+  s_24b2d14dde4faa::t_b7463fbb3970aa 3-5,7-8,15,17,19,21-32,34-35,37,39-42,44-46,48,50-54,56,58
+modern-devops-wiki/tools/docker.md
+  s_24b2d14dde4faa::t_a5bcb779cde676 3-8,15,19-22,24,26-31,33-35,37-39,41-45,47,49-51,53,55
+modern-devops-wiki/tools/external-secrets-operator.md
+  s_24b2d14dde4faa::t_07f24794ca04e0 3-4,7-8,12,15,19-91
+modern-devops-wiki/tools/floci.md
+  s_24b2d14dde4faa::t_98a5412958b962 3-4,7-8,15,17,19-21,23-97,99
+modern-devops-wiki/tools/franz-go.md
+  s_24b2d14dde4faa::t_64cc547d84a3d5 3-8,12,15,17,19-23,25-28,30,32,34-38,40-43,45,47-51,53-55,57-58,60-61,63-64,66,68
+modern-devops-wiki/tools/go.md
+  s_24b2d14dde4faa::t_828df84af70b1f 3-5,7-8,15-82
+modern-devops-wiki/tools/grafana.md
+  s_24b2d14dde4faa::t_f26e7be8d7456d 4-5,7-9,15,17,19-22,24-26,28-30,32,34-36,38-40,42-55
+modern-devops-wiki/tools/grpc.md
+  s_24b2d14dde4faa::t_e8530521921466 3-5,7-8,12,15,17,19-21,23-24,26-42,48-112
+modern-devops-wiki/tools/helm.md
+  s_24b2d14dde4faa::t_53eae9b9dd5d49 2-9,12,15,17,19-22,24,26,28,30-55,57-59,61-64,66,68
+modern-devops-wiki/tools/ingress-nginx.md
+  s_24b2d14dde4faa::t_15ad9ca9ac0f0b 4-5,7-8,15,19-71
+modern-devops-wiki/tools/istio.md
+  s_24b2d14dde4faa::t_2b54db5470df67 4-5,7-8,15,19-22,24,26-27,29,31-131,133,135-137,139-142,144,146-154
+modern-devops-wiki/tools/kiali.md
+  s_24b2d14dde4faa::t_a8385757de110f 3-9,12,15-33,36-75
+modern-devops-wiki/tools/kind.md
+  s_24b2d14dde4faa::t_6325d4c1f6ed4d 3-4,7-8,12,15,19-20,24-25,27-32,34-35,37,39-42,44-46,48-50,52-53,55-56,58,60-66
+modern-devops-wiki/tools/kubernetes.md
+  s_24b2d14dde4faa::t_dbefa28cca490a 3-5,7-8,15,19-22,26-27,31-75
+modern-devops-wiki/tools/mypy.md
+  s_24b2d14dde4faa::t_4e46b8ba4fc66c 1-69
+modern-devops-wiki/tools/openbao.md
+  s_24b2d14dde4faa::t_961c34ca4adb53 3-8,12,15,17,19-20,22,24-107
+modern-devops-wiki/tools/order-platform.md
+  s_24b2d14dde4faa::t_89770d81866584 1-105
+modern-devops-wiki/tools/pants.md
+  s_24b2d14dde4faa::t_70a6ec1795f208 3-8,15-146
+modern-devops-wiki/tools/pex.md
+  s_24b2d14dde4faa::t_277c212b2231db 3-5,7-8,15-101
+modern-devops-wiki/tools/postgresql.md
+  s_24b2d14dde4faa::t_833562504a5381 3,5,7-8,15,19-21,23,25-33,35-38,40-46,48,50-66
+modern-devops-wiki/tools/prometheus.md
+  s_24b2d14dde4faa::t_bb2da9a4929a3c 1-98
+modern-devops-wiki/tools/pydantic.md
+  s_24b2d14dde4faa::t_789488946a8333 1-68
+modern-devops-wiki/tools/sonatype-nexus.md
+  s_24b2d14dde4faa::t_137f335f3cb7eb 3-5,7-8,15,17,19,21-26,28-30,32-34,36-106
+modern-devops-wiki/tools/strimzi.md
+  s_24b2d14dde4faa::t_5bbc81f67596af 3-4,7-8,15,17,19-22,26-68
+modern-devops-wiki/tools/uv.md
+  s_24b2d14dde4faa::t_da4423c2812ac8 3-4,7-9,15,17,19,21-27,29-31,33,35-43,45,53,56-59,61,63-68,70-73,75,77,79
+modern-devops-wiki/tools/vite.md
+  s_24b2d14dde4faa::t_5ba038a01e2c87 3-8,15-67
+modern-devops-wiki/.obsidian/workspace.json
+  s_24b2d14dde4faa::t_0bbbd3494dea50 14-21,44-46,187-204,209
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "6d9485aefef2fb559b7010b26e2306fff6bc2c63",
+  "prompts": {},
+  "sessions": {
+    "s_24b2d14dde4faa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8680285c-c9ab-4230-a95f-6285cfe178f1",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
