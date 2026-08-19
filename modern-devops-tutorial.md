@@ -3153,15 +3153,47 @@ Nothing has built your services yet. CI does that from [Phase 3](#) onward; righ
 now you are the CI.
 
 ```bash
+set -e     # a failed build must not fall through to the push, or to the next service
+
 SHA="$(git rev-parse --short=12 HEAD)"
+NEXUS_IP=172.18.255.10      # the address §5.3 pinned with `docker run --ip`
 
 for svc in order-api order-worker; do
-  docker build -f "services/$svc/Dockerfile" -t "nexus:8082/shop/$svc:$SHA" "services/$svc"
+  docker build --add-host "nexus:$NEXUS_IP" \
+    -f "services/$svc/Dockerfile" -t "nexus:8082/shop/$svc:$SHA" "services/$svc"
   docker push "nexus:8082/shop/$svc:$SHA"
 done
 
 echo "$SHA"
 ```
+
+> **`--add-host` is what lets the build reach Nexus, and without it `order-api` cannot build.**
+> [§3.1](#31-order-api-python--fastapi) pinned the index to `http://nexus:8081/...` inside
+> `pyproject.toml` so that `uv.lock` records the registry — and warned that this "pins `nexus:8081`
+> into the project, which is only resolvable in this environment". A `docker build` is *not* this
+> environment. [§5.7](#57-make-nexus-resolve-from-your-laptop) mapped `nexus` to
+> `127.0.0.1` in your **laptop's** `/etc/hosts`, and inside the build container `127.0.0.1` is the
+> build container, so `uv sync` fails on every wheel with:
+>
+> ```
+> × Failed to download `certifi==2026.7.22`
+> ╰─▶ tcp connect error … Connection refused (os error 111)
+> ```
+>
+> `--add-host` points the name at the address Nexus actually holds on the `kind` network. Note that
+> `order-worker` builds fine **without** this, which is exactly what makes the failure confusing: its
+> Dockerfile resolves Go modules from the public proxy and never touches Nexus at all. One service
+> breaks, the other does not, and the difference is which registry each toolchain was told to use.
+>
+> This is also why `set -e` is on the first line. Without it a failed `docker build` falls straight
+> through to a `docker push` that has nothing to push, and then to the *next* service, which succeeds
+> — so the loop ends on a success message having built half of what you asked for. You find out at
+> [§10.5](#105-install-it), as `ImagePullBackOff` on an image that was never pushed and a Service with
+> no endpoints behind it.
+>
+> CI does not need any of this ([§12.5](#125-the-pipeline)): the Buildah pod runs
+> *inside* the cluster, where CoreDNS resolves `nexus` from the entry
+> [§5.10](#510-teach-pods-about-nexus-coredns) added.
 
 > **Use the commit SHA, not `latest`, even by hand.** It costs nothing here and it is the habit the
 > whole delivery story depends on later ([§10.3](#103-render-it-before-you-trust-it)). A tag that can
@@ -8490,6 +8522,7 @@ Two version rules worth internalising:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `ImagePullBackOff` on `nexus:8082/...` | containerd can't reach or auth to Nexus | `docker exec devops-worker curl -s -o /dev/null -w '%{http_code}' http://nexus:8082/v2/` — expect `401`. Not `401`? Re-run [§5.9](#59-teach-containerd-on-the-kind-nodes-about-nexus). `401` but still failing? The pod is missing `imagePullSecrets` or the ExternalSecret hasn't synced. |
+| `ImagePullBackOff`, and the event says `code = NotFound` | The image was never pushed — not an auth or DNS problem | Check the event text: `NotFound` means the registry answered and does not have that tag, so re-running §5.9 will not help. Confirm with `docker images 'nexus:8082/shop/*'` — if it is missing locally too, the **build** failed. On a laptop the usual cause is a `docker build` with no `--add-host nexus:<ip>`, which only breaks the services that resolve dependencies through Nexus ([§10.4](#104-build-the-images-by-hand-once)). |
 | `curl http://localhost` returns **`000`** | Ingress controller scheduled on a node with no port mappings | `000` = nothing listening, not a 404. `kubectl -n ingress-nginx get pods -o wide` — if `NODE` isn't `devops-control-plane`, apply the `ingress-ready` nodeSelector patch in [§4.3](#43-install-the-ingress-controller). Upstream dropped that selector in controller-v1.13.0. |
 | Ingress Service stuck `EXTERNAL-IP <pending>` | `type: LoadBalancer` with no cloud provider | Harmless on kind — traffic arrives via `hostPort`, not the Service. Don't install MetalLB to "fix" it. |
 | Pods can't resolve `nexus` | The CoreDNS `hosts` entry and the container disagree | The container is pinned to `172.18.255.10` by `--ip` in [§5.3](#53-run-nexus). Confirm with `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nexus`; if it differs, the container was recreated without `--ip`. Re-run [§5.10](#510-teach-pods-about-nexus-coredns), which replaces the block rather than appending. |

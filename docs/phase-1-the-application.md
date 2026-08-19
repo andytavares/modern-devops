@@ -2429,15 +2429,47 @@ Nothing has built your services yet. CI does that from [Phase 3](phase-3-deliver
 now you are the CI.
 
 ```bash
+set -e     # a failed build must not fall through to the push, or to the next service
+
 SHA="$(git rev-parse --short=12 HEAD)"
+NEXUS_IP=172.18.255.10      # the address §5.3 pinned with `docker run --ip`
 
 for svc in order-api order-worker; do
-  docker build -f "services/$svc/Dockerfile" -t "nexus:8082/shop/$svc:$SHA" "services/$svc"
+  docker build --add-host "nexus:$NEXUS_IP" \
+    -f "services/$svc/Dockerfile" -t "nexus:8082/shop/$svc:$SHA" "services/$svc"
   docker push "nexus:8082/shop/$svc:$SHA"
 done
 
 echo "$SHA"
 ```
+
+> **`--add-host` is what lets the build reach Nexus, and without it `order-api` cannot build.**
+> [§3.1](#31-order-api-python--fastapi) pinned the index to `http://nexus:8081/...` inside
+> `pyproject.toml` so that `uv.lock` records the registry — and warned that this "pins `nexus:8081`
+> into the project, which is only resolvable in this environment". A `docker build` is *not* this
+> environment. [§5.7](phase-0-foundations.md#57-make-nexus-resolve-from-your-laptop) mapped `nexus` to
+> `127.0.0.1` in your **laptop's** `/etc/hosts`, and inside the build container `127.0.0.1` is the
+> build container, so `uv sync` fails on every wheel with:
+>
+> ```
+> × Failed to download `certifi==2026.7.22`
+> ╰─▶ tcp connect error … Connection refused (os error 111)
+> ```
+>
+> `--add-host` points the name at the address Nexus actually holds on the `kind` network. Note that
+> `order-worker` builds fine **without** this, which is exactly what makes the failure confusing: its
+> Dockerfile resolves Go modules from the public proxy and never touches Nexus at all. One service
+> breaks, the other does not, and the difference is which registry each toolchain was told to use.
+>
+> This is also why `set -e` is on the first line. Without it a failed `docker build` falls straight
+> through to a `docker push` that has nothing to push, and then to the *next* service, which succeeds
+> — so the loop ends on a success message having built half of what you asked for. You find out at
+> [§10.5](#105-install-it), as `ImagePullBackOff` on an image that was never pushed and a Service with
+> no endpoints behind it.
+>
+> CI does not need any of this ([§12.5](phase-3-delivery.md#125-the-pipeline)): the Buildah pod runs
+> *inside* the cluster, where CoreDNS resolves `nexus` from the entry
+> [§5.10](phase-0-foundations.md#510-teach-pods-about-nexus-coredns) added.
 
 > **Use the commit SHA, not `latest`, even by hand.** It costs nothing here and it is the habit the
 > whole delivery story depends on later ([§10.3](#103-render-it-before-you-trust-it)). A tag that can
