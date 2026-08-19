@@ -30,6 +30,21 @@ Concrete instances you will otherwise read as drift:
 | §3.1 `services/order-api/pyproject.toml` | deleted | §19.7 `git rm`s it, and the checker knows |
 | §13.3 `serviceMonitor: enabled: true` | both monitors false by default | §9.6 swaps to `podMonitor` |
 
+## What the checker cannot catch
+
+`verify_doc_listings.py` does two things: every bolded path must exist, and the **last** listing of a
+file must match the repo as a *subsequence* — every non-blank, non-elided line appearing in order.
+
+That catches staleness. It cannot catch **incompleteness**, and the difference bit once: §3.2 showed
+`main_test.go` twice, the second listing using `equalOffsets` and five imports that appeared in
+neither block. Every line of it *was* in the repo file, in order, so the check passed while a reader
+following the docs got eleven compile errors (fixed 2026-08-18 — see [[franz-go]]).
+
+The general shape: **a subsequence test proves a listing is not out of date; it proves nothing about
+whether the listing is enough.** For a compiled language "enough" means the file compiles, and the
+only real check for that is compiling it. Worth knowing before trusting a green `checks/` run to mean
+a reader can follow the text.
+
 ## Two editions, one source
 
 `docs/` is the source. `modern-devops-tutorial.md` is **assembled** from it by

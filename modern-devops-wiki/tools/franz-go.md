@@ -60,6 +60,14 @@ Two regression tests in `services/order-worker/main_test.go` pin this, driven th
 - `TestProcessPartitionNeverMarksAtOrPastAFailedWrite`
 - `TestProcessPartitionStaysBlockedOnLaterBatches`
 
+> [!warning] §3.2 used to show these tests without the `equalOffsets` helper or the import block
+> Both listings were labelled `services/order-worker/main_test.go`, so a reader wrote the second one
+> and got eleven compile errors — `undefined: equalOffsets`, plus `errors`, `context`, `dynamodb`,
+> `ddbtypes` and `kgo`. Fixed 2026-08-18 by making the second listing the complete file. The subtlety
+> that forced that shape rather than a smaller patch: `strings` is used by only one of the five tests,
+> and **Go rejects an unused import as hard as an undefined one**, so any abridgement that shows the
+> real import block breaks a reader who stops early. See [[progressive-build]].
+
 A malformed record is still **marked**, deliberately — otherwise one bad message pins the partition's
 commit forever.
 

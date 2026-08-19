@@ -1555,6 +1555,47 @@ lose data silently, so it gets tests that fail if anyone reintroduces the naive 
 **`services/order-worker/main_test.go`**
 
 ```go
+package main
+
+import (
+	"context"
+	"errors"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/twmb/franz-go/pkg/kgo"
+)
+
+func TestLoadConfigRequiresBrokers(t *testing.T) {
+	os.Clearenv()
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected an error when KAFKA_BROKERS is unset")
+	}
+}
+
+func TestLoadConfigDefaults(t *testing.T) {
+	os.Clearenv()
+	t.Setenv("KAFKA_BROKERS", "a:9092,b:9092")
+	t.Setenv("DDB_TABLE", "orders")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.brokers) != 2 {
+		t.Fatalf("expected 2 brokers, got %d", len(cfg.brokers))
+	}
+	if cfg.topic != "orders" {
+		t.Fatalf("expected default topic 'orders', got %q", cfg.topic)
+	}
+	if cfg.group != "order-worker" {
+		t.Fatalf("expected default group 'order-worker', got %q", cfg.group)
+	}
+}
+
 var errWriteFailed = errors.New("dynamodb is having a day")
 
 // fakeDDB records every PutItem it is asked to make and fails the ones whose
@@ -1600,7 +1641,32 @@ func partitionOf(orderIDs ...string) kgo.FetchTopicPartition {
 	return p
 }
 
-// ...
+func equalOffsets(got, want []int64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestProcessPartitionMarksEveryRecordThatWasWritten(t *testing.T) {
+	ddb := &fakeDDB{}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("a", "b", "c"))
+
+	if !equalOffsets(m.marked, []int64{0, 1, 2}) {
+		t.Fatalf("expected offsets 0,1,2 to be marked, got %v", m.marked)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("expected no blocked partitions, got %v", blocked)
+	}
+}
 
 // This is the regression test for the commit semantics: a failed DynamoDB write
 // must stop the commit boundary dead. If someone reintroduces marking (and so
@@ -1643,12 +1709,70 @@ func TestProcessPartitionStaysBlockedOnLaterBatches(t *testing.T) {
 		t.Fatalf("a blocked partition must not be written again, got puts %v", ddb.puts)
 	}
 }
+
+// A blocked partition is only cleared by a revoke, which happens outside this
+// function; clearing the entry lets the partition make progress again.
+func TestProcessPartitionResumesOnceUnblocked(t *testing.T) {
+	ddb := &fakeDDB{failOn: map[string]bool{"a": true}}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+	key := partitionKey{topic: "orders", partition: 3}
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("a"))
+	delete(blocked, key)
+
+	ddb.failOn = nil
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("f"))
+
+	if !equalOffsets(m.marked, []int64{0}) {
+		t.Fatalf("expected offset 0 marked after unblocking, got %v", m.marked)
+	}
+}
+
+// A malformed record can never become valid, so handle skips it. It must still
+// be marked, or one bad message would pin the partition's commit forever.
+func TestProcessPartitionMarksMalformedRecords(t *testing.T) {
+	ddb := &fakeDDB{}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+
+	p := partitionOf("a")
+	p.Records[0].Value = []byte("{not json")
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, p)
+
+	if !equalOffsets(m.marked, []int64{0}) {
+		t.Fatalf("expected the malformed record to be marked, got %v", m.marked)
+	}
+	if len(ddb.puts) != 0 {
+		t.Fatalf("expected no write for a malformed record, got puts %v", ddb.puts)
+	}
+}
+
+func TestHandleWrapsPutItemError(t *testing.T) {
+	ddb := &fakeDDB{failOn: map[string]bool{"a": true}}
+	r := partitionOf("a").Records[0]
+
+	err := handle(context.Background(), ddb, "orders", r)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, errWriteFailed) {
+		t.Fatalf("expected the underlying error to be wrapped, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "order_id=a") {
+		t.Fatalf("expected the error to name the order, got %q", err.Error())
+	}
+}
 ```
 
-The repo file carries three more: the happy path (`equalOffsets(m.marked, []int64{0, 1, 2})`), one
+Five tests, and the two in the middle are the ones that matter: a failed write must stop the commit
+boundary dead, and it must *stay* stopped on the next batch. The other three cover the happy path,
 that a malformed record is still marked — otherwise one bad message pins the partition's commit
-forever — and one that `handle` wraps the `PutItem` error with the `order_id`. The imports and the
-`equalOffsets` helper are there too.
+forever — and that `handle` wraps the `PutItem` error with the `order_id`.
+
+This listing replaces the one above rather than appending to it: the import block grows, and Go
+rejects both an undefined identifier and an unused import, so the file only compiles as a whole.
 
 > **At-least-once vs exactly-once.** An offset is marked, and so committed, only *after* the DynamoDB write returns success. A crash in between replays the record. Because `PutItem` with the same `order_id` overwrites rather than duplicates, replay is a no-op — the write is idempotent, so at-least-once delivery gives us effectively-once *results*. Exactly-once across Kafka and DynamoDB would need transactional coordination the two systems don't share. **The general lesson: don't buy exactly-once delivery; make your writes idempotent and buy at-least-once, which is cheap.**
 

@@ -79,3 +79,31 @@ files, a record of what was learned.
   nothing. Closing it means replacing the CNI first. That is now stated on [[cni]] and cross-linked
   from [[service-mesh]], which previously said "use both" without noting that half of it is currently
   unavailable on this cluster.
+
+- **2026-08-18** — **§3.2's `main_test.go` did not compile, and the checks could not see it.** Reported
+  from an editor flagging `undefined: equalOffsets`. Reproduced by extracting the listings from the
+  doc and building them against the real module: **eleven errors**, not one — `equalOffsets` was never
+  shown anywhere, and `errors`, `context`, `dynamodb`, `ddbtypes` and `kgo` were used by a block whose
+  only shown import set was `os` and `testing`.
+
+  The cause was presentation: two consecutive blocks both labelled
+  `**services/order-worker/main_test.go**`, the second starting mid-file at `var errWriteFailed`. The
+  repo file was complete and correct the whole time.
+
+  Fixed by making the second listing the **complete 209-line file**. A smaller patch — showing just
+  the helper and the imports — does not work, and the reason is worth keeping: **`strings` is used by
+  only one of the five tests, and Go rejects an unused import as hard as an undefined one**, so any
+  abridgement that shows the real import block breaks a reader who stops before the last test. The
+  file only compiles as a whole. Both listings were then verified by writing them to a scratch module
+  and running `go test`: listing 1 passes, listing 2 passes.
+
+  **The finding that outlives the bug:** `verify_doc_listings.py` is a subsequence test, so every line
+  of the broken block *was* in the repo file in order and the check passed. It proves a listing is not
+  stale; it proves nothing about whether the listing is sufficient. Now stated on
+  [[progressive-build]] and cross-referenced from [[franz-go]]. Scanned the rest of `docs/` for the
+  same shape — the only other repeated listings are the three order-api files, which are phase-1 →
+  phase-7 progressive updates narrated as edits ("Add the imports and the metric to `main.py`") rather
+  than presented as whole files, and Python does not fail on unused imports.
+
+  Tutorial change, so `modern-devops-tutorial.md` was regenerated: 8539 → 8663 lines.
+  `verify_doc_listings.py` still reports failures: 0.
