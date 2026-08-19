@@ -1,0 +1,27 @@
+docs/phase-1-the-application.md
+  s_24b2d14dde4faa::t_84105a73d806fd 857-897,943-968,1011-1065,1068-1069,1071-1074
+modern-devops-wiki/concepts/progressive-build.md
+  s_24b2d14dde4faa::t_12c10dcb53af2c 33-47
+modern-devops-wiki/tools/franz-go.md
+  s_24b2d14dde4faa::t_12c10dcb53af2c 63-70
+modern-devops-wiki/log.md
+  s_24b2d14dde4faa::t_12c10dcb53af2c 82-109
+modern-devops-tutorial.md
+  s_24b2d14dde4faa::t_5c01dd0d906905 1558-1598,1644-1669,1712-1766,1769-1770,1772-1775
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "eb3ebd4eb01792deb30cfd76207f398f5f5f943d",
+  "prompts": {},
+  "sessions": {
+    "s_24b2d14dde4faa": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8680285c-c9ab-4230-a95f-6285cfe178f1",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
