@@ -298,16 +298,25 @@ git push
 
 ### 13.6 Kiali: the mesh you can see
 
+> [!warning] **Read this section now, run it after [§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created).**
+> Kiali installs into `istio-system`, which does not exist until [§9.2](phase-4-service-mesh.md#92-install-the-control-plane) creates it. Run the `helm upgrade` below at this point in the build and it fails immediately:
+>
+> ```
+> Error: create: failed to create: namespaces "istio-system" not found
+> ```
+>
+> That is the *good* outcome. Create the namespace by hand to get past it and the install succeeds
+> into an empty namespace, giving you a Kiali with no control plane to read and an empty graph that
+> looks exactly like a broken one. Leave it. [§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created)
+> ends by sending you back here.
+
 Everything in [§9](phase-4-service-mesh.md#9-istio-the-service-mesh) is invisible. mTLS either works or it doesn't; an `AuthorizationPolicy` either matches or it doesn't; and when it doesn't, the symptom is a 403 in a log somewhere. Kiali reads the same Prometheus you just installed plus Istio's configuration, and draws the answer.
 
 It is documented here, next to Prometheus, because **without Prometheus there is no graph**: Kiali's
 topology is derived entirely from `istio_requests_total`, and it reads that metric out of the
-Prometheus you just installed.
-
-**Run this section after [Phase 4](phase-4-service-mesh.md), not now.** Kiali installs into
-`istio-system` and needs that namespace, the mesh, and the merged-metrics scrape from
-[§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created) to exist first. Come back to
-it when [§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created) is done.
+Prometheus you just installed. Both of its inputs have to exist: this Prometheus, and the
+merged-metrics scrape that [§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created)
+puts `istio_requests_total` into it with.
 
 ```bash
 helm repo add kiali https://kiali.org/helm-charts

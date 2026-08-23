@@ -3586,16 +3586,25 @@ git push
 ### 13.6 Kiali: the mesh you can see
 
 
+> [!warning] **Read this section now, run it after [§9.6](#96-the-metrics-problem-you-just-created).**
+> Kiali installs into `istio-system`, which does not exist until [§9.2](#92-install-the-control-plane) creates it. Run the `helm upgrade` below at this point in the build and it fails immediately:
+>
+> ```
+> Error: create: failed to create: namespaces "istio-system" not found
+> ```
+>
+> That is the *good* outcome. Create the namespace by hand to get past it and the install succeeds
+> into an empty namespace, giving you a Kiali with no control plane to read and an empty graph that
+> looks exactly like a broken one. Leave it. [§9.6](#96-the-metrics-problem-you-just-created)
+> ends by sending you back here.
+
 Everything in [§9](#9-istio-the-service-mesh) is invisible. mTLS either works or it doesn't; an `AuthorizationPolicy` either matches or it doesn't; and when it doesn't, the symptom is a 403 in a log somewhere. Kiali reads the same Prometheus you just installed plus Istio's configuration, and draws the answer.
 
 It is documented here, next to Prometheus, because **without Prometheus there is no graph**: Kiali's
 topology is derived entirely from `istio_requests_total`, and it reads that metric out of the
-Prometheus you just installed.
-
-**Run this section after [Phase 4](#), not now.** Kiali installs into
-`istio-system` and needs that namespace, the mesh, and the merged-metrics scrape from
-[§9.6](#96-the-metrics-problem-you-just-created) to exist first. Come back to
-it when [§9.6](#96-the-metrics-problem-you-just-created) is done.
+Prometheus you just installed. Both of its inputs have to exist: this Prometheus, and the
+merged-metrics scrape that [§9.6](#96-the-metrics-problem-you-just-created)
+puts `istio_requests_total` into it with.
 
 ```bash
 helm repo add kiali https://kiali.org/helm-charts
@@ -5046,6 +5055,13 @@ scraping the application port rather than `15020`. If yours is empty but Istio's
 > `absent(up{job="order-platform"})` — which is precisely the kind of "the monitoring stopped"
 > condition [§13.5](#135-an-alert-that-means-something) argues you should page
 > on.
+
+**Now go install Kiali — [§13.6](#136-kiali-the-mesh-you-can-see).** It is
+written next to Prometheus because that is where it belongs conceptually, but this is the first
+moment both of its inputs exist: the `istio-system` namespace from
+[§9.2](#92-install-the-control-plane), and `istio_requests_total` in Prometheus from the monitor swap
+you just did. Run it any earlier and Helm fails on the missing namespace. Do it now, then come back
+here — the working state §9.7 asserts includes Kiali answering on its own hostname.
 
 ### 9.7 Commit, and a word on what you cannot verify yet
 
@@ -8549,6 +8565,7 @@ Two version rules worth internalising:
 | `RBAC: access denied` on every request | An `AuthorizationPolicy` matched and denied | `istioctl analyze -n shop` first — the usual cause is a `principals` value naming a ServiceAccount that doesn't exist, which denies everything and looks healthy in `kubectl get pods` ([§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist)). |
 | `curl` from another namespace → `Connection reset by peer` | STRICT mTLS, and the caller has no sidecar | Working as designed. Enroll the caller's namespace, or confirm you meant to be outside the mesh. |
 | A Job never completes, pod sits at `1/2` | Sidecar outlives the job container | Add `sidecar.istio.io/inject: "false"` to the **pod template** ([§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones)). |
+| `helm install kiali-server` → `namespaces "istio-system" not found` | [§13.6](#136-kiali-the-mesh-you-can-see) was run in phase order instead of after [§9.6](#96-the-metrics-problem-you-just-created) | Kiali installs into the namespace [§9.2](#92-install-the-control-plane) creates. Do Phase 4 through §9.6 first, then run §13.6. Do **not** `kubectl create namespace istio-system` to get past it — the chart then installs against no control plane and draws an empty graph indistinguishable from a broken one. |
 | Kiali graph is empty | No traffic, or `istio_requests_total` missing | Send requests first. Still empty? Query `istio_requests_total` in Prometheus — if it's absent, the PodMonitor isn't scraping the merged endpoint. |
 | Backstage template fails at the last step, `action not found` | Scaffolder GitHub module not registered | `backend.add(import('@backstage/plugin-scaffolder-backend-module-github'))` in `packages/backend/src/index.ts`, then rebuild the image ([§14.3](#143-scaffold-the-portal)). |
 | Scaffolder PR fails with 403 | Fine-grained PAT missing `Pull requests: RW` | Contents alone is not enough to open a PR. Re-scope the token, update the value in OpenBao, wait for ESO to resync, restart the pod. |

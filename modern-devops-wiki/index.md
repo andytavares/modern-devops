@@ -72,7 +72,7 @@ that span tools — read those when the question is "why is it like this", not "
 
 ### Mesh and networking
 - [[istio]] — mTLS, identity-based authorization, L7 telemetry, and the edge
-- [[kiali]] — the mesh made visible, plus Istio config validation
+- [[kiali]] — the mesh made visible, plus Istio config validation; §13.6 is written in Phase 2 and must be *run* after §9.6
 
 ### Delivery
 - [[helm]] — packaging, ours and everyone else's
@@ -114,7 +114,7 @@ that span tools — read those when the question is "why is it like this", not "
 - [[kraft]] — Kafka without ZooKeeper
 - [[cni]] — how pods get networking at all, and why NetworkPolicy is inert on this cluster
 - [[enterprise-substitution]] — why OpenBao, Nexus CE and Floci, and exactly where each stops being equivalent
-- [[progressive-build]] — why a listing in `docs/` that disagrees with the repo is usually correct
+- [[progressive-build]] — why a listing in `docs/` that disagrees with the repo is usually correct, and the two things `checks/` cannot catch
 - [[dependency-inference]] — what Pants infers, and where to stop trusting it
 - [[cross-compilation]] — building on one machine and running on another, three ways
 - [[port-naming]] — a port name is a load-bearing declaration, read by two systems

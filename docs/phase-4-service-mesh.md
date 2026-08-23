@@ -504,6 +504,13 @@ scraping the application port rather than `15020`. If yours is empty but Istio's
 > condition [§13.5](phase-2-observability.md#135-an-alert-that-means-something) argues you should page
 > on.
 
+**Now go install Kiali — [§13.6](phase-2-observability.md#136-kiali-the-mesh-you-can-see).** It is
+written next to Prometheus because that is where it belongs conceptually, but this is the first
+moment both of its inputs exist: the `istio-system` namespace from
+[§9.2](#92-install-the-control-plane), and `istio_requests_total` in Prometheus from the monitor swap
+you just did. Run it any earlier and Helm fails on the missing namespace. Do it now, then come back
+here — the working state §9.7 asserts includes Kiali answering on its own hostname.
+
 ### 9.7 Commit, and a word on what you cannot verify yet
 
 ```bash

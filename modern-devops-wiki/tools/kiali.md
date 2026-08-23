@@ -5,7 +5,7 @@ role: the mesh made visible, plus Istio config validation
 version: kiali-server 2.30.0
 docs: https://kiali.io/docs/
 date_added: 2026-08-17
-date_updated: 2026-08-17
+date_updated: 2026-08-23
 status: documented-not-observed
 ---
 
@@ -20,6 +20,28 @@ status: documented-not-observed
 `istio_requests_total`, which it reads out of the Prometheus installed in §13.2. That is why §13.6
 documents it next to Prometheus — and why it must be *run* after §9.6, since the merged-metrics scrape
 is what puts `istio_requests_total` in Prometheus at all.
+
+> [!warning] §13.6 is the one section in the docs that must not be run where it is written
+> Reproduced 2026-08-23 on a cluster at the end of Phase 2:
+>
+> ```
+> $ helm upgrade --install kiali-server kiali/kiali-server --namespace istio-system --version 2.30.0 ...
+> Release "kiali-server" does not exist. Installing it now.
+> Error: create: failed to create: namespaces "istio-system" not found
+> ```
+>
+> `istio-system` is created by §9.2, two phases later, and Helm does not create a namespace without
+> `--create-namespace`. The failure is loud, which makes it the harmless case. The **harmful** case is
+> the reader who works around it with `kubectl create namespace istio-system`: the chart then installs
+> cleanly against no control plane, and Kiali serves an empty graph — visually identical to the idle
+> mesh described below, and to a broken install. Nothing distinguishes them from the UI.
+>
+> The docs originally deferred this in a bolded paragraph sitting *between* two paragraphs of prose and
+> the command block, and a reader skimming to the command ran it anyway. Fixed 2026-08-23 by hoisting
+> it to a `> [!warning]` immediately under the §13.6 heading, and — the part that was actually
+> missing — adding a **back-pointer at the end of §9.6** that sends the reader to §13.6 at the first
+> moment both prerequisites exist. §9.7 asserted "Kiali 302" as part of the working state while no
+> section ever told the reader to install it. Recorded in Appendix B.
 
 ## Install
 
@@ -67,9 +89,11 @@ the repo. Same argument as [[gitops]].
 
 ## Status
 
-Documented, not observed. Kiali is one of the components §14–§16 install that has never been run
-against a live cluster in this repo — see [[open-questions]].
+Documented, not observed — the graph, the security padlocks and the Istio Config validation above are
+all from vendor docs and the tutorial, not from a running instance; see [[open-questions]]. The one
+thing that *has* been observed against a live cluster is the install failing in phase order
+(2026-08-23, above). See [[progressive-build]] for why `checks/` did not catch it.
 
 ## Related
 
-[[istio]] · [[prometheus]] · [[service-mesh]] · [[observability]] · [[grafana]] · [[apache-kafka]]
+[[istio]] · [[prometheus]] · [[service-mesh]] · [[observability]] · [[grafana]] · [[apache-kafka]] · [[progressive-build]]

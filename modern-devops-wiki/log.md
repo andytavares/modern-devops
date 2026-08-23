@@ -107,3 +107,44 @@ files, a record of what was learned.
 
   Tutorial change, so `modern-devops-tutorial.md` was regenerated: 8539 → 8663 lines.
   `verify_doc_listings.py` still reports failures: 0.
+
+- **2026-08-23** — **§13.6 could not be run where it is written.** The human ran §13.6's
+  `helm upgrade --install kiali-server ... --namespace istio-system` at the end of Phase 2, as the
+  reading order implies, and got:
+
+  ```
+  Error: create: failed to create: namespaces "istio-system" not found
+  ```
+
+  Reproduced against the live cluster before changing anything: `kubectl get ns istio-system` →
+  `NotFound`, `helm list -n istio-system` → empty, then the install command itself, which fails
+  exactly as above. `istio-system` is created by §9.2, two phases later, and Helm does not create a
+  namespace without `--create-namespace`.
+
+  §13.6 *did* already carry a deferral — "**Run this section after Phase 4, not now.**" — so the fix
+  is not new information, it is placement. Two defects:
+
+  1. **The caveat was below the fold.** It sat as a bolded paragraph between two paragraphs of prose
+     and the shell fence, and a reader skimming to the command never reached it. Now a
+     `> [!warning]` immediately under the §13.6 heading, quoting the exact Helm error.
+  2. **The forward pointer had no back-pointer.** §13.6 said "come back when §9.6 is done"; §9.6
+     ended and said nothing. Worse, §9.7 lists "Kiali 302" as part of the phase's working state —
+     the docs asserted a running Kiali that no section ever instructed the reader to install. §9.6
+     now ends by sending the reader to §13.6, at the first moment both prerequisites exist
+     (`istio-system` from §9.2, `istio_requests_total` from the ServiceMonitor→PodMonitor swap).
+
+  **The trap worth keeping:** the loud failure is the good outcome. `kubectl create namespace
+  istio-system` makes the chart install cleanly against no control plane, and Kiali then serves an
+  empty graph — indistinguishable in the UI from an idle mesh or a broken install. Both the §13.6
+  warning and the Appendix B row say explicitly not to do that.
+
+  Swept `docs/` for the same shape: `monitoring`, `argocd`, `shop`, `floci`, `kafka`, `backstage` and
+  `external-secrets` are each created in the phase that first installs into them, or earlier. §13.6
+  is the only section that installs into a namespace a later phase creates.
+
+  Recorded on [[kiali]] and on [[progressive-build]] — which now names **run order** as the second
+  thing `checks/` cannot catch, alongside listing incompleteness: the checkers validate content, not
+  whether a section is runnable at the point it appears. Appendix B gained a row.
+
+  Tutorial change, so `modern-devops-tutorial.md` was regenerated: 8696 → 8713 lines.
+  `verify_doc_listings.py` reports failures: 0; `test_docs_are_current.py` passes.

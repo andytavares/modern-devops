@@ -2,7 +2,7 @@
 type: concept
 tags: [documentation, repo-structure]
 date_added: 2026-08-17
-date_updated: 2026-08-17
+date_updated: 2026-08-23
 ---
 
 # The progressive build, and where the war stories live
@@ -44,6 +44,31 @@ The general shape: **a subsequence test proves a listing is not out of date; it 
 whether the listing is enough.** For a compiled language "enough" means the file compiles, and the
 only real check for that is compiling it. Worth knowing before trusting a green `checks/` run to mean
 a reader can follow the text.
+
+## The other thing the checker cannot catch: run order
+
+`checks/` validates *content* — paths exist, listings are current, the single file matches `docs/`.
+Nothing validates **that a section can be run at the point it is written.** The build order and the
+reading order are the same thing everywhere except one place: §13.6 installs [[kiali]] into
+`istio-system`, a namespace §9.2 does not create until two phases later. A reader following the text
+in order hits `Error: create: failed to create: namespaces "istio-system" not found` (reproduced
+2026-08-23).
+
+The deferral note existed and was not enough. Two lessons, both about placement rather than content:
+
+- **A caveat below prose is a caveat below the fold.** It sat between two paragraphs and the command
+  block, so anyone skimming to the shell fence never saw it. It is now the first thing under the
+  heading, as a `> [!warning]`.
+- **A forward pointer without a matching back-pointer is a dropped thread.** §13.6 said "come back
+  after §9.6"; §9.6 said nothing. Worse, §9.7 asserted "Kiali 302" as part of the working state — the
+  docs depended on an install no section ever told the reader to perform. §9.6 now ends by sending
+  the reader to §13.6.
+
+Generalises to any section whose prerequisites live in a later phase: it needs a warning at the top,
+**and** a jump from the section that satisfies the prerequisite. Swept `docs/` for the same shape on
+2026-08-23: every other namespace (`monitoring`, `argocd`, `shop`, `floci`, `kafka`, `backstage`,
+`external-secrets`) is created in the same phase that first installs into it, or earlier. §13.6 is the
+only section that installs into a namespace a later phase creates.
 
 ## Two editions, one source
 
