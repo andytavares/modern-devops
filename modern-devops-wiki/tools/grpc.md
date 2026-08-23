@@ -95,7 +95,7 @@ it a synchronous hop turns a slow dependency into an outage.
 parametrised test pins the table.
 
 **No fallback, deliberately.** A locally computed price is the kinder production design — the customer
-gets an order instead of an error — and it would make every experiment in §9.8 invisible. **A fallback
+gets an order instead of an error — and it would make every experiment in §9.9 invisible. **A fallback
 that is not itself alarmed on is a way of not finding out.** If you add one, add
 `pricing_calls_total{result="fallback"}` and an alert on it *in the same commit*.
 

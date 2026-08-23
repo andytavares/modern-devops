@@ -40,11 +40,11 @@ that span tools — read those when the question is "why is it like this", not "
 | 6 | Cloud emulation | [[floci]] |
 | 7 | Secrets | [[openbao]], [[external-secrets-operator]] |
 | 8 | Events | [[apache-kafka]], [[strimzi]], [[franz-go]] |
-| 9 | Service mesh | [[istio]] |
+| 9 | Service mesh | [[istio]], [[kiali]] |
 | 10 | Packaging | [[helm]], [[order-platform]] |
 | 11 | Delivery | [[argo-cd]] |
 | 12 | CI | [[buildkite]], [[buildah]] |
-| 13 | Observability | [[prometheus]], [[grafana]], [[kiali]] |
+| 13 | Observability | [[prometheus]], [[grafana]] |
 | 14 | Portal | [[backstage]], [[postgresql]] |
 | 17–19 | Build system | [[pants]], [[pex]], [[grpc]], [[mypy]], [[vite]] |
 | 3 | Applications | [[fastapi]], [[pydantic]], [[go]], [[uv]] |
@@ -72,7 +72,7 @@ that span tools — read those when the question is "why is it like this", not "
 
 ### Mesh and networking
 - [[istio]] — mTLS, identity-based authorization, L7 telemetry, and the edge
-- [[kiali]] — the mesh made visible, plus Istio config validation; §13.6 is written in Phase 2 and must be *run* after §9.6
+- [[kiali]] — the mesh made visible, plus Istio config validation (§9.7, moved there from §13.6)
 
 ### Delivery
 - [[helm]] — packaging, ours and everyone else's

@@ -462,7 +462,7 @@ anything else → 502 — and every outcome increments `pricing_calls_total{resu
 > **It does not fall back to a locally computed price, and that is a deliberate choice you should
 > argue with.** A fallback is the kinder production design: the customer gets an order instead of an
 > error. It is also the thing that would make every experiment in
-> [§9.8](phase-4-service-mesh.md#98-canary-two-versions-of-pricing-behind-one-service) invisible — a
+> [§9.9](phase-4-service-mesh.md#99-canary-two-versions-of-pricing-behind-one-service) invisible — a
 > canary you cannot see fail teaches nothing, and a silent fallback is how a dependency stays broken
 > for a week. **The general rule: a fallback that is not itself alarmed on is a way of not finding
 > out.** If you add one, add `pricing_calls_total{result="fallback"}` and an alert on it in the same
@@ -480,7 +480,7 @@ outlier detection mean anything at all.
 A pricing service nothing calls is a pricing service you cannot canary. The rest of this section is
 the caller side: the address, the client, the metric, the call, and the tests. Do it now — everything
 downstream ([§19.4](#194-the-frontend-vite-and-a-live-tally),
-[§9.8](phase-4-service-mesh.md#98-canary-two-versions-of-pricing-behind-one-service)) depends on it.
+[§9.9](phase-4-service-mesh.md#99-canary-two-versions-of-pricing-behind-one-service)) depends on it.
 
 **Address and deadlines.** `order-api`'s settings module is now a `pydantic-settings` `BaseSettings`
 subclass. Hand-rolled environment parsing is the job that library exists to do, and it is the approach
@@ -549,7 +549,7 @@ Three details are not guessable:
 `pricing_addr`'s default matches the `Service` the chart creates in [§19.3](#193-a-pex-needs-somewhere-to-write-and-readonlyrootfilesystem-gives-it-nowhere)
 (`pricing`, namespace `shop`, port 50051), so `order-api.yaml` needs no new env entry. The timeout is
 a setting rather than a constant because it is the number you tune when
-[§9.8](phase-4-service-mesh.md#98-canary-two-versions-of-pricing-behind-one-service) starts injecting
+[§9.9](phase-4-service-mesh.md#99-canary-two-versions-of-pricing-behind-one-service) starts injecting
 delays. `pricing_health_timeout_seconds` is separate and shorter: readiness must answer on the probe's
 schedule, not on the order path's.
 
@@ -1536,7 +1536,7 @@ laptop rather than in a consumer at 3am. The images are `FROM` plus `COPY`, whic
 Buildah pod no longer resolves anything from a network.
 
 And there is now a synchronous call between two of your services — which is what
-[§9.8](phase-4-service-mesh.md#98-canary-two-versions-of-pricing-behind-one-service) needs to shift
+[§9.9](phase-4-service-mesh.md#99-canary-two-versions-of-pricing-behind-one-service) needs to shift
 traffic between two versions of `pricing` and let you watch the split move in a browser. Go back and
 do that now; it is the part of [Phase 4](phase-4-service-mesh.md) you could not run yet.
 

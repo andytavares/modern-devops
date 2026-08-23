@@ -130,7 +130,7 @@ L7 features you installed a mesh for. `appProtocol` does the same job explicitly
 are set. `pricing`'s gRPC port **must** be named `grpc` — there is no `grpc:` stanza in a
 `VirtualService`, gRPC rides HTTP/2 and is routed by the ordinary `http:` block. See [[port-naming]].
 
-## Traffic management (§9.8, §9.9)
+## Traffic management (§9.9, §9.10)
 
 `deploy/platform/istio/pricing-traffic.yaml` — a `DestinationRule` naming `v1`/`v2` subsets on the
 pod label `version`, plus a `VirtualService` weighting 90/10. The retry envelope arithmetic and the

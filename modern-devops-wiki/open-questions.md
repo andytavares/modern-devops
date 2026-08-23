@@ -14,8 +14,8 @@ observed**, and every entry here would be settled by one successful run.
 - **§14–§16 have never run.** [[kiali]], [[backstage]] and the [[prometheus]]/[[grafana]] stack are
   written from their manifests and their vendor docs. Their pages carry
   `status: documented-not-observed`.
-- **The canary and the fault-injection drill have never been run against a live cluster.** §9.8 and
-  §9.9 are written from the manifests and their reasoning, and every manifest passes
+- **The canary and the fault-injection drill have never been run against a live cluster.** §9.9 and
+  §9.10 are written from the manifests and their reasoning, and every manifest passes
   `kubectl apply --dry-run=server` against the live CRDs — but the 90/10 split, the weight shift, the
   retry envelope and the outlier ejections are documented, not observed. **The claim that a
   client-side injected delay counts toward `consecutive5xxErrors` at order-api's sidecar is reasoned

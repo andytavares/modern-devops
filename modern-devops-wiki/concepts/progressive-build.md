@@ -48,33 +48,57 @@ a reader can follow the text.
 ## The other thing the checker cannot catch: run order
 
 `checks/` validates *content* — paths exist, listings are current, the single file matches `docs/`.
-Nothing validates **that a section can be run at the point it is written.** The build order and the
-reading order are the same thing everywhere except one place: §13.6 installs [[kiali]] into
-`istio-system`, a namespace §9.2 does not create until two phases later. A reader following the text
-in order hits `Error: create: failed to create: namespaces "istio-system" not found` (reproduced
-2026-08-23).
+Nothing validates **that a section can be run at the point it appears.** [[kiali]] was §13.6, in
+Phase 2 next to the [[prometheus]] it reads from, and it installs into `istio-system`, a namespace
+§9.2 does not create until two phases later. A reader executing the text in order hits
+`Error: create: failed to create: namespaces "istio-system" not found` (2026-08-23).
 
-The deferral note existed and was not enough. Two lessons, both about placement rather than content:
+The section carried a deferral note — "read this now, run it after Phase 4" — and that note is the
+thing to learn from, because **it was the wrong fix and it was already in place when the failure
+happened.** A tutorial is executed line by line. Asking the reader to hold a bookmark across two
+phases is asking them to do the sequencing the document exists to do for them, and the cost of a
+forgotten bookmark here is not the loud Helm error — it is the reader who creates the namespace by
+hand, gets a clean install against no control plane, and cannot tell the resulting empty graph from an
+idle mesh or a broken one.
 
-- **A caveat below prose is a caveat below the fold.** It sat between two paragraphs and the command
-  block, so anyone skimming to the shell fence never saw it. It is now the first thing under the
-  heading, as a `> [!warning]`.
-- **A forward pointer without a matching back-pointer is a dropped thread.** §13.6 said "come back
-  after §9.6"; §9.6 said nothing. Worse, §9.7 asserted "Kiali 302" as part of the working state — the
-  docs depended on an install no section ever told the reader to perform. §9.6 now ends by sending
-  the reader to §13.6.
+Fixed 2026-08-23 by **moving** the section: §13.6 became §9.7, immediately after §9.6, and §9.7–§9.9
+shifted to §9.8–§9.10. Every `§N.M` reference in `docs/`, the single-file edition and this wiki moved
+with it. The topic association that put Kiali next to Prometheus was real — it *is* an observability
+tool and it *does* read that Prometheus — but **build order beats topic grouping**, which is the same
+rule that puts §10 before §9 in the assembled file.
 
-Generalises to any section whose prerequisites live in a later phase: it needs a warning at the top,
-**and** a jump from the section that satisfies the prerequisite. Swept `docs/` for the same shape on
-2026-08-23: every other namespace (`monitoring`, `argocd`, `shop`, `floci`, `kafka`, `backstage`,
-`external-secrets`) is created in the same phase that first installs into it, or earlier. §13.6 is the
-only section that installs into a namespace a later phase creates.
+Two things fell out of the move, neither of which any check would have found:
+
+- **§9.3 restarted `floci` and not `shop`**, on the stale premise that `order-api` and `order-worker`
+  "don't exist yet — they'll be born with sidecars in §11". They exist from Phase 1 and Argo CD
+  reconciles them from Phase 3; §11 precedes §9 in reading order even though it follows it
+  numerically. Sidecars are injected at pod **creation** and labelling a namespace does not make a
+  Deployment drift, so nothing restarts those pods and they run un-meshed
+  ([istio.io — sidecar injection](https://istio.io/latest/docs/setup/additional-setup/sidecar-injection)).
+  §9.6's broken scrape and §9.7's graph both depend on that restart happening.
+- **The tutorial's Kiali graph table looked for an `ingress-nginx → order-api` edge**, contradicting
+  §9.3 six sections earlier, which excludes nginx from the mesh on purpose. Both claims sat in the
+  same document for as long as they were 200 lines and two phases apart.
+
+Generalises: **a section whose prerequisites are created in a later phase does not need a warning, it
+needs moving.** Swept `docs/` for others on 2026-08-23 — `monitoring`, `argocd`, `shop`, `floci`,
+`kafka`, `backstage` and `external-secrets` are each created in the phase that first installs into
+them, or earlier. Kiali was the only one.
 
 ## Two editions, one source
 
 `docs/` is the source. `modern-devops-tutorial.md` is **assembled** from it by
 `checks/build_single_edition.py`, and `checks/test_docs_are_current.py` fails if the committed file
 differs.
+
+> [!warning] Deleting a section from `docs/` resurrects the stale copy from the single file
+> `assemble()` reads `modern-devops-tutorial.md` for **front-matter sections that exist only in the
+> single-file edition** and prepends them. A section removed from `docs/` matches that description
+> exactly, so the old copy came back at the top of the document — Kiali appeared twice in the
+> assembled file, once at §13.6 above §1 and once at §9.7. `test_docs_are_current.py` passes either
+> way, because the builder is self-consistent. **Moving or deleting a section means deleting it from
+> `modern-devops-tutorial.md` by hand as well, then rebuilding.** Caught by eye on 2026-08-23, not by
+> a check.
 
 That machinery exists because the two were hand-maintained copies and drifted badly: **43 of 76 shared
 sections had diverged, and 19 sections — all of §17–§19, the entire Pants/gRPC/frontend phase — existed

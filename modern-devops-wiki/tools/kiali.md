@@ -14,34 +14,41 @@ status: documented-not-observed
 > [!info] One-liner
 > Reads `istio_requests_total` out of [[prometheus]] and draws the mesh. Everything [[istio]] does is otherwise invisible: mTLS either works or it does not, and when it does not the symptom is a 403 in a log somewhere.
 
-## Why it lives in the observability phase
+## Where it lives, and why it moved (§9.7)
 
-**Without Prometheus there is no graph.** Kiali's topology is derived entirely from
-`istio_requests_total`, which it reads out of the Prometheus installed in §13.2. That is why §13.6
-documents it next to Prometheus — and why it must be *run* after §9.6, since the merged-metrics scrape
-is what puts `istio_requests_total` in Prometheus at all.
+Kiali needs two inputs, and they are created in two different phases:
 
-> [!warning] §13.6 is the one section in the docs that must not be run where it is written
-> Reproduced 2026-08-23 on a cluster at the end of Phase 2:
->
-> ```
-> $ helm upgrade --install kiali-server kiali/kiali-server --namespace istio-system --version 2.30.0 ...
-> Release "kiali-server" does not exist. Installing it now.
-> Error: create: failed to create: namespaces "istio-system" not found
-> ```
->
-> `istio-system` is created by §9.2, two phases later, and Helm does not create a namespace without
-> `--create-namespace`. The failure is loud, which makes it the harmless case. The **harmful** case is
-> the reader who works around it with `kubectl create namespace istio-system`: the chart then installs
-> cleanly against no control plane, and Kiali serves an empty graph — visually identical to the idle
-> mesh described below, and to a broken install. Nothing distinguishes them from the UI.
->
-> The docs originally deferred this in a bolded paragraph sitting *between* two paragraphs of prose and
-> the command block, and a reader skimming to the command ran it anyway. Fixed 2026-08-23 by hoisting
-> it to a `> [!warning]` immediately under the §13.6 heading, and — the part that was actually
-> missing — adding a **back-pointer at the end of §9.6** that sends the reader to §13.6 at the first
-> moment both prerequisites exist. §9.7 asserted "Kiali 302" as part of the working state while no
-> section ever told the reader to install it. Recorded in Appendix B.
+| Input | Created by | Why Kiali is dead without it |
+|---|---|---|
+| the `istio-system` namespace | §9.2 (Phase 4) | The chart installs into it, and Helm does not create a namespace without `--create-namespace` |
+| `istio_requests_total` in [[prometheus]] | §9.6's ServiceMonitor→PodMonitor swap (Phase 4) | The topology is derived **entirely** from this metric; §13.2's Prometheus is where it is read from, but nothing writes it until the mesh is on and scraped through the sidecar |
+| sidecars on the `shop` workloads | §9.3's `rollout restart` (Phase 4) | No proxies, no `istio_requests_total`, no edges |
+
+It used to be **§13.6, in Phase 2**, next to the Prometheus it reads from, with a note saying to read
+it there and run it after Phase 4. That was wrong and the human hit it on 2026-08-23:
+
+```
+$ helm upgrade --install kiali-server kiali/kiali-server --namespace istio-system --version 2.30.0 ...
+Release "kiali-server" does not exist. Installing it now.
+Error: create: failed to create: namespaces "istio-system" not found
+```
+
+Moved 2026-08-23 to **§9.7**, immediately after §9.6, which is the first point in the build where all
+three inputs exist. §9.7→§9.8, §9.8→§9.9, §9.9→§9.10 shifted to make room, and every `§N.M` reference
+in `docs/` and this wiki moved with them.
+
+> [!warning] The loud failure is the good one
+> Working around the missing namespace with `kubectl create namespace istio-system` makes the chart
+> install cleanly against **no control plane**. Kiali then serves an empty graph — visually identical
+> to an idle mesh and to a broken install. Nothing in the UI distinguishes the three. Same symptom if
+> the `shop` pods were never restarted into the mesh: `1/1` instead of `2/2` and the graph is blank.
+> Both are in Appendix B.
+
+The rejected fix is worth recording, because it is the obvious one: keep the section in Phase 2 and
+make the deferral louder — a `> [!warning]` at the top of the section plus a back-pointer at the end
+of §9.6. **"Read this now, run it later" is not a fix.** It asks the reader to hold a bookmark across
+two phases of a document they are executing line by line, and the failure mode of a forgotten bookmark
+is the silent one above. Sequencing is the fix; annotation is not. See [[progressive-build]].
 
 ## Install
 
@@ -63,7 +70,7 @@ Plus `deploy/platform/kiali-ingress.yaml` on `kiali.localtest.me`, port 20001 �
 > privilege-escalation path with a web interface. Acceptable here only because the route is
 > `localhost` on your laptop. Production is `openid` or `header`; the default is `token`.
 
-## What to actually look at (§13.6)
+## What to actually look at (§9.7)
 
 Generate traffic first — an idle mesh draws an empty graph, which looks identical to a broken install.
 Then in **Graph**, select `shop` and `floci` and turn on **Security**:
@@ -91,8 +98,15 @@ the repo. Same argument as [[gitops]].
 
 Documented, not observed — the graph, the security padlocks and the Istio Config validation above are
 all from vendor docs and the tutorial, not from a running instance; see [[open-questions]]. The one
-thing that *has* been observed against a live cluster is the install failing in phase order
-(2026-08-23, above). See [[progressive-build]] for why `checks/` did not catch it.
+thing that *has* been observed against a live cluster is the install failing at the place the docs
+used to put it (2026-08-23, above). See [[progressive-build]] for why `checks/` did not catch it.
+
+> [!warning] One claim in the old §13.6 was wrong and is now fixed
+> Its graph table told the reader to look for an `ingress-nginx → order-api` edge and to treat nginx's
+> absence as a missing sidecar. **nginx is deliberately not in the mesh** (§9.3 excludes it; the mesh
+> boundary is `istio-ingressgateway`), so it never draws an edge and its absence is correct. This page
+> already said `istio-ingressgateway → order-api`; the tutorial disagreed with it, and moving the
+> section next to §9.3 is what made the contradiction visible. The docs now match this page.
 
 ## Related
 

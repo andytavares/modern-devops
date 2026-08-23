@@ -76,7 +76,7 @@ gRPC-specific benefit.
 
 ## The drill, and the lesson hiding in it
 
-§9.9 injects a **3 second delay into 50% of calls** — chosen to beat every timer in the chain, so
+§9.10 injects a **3 second delay into 50% of calls** — chosen to beat every timer in the chain, so
 neither the 1800 ms route timeout nor the 2000 ms deadline can rescue it. *The point of a drill is a
 real, visible failure, not a near-miss that leaves you unsure whether anything happened.*
 
@@ -98,7 +98,7 @@ answering for reasons that have nothing to do with order-api. See [[grpc]] and [
 
 ## Status
 
-**Never run against a live cluster.** §9.8 and §9.9 are written from the manifests and their reasoning;
+**Never run against a live cluster.** §9.9 and §9.10 are written from the manifests and their reasoning;
 every manifest passes `kubectl apply --dry-run=server`. See [[open-questions]].
 
 ## Related

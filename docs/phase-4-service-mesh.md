@@ -58,7 +58,7 @@ So the honest pitch: the mesh gives you **identity-based mTLS on every HTTP hop 
 > (`cluster.local/ns/istio-system/sa/istio-ingressgateway`) — that is the principal the
 > authorization policies in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist)
 > key on. Routing into the mesh is written as `Gateway` + `VirtualService`, the same objects and the
-> same language as the canary in [§9.8](#98-canary-two-versions-of-pricing-behind-one-service),
+> same language as the canary in [§9.9](#99-canary-two-versions-of-pricing-behind-one-service),
 > rather than split between an Ingress controller's annotations and Istio's config.
 >
 > Argo CD, Grafana, Kiali, Backstage and Nexus are not in the mesh and keep their own Ingresses.
@@ -144,12 +144,20 @@ Sidecars are injected at pod **creation**, so existing pods need a restart:
 
 ```bash
 kubectl -n floci rollout restart deployment/floci
+kubectl -n shop  rollout restart deployment/order-api deployment/order-worker
 
-# order-api / order-worker don't exist yet — they'll be born with sidecars in §11.
 kubectl -n floci get pods          # READY should be 2/2
+kubectl -n shop  get pods          # READY should be 2/2
 ```
 
 `2/2` is the whole verification: your container plus `istio-proxy`.
+
+> **`shop` is restarted here, not left to the next Argo CD sync.** Argo CD reconciles *manifests*, and
+> the chart's manifests did not change — adding a label to the namespace does not make the Deployment
+> drift, so nothing triggers a rollout and the pods keep running without sidecars indefinitely. The
+> restart is the injection. Skip it and [§9.6](#96-the-metrics-problem-you-just-created)'s broken
+> scrape never happens, [§9.7](#97-kiali-the-mesh-you-can-see)'s graph is empty, and the mesh looks
+> installed while carrying no traffic.
 
 One thing in the `floci` namespace must **not** be injected — the bootstrap Job from [§6.3](phase-1-the-application.md#63-bootstrap-the-s3-bucket-and-dynamodb-table). That's why its pod template already carries the opt-out:
 
@@ -504,21 +512,102 @@ scraping the application port rather than `15020`. If yours is empty but Istio's
 > condition [§13.5](phase-2-observability.md#135-an-alert-that-means-something) argues you should page
 > on.
 
-**Now go install Kiali — [§13.6](phase-2-observability.md#136-kiali-the-mesh-you-can-see).** It is
-written next to Prometheus because that is where it belongs conceptually, but this is the first
-moment both of its inputs exist: the `istio-system` namespace from
-[§9.2](#92-install-the-control-plane), and `istio_requests_total` in Prometheus from the monitor swap
-you just did. Run it any earlier and Helm fails on the missing namespace. Do it now, then come back
-here — the working state §9.7 asserts includes Kiali answering on its own hostname.
+### 9.7 Kiali: the mesh you can see
 
-### 9.7 Commit, and a word on what you cannot verify yet
+Everything the last five sections built is invisible. mTLS either works or it doesn't; an
+`AuthorizationPolicy` either matches or it doesn't; and when it doesn't, the symptom is a 403 in a log
+somewhere. Kiali reads the Prometheus from [§13.2](phase-2-observability.md#132-install) plus Istio's
+configuration, and draws the answer.
+
+**This is the earliest point in the build where it can be installed, and the earliest where it would
+have anything to draw.** It needs two things that did not both exist until the previous section: the
+`istio-system` namespace from [§9.2](#92-install-the-control-plane) — Kiali installs into it, and
+Helm does not create a namespace for you — and `istio_requests_total` in Prometheus, which is what
+the monitor swap in [§9.6](#96-the-metrics-problem-you-just-created) started collecting. Run it any
+earlier and Helm stops with `namespaces "istio-system" not found`; create that namespace by hand to
+get past it and the chart installs cleanly against no control plane, drawing an empty graph
+indistinguishable from a broken one.
+
+```bash
+helm repo add kiali https://kiali.org/helm-charts
+helm repo update
+
+helm upgrade --install kiali-server kiali/kiali-server \
+  --namespace istio-system --version 2.30.0 \
+  --set auth.strategy=anonymous \
+  --set external_services.prometheus.url=http://monitoring-kube-prometheus-prometheus.monitoring:9090 \
+  --set external_services.grafana.enabled=true \
+  --set external_services.grafana.internal_url=http://monitoring-grafana.monitoring \
+  --set external_services.grafana.external_url=http://grafana.localtest.me \
+  --wait
+```
+
+> **`auth.strategy=anonymous` means anyone who can reach the URL is an admin.** Kiali can *change* Istio configuration from the UI, so on a real cluster this is a privilege-escalation path with a web interface. It is acceptable here because the only route to it is `localhost` on your laptop. The production settings are `openid` or `header`; the default is `token`, which makes you paste a ServiceAccount token at every login and is the right friction outside a lab.
+
+Give it an Ingress, consistent with everything else:
+
+**`deploy/platform/kiali-ingress.yaml`**
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kiali
+  namespace: istio-system
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: kiali.localtest.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kiali
+                port: { number: 20001 }
+```
+
+```bash
+kubectl apply -f deploy/platform/kiali-ingress.yaml
+```
+
+Open <http://kiali.localtest.me>. Generate traffic first — an idle mesh draws an empty graph, which looks identical to a broken install:
+
+```bash
+for i in $(seq 1 50); do
+  curl -sS -o /dev/null -X POST http://shop.localtest.me/orders \
+    -H 'content-type: application/json' \
+    -d '{"customer":"ada","sku":"WIDGET-1","quantity":1,"amount_cents":100}'
+done
+```
+
+Then, in **Graph**, select the `shop` and `floci` namespaces and turn on the **Security** display option. What you are looking for, in order:
+
+| What you see | What it means |
+|---|---|
+| A padlock on the `order-api → floci` edge | mTLS is actually in use on that hop — not just configured, *observed*. |
+| `istio-ingressgateway → order-api` present | The edge is meshed and reporting. It is the **gateway**, not `ingress-nginx`, that appears here — nginx is deliberately outside the mesh ([§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones)), so it never draws an edge and its absence is not a fault. |
+| No edge between `order-api` and `order-worker` | Correct, and worth staring at. They are joined by Kafka, which is outside the mesh, so the mesh cannot draw that relationship. **A service graph is not an architecture diagram** — it shows synchronous calls the proxies saw, and it is blind to your entire async path. |
+| Red edges into `floci` | The `deny-all` in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) is doing its job to something. Click the edge → **Traffic** to see which principal was refused. |
+
+The other tab worth your time is **Istio Config**, which validates every `PeerAuthentication`, `AuthorizationPolicy` and `DestinationRule` in the cluster and flags the ones that reference workloads or service accounts that don't exist. That is the exact failure mode [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) warned about — a policy whose `principals` have a typo denies everything and looks, from `kubectl get pods`, like a perfectly healthy cluster.
+
+```bash
+git add deploy/platform/kiali-ingress.yaml
+git commit -m "feat(observability): kiali"
+```
+
+> **Kiali is a read-mostly tool, and that's the discipline.** It will happily let you edit Istio config through the UI. Don't: every object it manages is in git, and a change made in the console is a change Argo CD will revert on its next sync — or worse, won't, because you edited something Argo doesn't track. Use it to see and to validate; make changes in the repo.
+
+### 9.8 Commit, and a word on what you cannot verify yet
 
 ```bash
 git add deploy/platform/istio deploy/platform/floci-bootstrap.yaml
 git commit -m "feat(platform): istio with strict mtls and default-deny authz"
 ```
 
-`order-api` and `order-worker` don't exist yet, so §9.4's proof covers Floci only. The rest of the mesh — the edge path through the gateway, the authorization policies keyed on those two service accounts — becomes verifiable in [§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery), when Argo CD deploys the chart into the now-enrolled `shop` namespace. If a page load returns `RBAC: access denied` at that point, the policy in §9.5 is what to read first, and `istioctl analyze -n shop` is what to run.
+§9.4's proof covered Floci. `order-api` and `order-worker` have been running since [§10](phase-1-the-application.md#10-packaging-the-app-with-helm) and are reconciled by Argo CD as of [§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery), but they picked up their sidecars only when [§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones) labelled `shop` and the pods restarted — so the edge path through the gateway and the authorization policies keyed on those two service accounts are verifiable now, on this deployment. If a page load returns `RBAC: access denied`, the policy in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) is what to read first, and `istioctl analyze -n shop` is what to run.
 
 When it is running, do not accept a `200` from the browser as proof that the edge is meshed — a `200`
 only tells you bytes moved, and the first two hops are plaintext by design. Ask the destination
@@ -541,7 +630,7 @@ The working state is `app.localtest.me` returning 200, `shop.localtest.me/health
 the platform UIs still answering on their own exact hostnames — Argo CD 200, Grafana 302, Kiali 302,
 Backstage 200, none of them through the gateway.
 
-### 9.8 Canary: two versions of `pricing` behind one Service
+### 9.9 Canary: two versions of `pricing` behind one Service
 
 Everything above secures traffic. This section *steers* it — and it is the half of a service mesh that
 most people install one for.
@@ -817,7 +906,7 @@ interval, and because v2 discounts 10% at `quantity >= 3` the totals visibly cha
 between two identical builds proves the routing works; a canary between two *different behaviours*
 proves you would have noticed if the new one were wrong.
 
-### 9.9 Break it on purpose: fault injection
+### 9.10 Break it on purpose: fault injection
 
 A canary tells you the routing works. It tells you nothing about what happens when `pricing` is slow —
 and slow is the failure mode that matters, because it is the one that consumes the caller's budget
@@ -901,8 +990,8 @@ nginx keeps ports 80/443 and the platform's own UIs, and knows nothing about any
 Your monitoring survived, because you fixed it when it broke.
 
 You have also written the routing, retry and outlier-detection policy for a canary
-([§9.8](#98-canary-two-versions-of-pricing-behind-one-service)) and the drill that breaks it
-([§9.9](#99-break-it-on-purpose-fault-injection)) — neither of which you can run until
+([§9.9](#99-canary-two-versions-of-pricing-behind-one-service)) and the drill that breaks it
+([§9.10](#910-break-it-on-purpose-fault-injection)) — neither of which you can run until
 [Phase 7](phase-7-polyglot-monorepo.md) builds the `pricing` service they steer. Come back for them.
 
 **Next: [Phase 5 — Making it someone else's platform](phase-5-developer-portal.md).**

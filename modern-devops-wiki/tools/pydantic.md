@@ -60,7 +60,7 @@ startup **naming the field**.
 side effect runs.
 
 `pricing`'s settings also carry `pricing_timeout_seconds` and `pricing_health_timeout_seconds` on the
-caller side — settings rather than constants **because they are the numbers you tune when §9.8 starts
+caller side — settings rather than constants **because they are the numbers you tune when §9.9 starts
 injecting delays**. See [[timeouts-and-retries]].
 
 ## Related

@@ -148,3 +148,52 @@ files, a record of what was learned.
 
   Tutorial change, so `modern-devops-tutorial.md` was regenerated: 8696 → 8713 lines.
   `verify_doc_listings.py` reports failures: 0; `test_docs_are_current.py` passes.
+
+- **2026-08-23 (same day, supersedes the entry above)** — **Kiali moved: §13.6 → §9.7.** The first fix
+  for the namespace error was to make the deferral louder — a `> [!warning]` at the top of §13.6 and a
+  back-pointer at the end of §9.6. The human rejected it outright: *"read this now and go back later
+  is unacceptable."* Correct call, and the reason is worth keeping. **A tutorial is executed line by
+  line; a deferral note asks the reader to hold a bookmark across two phases, and the cost of a
+  forgotten bookmark is not the loud Helm error — it is the reader who creates `istio-system` by hand,
+  gets a clean install against no control plane, and cannot tell the empty graph from an idle mesh.**
+  Sequencing is the fix. Annotation is not. The topic association (Kiali next to the Prometheus it
+  reads) was real but loses to build order — the same rule that emits §10 before §9 in the assembled
+  file.
+
+  The move: §13.6 → §9.7, immediately after §9.6, which is the first point where all three of its
+  inputs exist (`istio-system` from §9.2, `istio_requests_total` from §9.6's monitor swap, sidecars on
+  `shop` from §9.3). Old §9.7→§9.8, §9.8→§9.9, §9.9→§9.10, with every `§N.M` reference and anchor in
+  `docs/`, `modern-devops-tutorial.md` and this wiki moved with them.
+
+  **Three defects surfaced by the move, none of which any check would have found:**
+
+  1. **§9.3 restarted `floci` and not `shop`**, with the comment *"order-api / order-worker don't
+     exist yet — they'll be born with sidecars in §11."* False in the phased edition: they exist from
+     Phase 1 and Argo CD reconciles them from Phase 3, and §11 *precedes* §9 in reading order despite
+     following it numerically. Sidecars inject at pod **creation**, and labelling a namespace does not
+     make a Deployment drift, so Argo CD never restarts them and they run un-meshed forever
+     (verified against istio.io/latest/docs/setup/additional-setup/sidecar-injection via Context7).
+     §9.6's "your monitoring just broke" and §9.7's graph both depend on that restart. §9.3 now
+     restarts `shop` too and says why Argo CD will not do it for you. The same stale premise in old
+     §9.7's commit section was rewritten.
+  2. **The Kiali graph table told the reader to look for an `ingress-nginx → order-api` edge** and to
+     read nginx's absence as a missing sidecar — contradicting §9.3, which excludes nginx from the
+     mesh deliberately, six sections earlier. [[kiali]] here has said `istio-ingressgateway` all
+     along; the two only collided once they were in the same phase. Fixed in the docs.
+  3. **`build_single_edition.py` resurrects deleted sections.** Its `lead` step pulls sections that
+     exist only in `modern-devops-tutorial.md` and prepends them as front matter — which is exactly
+     what a section removed from `docs/` looks like. The old §13.6 reappeared above §1, so Kiali
+     shipped twice in the assembled file, and `test_docs_are_current.py` passed because the builder is
+     self-consistent. **Moving or deleting a section requires deleting it from
+     `modern-devops-tutorial.md` by hand before rebuilding.** Now on [[progressive-build]].
+
+  Appendix B: the namespace row rewritten to point at §9.7, and the "Kiali graph is empty" row now
+  names the `1/1` un-restarted-pods case first, since it is indistinguishable from the others in the
+  UI.
+
+  `modern-devops-tutorial.md` regenerated: 8708 lines, one Kiali section, at §9.7 in build position.
+  `test_docs_are_current.py` passes; `verify_doc_listings.py` failures: 0.
+
+  **The rule this leaves behind:** a section whose prerequisites are created in a later phase does not
+  need a warning, it needs moving. A sweep of `docs/` found no others — every remaining namespace is
+  created in the phase that first installs into it, or earlier.

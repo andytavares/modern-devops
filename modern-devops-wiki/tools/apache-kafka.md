@@ -66,7 +66,7 @@ partition permanently, and `PutItem` on the same `order_id` is idempotent so rep
 and rebalancing, and putting Envoy in that path is a known source of broker-discovery failures for no
 security gain. Consequence: **[[kiali]] cannot draw an edge between order-api and order-worker**,
 because there is no synchronous call to observe. A service graph is not an architecture diagram — it
-shows what the proxies saw, and it is blind to the entire async path (§13.6). See [[service-mesh]].
+shows what the proxies saw, and it is blind to the entire async path (§9.7). See [[service-mesh]].
 
 **Malformed messages are dropped**, not dead-lettered. Appendix C lists a DLQ topic plus an alert on
 its rate as the next step.
