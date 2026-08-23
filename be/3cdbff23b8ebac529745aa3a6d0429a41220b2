@@ -1,0 +1,33 @@
+modern-devops-wiki/tools/openbao.md
+  s_513c4510dbcf04::t_595fc3cd24c540 116-124
+modern-devops-wiki/tools/sonatype-nexus.md
+  s_513c4510dbcf04::t_595fc3cd24c540 152
+  s_513c4510dbcf04::t_9a169686fca03e 8,104-148
+  s_513c4510dbcf04::t_fad379b2ecc358 149
+deploy/platform/openbao-bootstrap.yaml
+  s_513c4510dbcf04::t_bdcd4a8ca8ba01 33-40
+docs/phase-1-the-application.md
+  s_513c4510dbcf04::t_bdcd4a8ca8ba01 1669-1676
+modern-devops-tutorial.md
+  s_513c4510dbcf04::t_595fc3cd24c540 2382-2389,8679
+docs/appendices.md
+  s_513c4510dbcf04::t_bdcd4a8ca8ba01 58
+modern-devops-wiki/log.md
+  s_513c4510dbcf04::t_e9a1875198e5e4 249-293
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "be3cdbff23b8ebac529745aa3a6d0429a41220b2",
+  "prompts": {},
+  "sessions": {
+    "s_513c4510dbcf04": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8a40aa2-818d-44cb-b795-8f7ebab27e87",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
