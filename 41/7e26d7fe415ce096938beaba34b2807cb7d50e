@@ -1,0 +1,35 @@
+docs/phase-2-observability.md
+  s_513c4510dbcf04::t_8c2c39137acfc3 301-312,317-319
+modern-devops-wiki/log.md
+  s_513c4510dbcf04::t_d4e3f55e0e37cb 110-150
+modern-devops-wiki/tools/kiali.md
+  s_513c4510dbcf04::t_4df2aa4d90d117 8,24-45,92-95,99
+modern-devops-tutorial.md
+  s_513c4510dbcf04::t_4e7ab0e078d6ff 3589-3600,3605-3607,5059-5065,8568
+modern-devops-wiki/concepts/progressive-build.md
+  s_513c4510dbcf04::t_a1d9abe6711ce7 5,48-67
+  s_513c4510dbcf04::t_be87dbfa8d2490 68-71
+  s_513c4510dbcf04::t_b8230338ad1165 72
+docs/phase-4-service-mesh.md
+  s_513c4510dbcf04::t_0826419245f532 507-513
+docs/appendices.md
+  s_513c4510dbcf04::t_6b4aa8c878e72f 79
+modern-devops-wiki/index.md
+  s_513c4510dbcf04::t_d4e3f55e0e37cb 75,117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "417e26d7fe415ce096938beaba34b2807cb7d50e",
+  "prompts": {},
+  "sessions": {
+    "s_513c4510dbcf04": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8a40aa2-818d-44cb-b795-8f7ebab27e87",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
