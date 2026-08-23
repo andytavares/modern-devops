@@ -197,3 +197,52 @@ files, a record of what was learned.
   **The rule this leaves behind:** a section whose prerequisites are created in a later phase does not
   need a warning, it needs moving. A sweep of `docs/` found no others — every remaining namespace is
   created in the phase that first installs into it, or earlier.
+
+- **2026-08-23** — **ESO's `403 permission denied` was OpenBao having forgotten it existed.** Reported
+  from [[argo-cd]]: `unable to log in with Kubernetes auth ... /v1/auth/kubernetes/login Code: 403`.
+  `ClusterSecretStore/openbao` `InvalidProviderConfig`, both `ExternalSecret`s in `shop`
+  `SecretSyncedError` for 16–18h.
+
+  Diagnosed against the live cluster, not from the error text: `openbao-0` showed `RESTARTS 1
+  (5h35m ago)`, and `bao auth list` inside the pod returned `token` and `userpass` only — no
+  `kubernetes`. `bao secrets list` had no `shop` mount, `bao policy list` had no `shop-read`, and
+  `auth/kubernetes/role/eso` was `No value found`. Dev mode is in-memory; the restart took all of it.
+
+  **The trap worth keeping: a 403 on `/v1/auth/kubernetes/login` is the same answer for "your role
+  does not match" and for "that auth method does not exist".** The message names Kubernetes auth, so
+  it reads as a ServiceAccount, TokenReview or role-binding problem, and every one of those was fine.
+  `bao auth list` is the cheap first check and it settles it immediately. Now on [[openbao]],
+  [[external-secrets-operator]] and Appendix B — beside the *other* row that produces these same words
+  for a completely different reason, a pinned `token_reviewer_jwt` expiring.
+
+  **Root cause, and the fix.** `deploy/platform/openbao-operator-auth.yaml` packaged §7.5a's three
+  steps and opened with the comment *"The machine path already exists"* — true exactly until the first
+  restart. §7.3's KV mount and §7.4's kubernetes auth, policy and role were hand-typed shell that lived
+  nowhere but in the reader's terminal. The Job restored the half nobody needed and none of the half
+  that had actually been lost.
+
+  Replaced by `deploy/platform/openbao-bootstrap.yaml`, covering §7.3 + §7.4 + §7.5a in build order,
+  plus the `system:auth-delegator` ClusterRoleBinding declaratively so one apply restores the whole
+  machine path. Two design points:
+
+  - **Delete-then-apply, not apply.** A Job's pod template is immutable; this was already true of the
+    old Job and is now in Appendix D as the recovery command.
+  - **The idempotency that matters is not "enable is a no-op".** Enabling an enabled mount and
+    rewriting a policy already were. `kv put` is the one that bites: a re-run that regenerated
+    `shop/order-api`'s `signing_key` would leave every running `order-api` pod holding the old value,
+    since env vars are read at process start. The Job reads each path first and seeds only what is
+    missing.
+
+  The lost values were recoverable in principle — the `shop` Secrets ESO last synced still held them —
+  but the sandbox blocked reading Secret data, so the human chose: regenerate `signing_key` (safe here
+  and only here — order-api HMACs each payload into S3 and **nothing ever verifies it**), and re-seed
+  `shop/nexus` from the documented `ci` / `ci-password-change-me`. `nexus-password` is now a third key
+  in the `openbao-bootstrap` Secret rather than a literal in a committed manifest.
+
+  Verified: Job completed, `bao auth list` shows `kubernetes/`, `shop/` mount back with both paths,
+  `eso` role bound to `external-secrets`/`external-secrets` with `shop-read` and `ttl=1h`. Forced a
+  resync — `ClusterSecretStore` `Valid`, both `ExternalSecret`s `SecretSynced` within 15s.
+
+  Tutorial change, so `modern-devops-tutorial.md` was regenerated; §7.4 gained a warning that its state
+  is in-memory, §7.5a now packages all of it, Appendix B gained the symptom row and Appendix D the
+  recovery command.

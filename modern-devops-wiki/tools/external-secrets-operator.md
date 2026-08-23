@@ -5,7 +5,7 @@ role: projects OpenBao values into ordinary Kubernetes Secrets
 version: chart 2.6.0
 docs: https://external-secrets.io/latest/
 date_added: 2026-08-17
-date_updated: 2026-08-17
+date_updated: 2026-08-23
 status: in-use
 ---
 
@@ -69,9 +69,15 @@ Otherwise deleting the declaration leaves an orphaned credential in the cluster.
 
 ## Failure modes worth memorising
 
+- **`InvalidProviderConfig`, `403 permission denied` on `/v1/auth/kubernetes/login`** — check
+  `bao auth list` **before** anything else. Observed 2026-08-23: the OpenBao pod had restarted and
+  dev mode lost the `kubernetes` auth method entirely, and a login against a mount that does not exist
+  is refused with the same 403 as a login with the wrong role. Nothing about ESO was wrong. Recovery
+  is the bootstrap Job — see [[openbao]].
 - **`ClusterSecretStore Invalid`** — usually a pinned `token_reviewer_jwt` that expired, a missing
   `system:auth-delegator` binding, or a role-name mismatch. Check `bao read auth/kubernetes/config`
-  first (Appendix B, and [[openbao]]).
+  first (Appendix B, and [[openbao]]). Same words, different cause from the one above; the two are
+  told apart by `bao auth list`.
 - **`SecretSyncedError`, `permission denied`** — the KV v2 policy is missing the `/data/` segment.
   It must be `path "shop/data/*"`, not `path "shop/*"` (§7.4).
 - **[[argo-cd]] parks the `platform` Application on `OutOfSync` forever** — the ESO CRD defaults a pile

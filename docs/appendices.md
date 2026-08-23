@@ -60,6 +60,7 @@ Two version rules worth internalising:
 | CI: `go: -race requires cgo` | Test step on an alpine Go image | `golang:1.26-alpine` is `CGO_ENABLED=0` with no gcc. Use `golang:1.26` for the test step ([§12.5](phase-3-delivery.md#125-the-pipeline)). |
 | Build fails cloning `buildkite-plugins/kubernetes-buildkite-plugin` | The Buildkite queue is **Hosted**, not Self-hosted | The job ran on Buildkite's machines, which don't understand the `kubernetes` plugin. Queue type can't be changed after creation — delete it and recreate as Self-hosted ([§12.2](phase-3-delivery.md#122-create-the-buildkite-side)). |
 | `agent-stack-k8s` logs `job tags do not match expected tags in configuration` | Same as above | A hosted agent adds `namespace-experiments=docker.builder=local`; your controller advertises only `queue=kubernetes`. |
+| ESO: `unable to log in with Kubernetes auth ... /v1/auth/kubernetes/login Code: 403 * permission denied`, `ClusterSecretStore` `InvalidProviderConfig` | The OpenBao pod restarted and dev mode lost the `kubernetes` auth method, the `shop` mount, the policies and the roles | The 403 is the same answer for "wrong role" and "no such auth method", so check `bao auth list` **first** — if `kubernetes/` is missing, nothing about ESO is wrong. Recover with `kubectl delete -f deploy/platform/openbao-bootstrap.yaml && kubectl apply -f deploy/platform/openbao-bootstrap.yaml` ([§7.5a](phase-1-the-application.md#75a-give-humans-an-auth-method-too)); the Job re-creates everything and leaves existing secret values alone. `kubectl -n openbao get pod openbao-0` — a non-zero `RESTARTS` is the confirmation. |
 | ClusterSecretStore `Invalid` | A pinned `token_reviewer_jwt` expired, or the OpenBao SA lacks TokenReview, or the role name mismatches | First check `bao read auth/kubernetes/config` — if it shows a `token_reviewer_jwt`, that is the cause: the projected SA token it captured has expired. Re-run the [§7.4](phase-1-the-application.md#74-configure-kubernetes-authentication) config **without** that field and without `kubernetes_ca_cert`, so OpenBao reads both from its own mount on every request. Otherwise: `kubectl -n external-secrets logs deploy/external-secrets`, check the `system:auth-delegator` binding, and that the role is `eso` bound to SA `external-secrets` in ns `external-secrets`. |
 | ExternalSecret `SecretSyncedError`, `permission denied` | KV v2 path missing the `/data/` segment | The policy must be `path "shop/data/*"`, not `path "shop/*"` ([§7.4](phase-1-the-application.md#74-configure-kubernetes-authentication)). |
 | Kafka pods `Pending` | No PVs / insufficient resources | `kubectl -n kafka describe pod <pod>`. On kind the default local-path provisioner needs disk — check Docker's disk allocation. |
@@ -150,6 +151,13 @@ $BAO kv put shop/order-api signing_key=...        # a full overwrite of the path
 # under shop-admin; so do secrets enable, auth enable and policy write.
 BAO_ROOT="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
 $BAO_ROOT policy read shop-read
+$BAO_ROOT auth list                       # check this FIRST after any OpenBao restart
+
+# OpenBao — rebuild everything a dev-mode restart lost (§7.5a). The Job's pod
+# template is immutable, so it is delete-then-apply, not apply.
+kubectl delete -f deploy/platform/openbao-bootstrap.yaml
+kubectl apply  -f deploy/platform/openbao-bootstrap.yaml
+kubectl -n openbao logs job/openbao-bootstrap -f
 
 # External Secrets
 kubectl get clustersecretstore

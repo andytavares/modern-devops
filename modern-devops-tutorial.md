@@ -2197,6 +2197,12 @@ echo "policy and role created"
 '
 ```
 
+> **This is in-memory state, and it does not survive a restart.** Dev-mode OpenBao keeps the mount,
+> the secrets, the auth methods, the policies and the roles in RAM. When that pod restarts — and it
+> will — all of it is gone, and the first thing you see is External Secrets getting
+> `403 permission denied` from `/v1/auth/kubernetes/login`. Everything in §7.3 and §7.4 is packaged as
+> a re-runnable Job in [§7.5a](#75a-give-humans-an-auth-method-too); that Job is the recovery.
+
 > **Least privilege, concretely.** The `shop-read` policy grants `read` and nothing else — ESO cannot write, delete, or list secret *values*. The role is bound to one ServiceAccount in one namespace, so a compromised pod in another namespace cannot assume it. `ttl=1h` means a stolen token expires within the hour. Those three constraints — capability, identity binding, lifetime — are the whole of secrets access control. Every vault does it the same way.
 
 ### 7.5 Install External Secrets Operator
@@ -2333,38 +2339,75 @@ That 403 is the point of the section. The operator can rotate every credential o
 
 > **`bao kv patch` needs a separate `patch` capability, and it is deliberately not granted.** Every `kv put` in this tutorial is a full overwrite of the version: `kv put shop/backstage github_token=...` on a path that also holds `postgres_password` destroys the other keys. Write every key of a path in one command, and read the path first if you are unsure what is on it.
 
-The same three steps are packaged as a re-runnable Job, because dev-mode OpenBao loses everything on restart and you will need them again:
+Everything you have typed since [§7.3](#73-put-secrets-in-openbao) — the mount, the secrets on it,
+both auth methods, three policies, a role and a user — lives in memory in a dev-mode OpenBao and is
+gone the moment that pod restarts. It **will** restart. So all of it is packaged as one re-runnable
+Job:
 
-**`deploy/platform/openbao-operator-auth.yaml`**
+**`deploy/platform/openbao-bootstrap.yaml`**
 
 ```yaml
-# The human path into OpenBao.
+# Everything OpenBao forgets when its pod restarts, in one re-runnable Job.
 #
-# The machine path already exists: ESO authenticates with its ServiceAccount
-# through the kubernetes auth method and gets the read-only `shop-read` policy.
-# Humans have had nothing, so every operator write has been made with the root
-# token. The root policy is meant for initial setup and emergencies only and
-# should be revoked once a real auth method exists
-# (https://openbao.org/docs/concepts/tokens). This Job builds that auth method:
-# `userpass`, a scoped `shop-admin` policy, and an `operator` user bound to it.
+# This cluster runs OpenBao in dev mode: storage is in-memory, so a restart
+# takes the KV mount, the secrets in it, both auth methods, every policy and
+# every role with it. What survives is only what lives in the Kubernetes API —
+# the ClusterRoleBinding below, and the stale Secrets ESO last synced.
 #
-# Bootstrapping an auth method is itself a root operation — there is no way to
-# create the first non-root path without a root token. That token is supplied at
-# run time out of a Secret rather than committed here:
+# The symptom is not "OpenBao is empty". It is ESO failing to log in at all:
+#
+#   unable to log in with Kubernetes auth: Code: 403. Errors: * permission denied
+#
+# — because a login against an auth method that no longer exists is refused the
+# same way a login with the wrong role is. The ClusterSecretStore goes
+# InvalidProviderConfig and every ExternalSecret stops refreshing.
+#
+# Three sections' worth of setup, in build order:
+#   §7.3  the `shop` KV v2 mount and the secrets the platform consumes
+#   §7.4  the machine path — kubernetes auth, `shop-read`, the `eso` role
+#   §7.5a the human path — userpass, `shop-admin`, the `operator` user
+#
+# Bootstrapping is a root operation: mounting an engine writes `sys/mounts`,
+# enabling an auth method writes `sys/auth`, and writing a policy writes
+# `sys/policies/acl/*`. None of those are granted by any scoped policy, and an
+# identity that could write policies could grant itself anything. So the root
+# token is supplied at run time out of a Secret rather than committed here:
 #
 #   kubectl -n openbao create secret generic openbao-bootstrap \
 #     --from-literal=root-token=root \
 #     --from-literal=operator-password=<choose one> \
+#     --from-literal=nexus-password=ci-password-change-me \
 #     --dry-run=client -o yaml | kubectl apply -f -
 #
 # A Job's pod template is immutable once created, so re-running this is
-# `kubectl delete -f` then `kubectl apply -f`. The script itself is idempotent:
-# enabling an already-enabled auth method and rewriting an existing policy or
-# user are all no-ops.
+# `kubectl delete -f` then `kubectl apply -f`. The script is idempotent in the
+# way that matters: enabling an enabled mount or auth method and rewriting a
+# policy, role or user are all no-ops, and **existing secret values are left
+# alone**. Re-running it must never rotate a key that live pods are using.
+---
+# OpenBao verifies a presented ServiceAccount JWT by calling the Kubernetes
+# TokenReview API, which requires `system:auth-delegator` on its own
+# ServiceAccount. §7.4 creates this with `kubectl create clusterrolebinding`;
+# it is declared here too so that one `kubectl apply -f` restores the whole
+# machine path. It is cluster-scoped and survives an OpenBao restart, so on a
+# restart recovery this half is already in place and re-applying is a no-op.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openbao-token-review
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: openbao
+    namespace: openbao
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: openbao-operator-auth
+  name: openbao-bootstrap
   namespace: openbao
 spec:
   backoffLimit: 6
@@ -2388,6 +2431,9 @@ spec:
             - name: OPERATOR_PASSWORD
               valueFrom:
                 secretKeyRef: { name: openbao-bootstrap, key: operator-password }
+            - name: NEXUS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: openbao-bootstrap, key: nexus-password }
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -2396,6 +2442,70 @@ spec:
               echo "waiting for openbao..."
               until bao status >/dev/null 2>&1; do sleep 2; done
 
+              # --- §7.3 the mount, and the secrets on it -------------------
+              # KV v2: versioning and soft-delete. v1 is a flat overwrite with
+              # no history, which is the wrong default for application config.
+              echo "enabling kv v2 at shop/ (idempotent)"
+              bao secrets enable -path=shop -version=2 kv 2>/dev/null || true
+
+              # Only ever create what is missing. `kv put` is a full overwrite
+              # of the version, and a re-run that rotated the signing key would
+              # leave every running order-api pod holding the previous one.
+              if bao kv get -field=signing_key shop/order-api >/dev/null 2>&1; then
+                echo "shop/order-api exists, leaving it alone"
+              else
+                echo "seeding shop/order-api with a new signing key"
+                # No openssl in this image; od+tr over /dev/urandom is the
+                # busybox-safe way to get 32 hex-encoded random bytes.
+                bao kv put shop/order-api \
+                  signing_key="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              fi
+
+              if bao kv get -field=password shop/nexus >/dev/null 2>&1; then
+                echo "shop/nexus exists, leaving it alone"
+              else
+                echo "seeding shop/nexus"
+                bao kv put shop/nexus username=ci password="$NEXUS_PASSWORD"
+              fi
+
+              # --- §7.4 the machine path ----------------------------------
+              echo "enabling kubernetes auth (idempotent)"
+              bao auth enable kubernetes 2>/dev/null || true
+
+              # No token_reviewer_jwt and no kubernetes_ca_cert, deliberately.
+              # Omitting them is the documented configuration for an OpenBao
+              # inside the cluster it authenticates against: it then reads both
+              # from its own ServiceAccount mount on every request. Passing them
+              # freezes a snapshot of a token Kubernetes rotates hourly, and an
+              # hour later every TokenReview fails `permission denied` — the
+              # same 403 this Job exists to fix, with a much worse cause.
+              bao write auth/kubernetes/config \
+                kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+
+              # Read-only, and only on this mount. KV v2 stores data under
+              # <mount>/data/<path>; forgetting the /data/ segment is the
+              # second most common mistake with v2.
+              echo "writing shop-read policy"
+              bao policy write shop-read - <<'POLICY'
+              path "shop/data/*" {
+                capabilities = ["read"]
+              }
+              path "shop/metadata/*" {
+                capabilities = ["read", "list"]
+              }
+              POLICY
+
+              # Capability, identity binding, lifetime — the whole of secrets
+              # access control. One ServiceAccount, in one namespace, for an
+              # hour.
+              echo "binding the eso role to external-secrets"
+              bao write auth/kubernetes/role/eso \
+                bound_service_account_names=external-secrets \
+                bound_service_account_namespaces=external-secrets \
+                policies=shop-read \
+                ttl=1h
+
+              # --- §7.5a the human path -----------------------------------
               echo "enabling userpass (idempotent)"
               bao auth enable userpass 2>/dev/null || true
 
@@ -2423,18 +2533,37 @@ spec:
 
               echo "--- result ---"
               bao auth list
-              bao policy read shop-admin
+              bao secrets list
+              bao kv list shop/
+              bao read auth/kubernetes/role/eso
 ```
 
 ```bash
 kubectl -n openbao create secret generic openbao-bootstrap \
   --from-literal=root-token=root \
   --from-literal=operator-password=change-me \
+  --from-literal=nexus-password=ci-password-change-me \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl apply -f deploy/platform/openbao-operator-auth.yaml
-kubectl -n openbao logs job/openbao-operator-auth -f
+kubectl apply -f deploy/platform/openbao-bootstrap.yaml
+kubectl -n openbao logs job/openbao-bootstrap -f
 ```
+
+> **What a restart actually looks like, and why the error does not mention OpenBao.** In-memory
+> storage means a restarted OpenBao comes back with no `shop` mount, no `kubernetes` auth method, no
+> policies and no roles. What you see is External Secrets failing to log in:
+>
+> ```
+> unable to log in with Kubernetes auth: Error making API request.
+> URL: PUT http://openbao.openbao.svc.cluster.local:8200/v1/auth/kubernetes/login
+> Code: 403. Errors: * permission denied
+> ```
+>
+> **403 on a login is the same answer for "wrong role" and for "that auth method does not exist"**,
+> which sends people to debug their ServiceAccount binding when the mount is simply not there. Check
+> `bao auth list` before anything else. Recovery is `kubectl delete -f` then `kubectl apply -f` on
+> this Job — a Job's pod template is immutable, so it must be deleted and recreated, and the script is
+> written so a re-run never overwrites a secret value that is already present.
 
 > **The root token is not revoked here, and cannot be.** This cluster runs OpenBao in dev mode, where the root token is a fixed value passed at startup and recreated every time the pod restarts — revoking it accomplishes nothing. In a real cluster the last step of this section is `bao token revoke <root-token>`, after which a new root token exists only if you run `bao operator generate-root` with a quorum of unseal-key holders. That quorum requirement is the whole design: root is an event several people have to agree to, not a string in someone's shell history.
 
@@ -8544,6 +8673,7 @@ Two version rules worth internalising:
 | CI: `go: -race requires cgo` | Test step on an alpine Go image | `golang:1.26-alpine` is `CGO_ENABLED=0` with no gcc. Use `golang:1.26` for the test step ([§12.5](#125-the-pipeline)). |
 | Build fails cloning `buildkite-plugins/kubernetes-buildkite-plugin` | The Buildkite queue is **Hosted**, not Self-hosted | The job ran on Buildkite's machines, which don't understand the `kubernetes` plugin. Queue type can't be changed after creation — delete it and recreate as Self-hosted ([§12.2](#122-create-the-buildkite-side)). |
 | `agent-stack-k8s` logs `job tags do not match expected tags in configuration` | Same as above | A hosted agent adds `namespace-experiments=docker.builder=local`; your controller advertises only `queue=kubernetes`. |
+| ESO: `unable to log in with Kubernetes auth ... /v1/auth/kubernetes/login Code: 403 * permission denied`, `ClusterSecretStore` `InvalidProviderConfig` | The OpenBao pod restarted and dev mode lost the `kubernetes` auth method, the `shop` mount, the policies and the roles | The 403 is the same answer for "wrong role" and "no such auth method", so check `bao auth list` **first** — if `kubernetes/` is missing, nothing about ESO is wrong. Recover with `kubectl delete -f deploy/platform/openbao-bootstrap.yaml && kubectl apply -f deploy/platform/openbao-bootstrap.yaml` ([§7.5a](#75a-give-humans-an-auth-method-too)); the Job re-creates everything and leaves existing secret values alone. `kubectl -n openbao get pod openbao-0` — a non-zero `RESTARTS` is the confirmation. |
 | ClusterSecretStore `Invalid` | A pinned `token_reviewer_jwt` expired, or the OpenBao SA lacks TokenReview, or the role name mismatches | First check `bao read auth/kubernetes/config` — if it shows a `token_reviewer_jwt`, that is the cause: the projected SA token it captured has expired. Re-run the [§7.4](#74-configure-kubernetes-authentication) config **without** that field and without `kubernetes_ca_cert`, so OpenBao reads both from its own mount on every request. Otherwise: `kubectl -n external-secrets logs deploy/external-secrets`, check the `system:auth-delegator` binding, and that the role is `eso` bound to SA `external-secrets` in ns `external-secrets`. |
 | ExternalSecret `SecretSyncedError`, `permission denied` | KV v2 path missing the `/data/` segment | The policy must be `path "shop/data/*"`, not `path "shop/*"` ([§7.4](#74-configure-kubernetes-authentication)). |
 | Kafka pods `Pending` | No PVs / insufficient resources | `kubectl -n kafka describe pod <pod>`. On kind the default local-path provisioner needs disk — check Docker's disk allocation. |
@@ -8634,6 +8764,13 @@ $BAO kv put shop/order-api signing_key=...        # a full overwrite of the path
 # under shop-admin; so do secrets enable, auth enable and policy write.
 BAO_ROOT="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
 $BAO_ROOT policy read shop-read
+$BAO_ROOT auth list                       # check this FIRST after any OpenBao restart
+
+# OpenBao — rebuild everything a dev-mode restart lost (§7.5a). The Job's pod
+# template is immutable, so it is delete-then-apply, not apply.
+kubectl delete -f deploy/platform/openbao-bootstrap.yaml
+kubectl apply  -f deploy/platform/openbao-bootstrap.yaml
+kubectl -n openbao logs job/openbao-bootstrap -f
 
 # External Secrets
 kubectl get clustersecretstore
