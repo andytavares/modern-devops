@@ -1666,6 +1666,14 @@ Job:
 #     --from-literal=nexus-password=ci-password-change-me \
 #     --dry-run=client -o yaml | kubectl apply -f -
 #
+# `nexus-password` must be the password the `ci` user actually has in Nexus
+# (§5.4), not the one the tutorial printed. Nexus owns that credential; this
+# Secret is a second copy of it, and two copies drift. Change it in Nexus and
+# this key becomes a time bomb: everything keeps working off the value already
+# in OpenBao until the next restart re-seeds the stale one, and the symptom is
+# a CI push failing `authentication required` hours later. Rotate both, or
+# neither.
+#
 # A Job's pod template is immutable once created, so re-running this is
 # `kubectl delete -f` then `kubectl apply -f`. The script is idempotent in the
 # way that matters: enabling an enabled mount or auth method and rewriting a

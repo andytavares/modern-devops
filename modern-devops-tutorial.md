@@ -2379,6 +2379,14 @@ Job:
 #     --from-literal=nexus-password=ci-password-change-me \
 #     --dry-run=client -o yaml | kubectl apply -f -
 #
+# `nexus-password` must be the password the `ci` user actually has in Nexus
+# (§5.4), not the one the tutorial printed. Nexus owns that credential; this
+# Secret is a second copy of it, and two copies drift. Change it in Nexus and
+# this key becomes a time bomb: everything keeps working off the value already
+# in OpenBao until the next restart re-seeds the stale one, and the symptom is
+# a CI push failing `authentication required` hours later. Rotate both, or
+# neither.
+#
 # A Job's pod template is immutable once created, so re-running this is
 # `kubectl delete -f` then `kubectl apply -f`. The script is idempotent in the
 # way that matters: enabling an enabled mount or auth method and rewriting a
@@ -8668,6 +8676,7 @@ Two version rules worth internalising:
 | Pods can't resolve `nexus` | The CoreDNS `hosts` entry and the container disagree | The container is pinned to `172.18.255.10` by `--ip` in [§5.3](#53-run-nexus). Confirm with `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nexus`; if it differs, the container was recreated without `--ip`. Re-run [§5.10](#510-teach-pods-about-nexus-coredns), which replaces the block rather than appending. |
 | `docker push` → `http: server gave HTTP response to HTTPS client` | `insecure-registries` not applied | [§5.8](#58-trust-the-plain-http-registry-from-docker), then **restart Docker**. |
 | `docker login nexus:8082` → 401 with correct password | Docker Bearer Token Realm not active | Nexus → ⚙ → Security → Realms → activate it ([§5.4](#54-create-the-docker-hosted-registry)). |
+| CI: `buildah push` → `checking whether a blob ... exists: authentication required`, and Nexus answers `429 Too many authentication attempts` | The credential in `shop/nexus` does not match the `ci` user in Nexus. Nexus 401s the first few attempts, then rate-limits the account and every later attempt is a 429 with `Retry-After: 60` | The 429 hides the real answer, and a retry loop keeps it locked. **Rule out the realm first** — `docker exec nexus grep 'Loaded configuration: RealmConfigurationData' /nexus-data/log/nexus.log` must list `DockerToken`; if it does, the realm is fine and the password is wrong. Fix it in OpenBao **and** in the `nexus-password` key of the `openbao-bootstrap` Secret ([§7.5a](#75a-give-humans-an-auth-method-too)), or the next OpenBao restart re-seeds the wrong one. Stop the pipeline, wait 60s for the lockout to clear, then retry. |
 | CI: `go: ... 401 Unauthorized` from `nexus:8081`, or `uv sync` hangs | Anonymous access disabled in Nexus | Builds pass no credentials to the proxies. Enable global anonymous access ([§5.3](#53-run-nexus)); Docker pull stays authenticated via the per-repository switch. Check with `curl -o /dev/null -w '%{http_code}' http://nexus:8081/repository/pypi-proxy/simple/` — expect `200`. |
 | CI: `uv sync --locked` → "lockfile needs to be updated", but it passes locally | `uv.lock` records a different registry than the build resolves against | Declare the index in `pyproject.toml` via `[[tool.uv.index]]` and re-run `uv lock` ([§3.1](#31-order-api-python--fastapi)). Setting the index only in CI can never match a committed lock. |
 | CI: `go: -race requires cgo` | Test step on an alpine Go image | `golang:1.26-alpine` is `CGO_ENABLED=0` with no gcc. Use `golang:1.26` for the test step ([§12.5](#125-the-pipeline)). |

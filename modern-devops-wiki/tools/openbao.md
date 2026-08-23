@@ -113,6 +113,15 @@ immutable. Verified: ESO went to `Valid`/`SecretSynced` within 15s of the Job co
 > it is genuinely lost — order-api HMACs each payload into S3 and nothing ever verifies it — but that
 > is a property of this key, not a licence to overwrite secrets on every apply.
 
+> [!warning] `nexus-password` in the `openbao-bootstrap` Secret is a third copy of one credential
+> Nexus owns the `ci` user's password. OpenBao holds a copy at `shop/nexus`. The bootstrap Secret now
+> holds another, and it is the one that wins on every restart, because that is when the Job re-seeds a
+> missing path. Seeding it from the tutorial's documented `ci-password-change-me` on 2026-08-23 broke
+> CI's `buildah push` — see [[sonatype-nexus]] for why the symptom arrived as a 429 rather than a 401.
+> Rotate the Nexus password and you must rotate all three, or the next OpenBao restart reintroduces
+> the mismatch hours after the change that caused it. Same shape as the [[postgresql]] row in
+> Appendix B: **a secret with two ends drifts, and the drift surfaces on a restart, not on the edit.**
+
 ## Dev mode, stated as the loaded gun it is
 
 `server.dev.enabled=true` gives in-memory storage (lost on restart), auto-unseal at boot, TLS

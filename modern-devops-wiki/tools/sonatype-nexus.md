@@ -5,7 +5,7 @@ role: registry plus PyPI/Go/npm proxies — the supply-chain choke point
 version: sonatype/nexus3:3.95.0 (Community Edition)
 docs: https://help.sonatype.com/en/sonatype-nexus-repository.html
 date_added: 2026-08-17
-date_updated: 2026-08-17
+date_updated: 2026-08-23
 status: in-use
 ---
 
@@ -101,6 +101,52 @@ next to the artifact detects a corrupted transfer and *cannot* detect a compromi
 replaces the artifact replaces the checksum beside it. `.buildkite/pants-ci.Dockerfile` pins both
 architectures' checksums as build args and bakes the result into an image living in Nexus.
 
+## Nexus 429s a wrong password instead of 401ing it
+
+Observed 2026-08-23, Nexus `3.95.0-07 (COMMUNITY)`. A CI push failed with:
+
+```
+Error: pushing image "nexus:8082/shop/order-api:3a7e8b7b99e6" ... trying to reuse blob
+  ... at destination: checking whether a blob ... exists in nexus:8082/shop/order-api:
+  authentication required
+```
+
+The request log shows what actually happened: the first authenticated `HEAD`s got **401**, and every
+attempt after that got **429**:
+
+```
+"GET  /repository/docker-hosted/v2/"            401  "Buildah/1.40.1"
+"HEAD /repository/docker-hosted/v2/shop/order-api/blobs/sha256:..."  401
+"HEAD /repository/docker-hosted/v2/shop/order-api/blobs/sha256:..."  429
+```
+
+```
+HTTP/1.1 429 Too many authentication attempts
+Server: Nexus/3.95.0-07 (COMMUNITY)
+Retry-After: 60
+```
+
+> [!warning] The 429 replaces the diagnosis with a symptom, and a retry loop keeps it there
+> Nexus rate-limits an account after repeated authentication failures, so **the moment you have a
+> wrong password you stop being told that you have a wrong password.** Every subsequent probe — CI
+> retrying, you testing by hand — returns 429 and refreshes the lockout, which reads like a load or
+> throttling problem rather than a credential one. Stop the pipeline, wait out `Retry-After`, and test
+> exactly once.
+
+Two causes produce a 401 on `/v2/` and they are told apart without guessing:
+
+| Cause | Check |
+|---|---|
+| Docker Bearer Token realm not active (Appendix B, §5.4) | `docker exec nexus grep 'Loaded configuration: RealmConfigurationData' /nexus-data/log/nexus.log` — `DockerToken` must be in `realmNames` |
+| The password is simply wrong | Realm is present ⇒ this one |
+
+In the 2026-08-23 case the realm was active, so the credential was wrong: `shop/nexus` in [[openbao]]
+had been re-seeded from the tutorial's documented `ci-password-change-me` while the `ci` user in this
+Nexus had a different password. **Nexus owns that credential; OpenBao holds a copy, and the
+`openbao-bootstrap` Secret now holds a second copy that re-seeds on every OpenBao restart.** Rotating
+the Nexus password means rotating all three, or the next restart reintroduces the mismatch hours after
+the change that caused it. See [[openbao]] and [[secrets-management]].
+
 ## Related
 
-[[supply-chain-choke-point]] · [[enterprise-substitution]] · [[containerd]] · [[docker]] · [[buildkite]] · [[pants]] · [[uv]] · [[immutable-image-tags]]
+[[openbao]] · [[secrets-management]] · [[supply-chain-choke-point]] · [[enterprise-substitution]] · [[containerd]] · [[docker]] · [[buildkite]] · [[pants]] · [[uv]] · [[immutable-image-tags]]

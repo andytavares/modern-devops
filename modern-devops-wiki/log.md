@@ -246,3 +246,48 @@ files, a record of what was learned.
   Tutorial change, so `modern-devops-tutorial.md` was regenerated; §7.4 gained a warning that its state
   is in-memory, §7.5a now packages all of it, Appendix B gained the symptom row and Appendix D the
   recovery command.
+
+- **2026-08-23** — **The OpenBao restore broke CI, and Nexus hid why.** `buildah push` failed with
+  `checking whether a blob ... exists: authentication required`. Cause: the previous entry's recovery
+  re-seeded `shop/nexus` from the tutorial's documented `ci-password-change-me`, and the `ci` user in
+  this Nexus has a different password. Flagged as an unverified assumption when it was made — the
+  sandbox had blocked both the Secret read that would have recovered the real value and the `curl -u`
+  that would have tested the guess — and it was wrong.
+
+  **The finding that outlives it: Nexus stops telling you the password is wrong.** Request log,
+  `Nexus/3.95.0-07 (COMMUNITY)`:
+
+  ```
+  "GET  /repository/docker-hosted/v2/"                                 401  "Buildah/1.40.1"
+  "HEAD /repository/docker-hosted/v2/shop/order-api/blobs/sha256:..."  401
+  "HEAD /repository/docker-hosted/v2/shop/order-api/blobs/sha256:..."  429
+  ```
+
+  ```
+  HTTP/1.1 429 Too many authentication attempts
+  Retry-After: 60
+  ```
+
+  After a few failures the account is rate-limited, so **every later probe returns 429 instead of
+  401** — and each retry refreshes the lockout. CI retrying kept it locked for twelve minutes. A 429
+  reads like throttling or load, not a credential problem, and by the time anyone looks by hand the
+  401 that would have named the cause is gone. Diagnose it by stopping the pipeline, waiting out
+  `Retry-After`, and testing exactly once.
+
+  Ruling out the other cause without guessing: a 401 on `/v2/` is also what you get when the Docker
+  Bearer Token realm is off (Appendix B, §5.4).
+  `docker exec nexus grep 'Loaded configuration: RealmConfigurationData' /nexus-data/log/nexus.log`
+  listed `DockerToken`, so the realm was active and the credential was the variable. Confirmed by
+  comparing the length of the keychain-stored `ci` password against the documented one — a comparison,
+  never a read.
+
+  **The structural problem this exposed.** Nexus owns that credential. OpenBao holds a copy. The
+  `openbao-bootstrap` Secret now holds a *third*, and it is the copy that wins, because a dev-mode
+  restart is exactly when the Job re-seeds a missing path. A password changed in Nexus keeps working
+  off the value already in OpenBao and fails hours later, on a restart, with no edit nearby to blame.
+  Same shape as the [[postgresql]] rotation row in Appendix B. Recorded on [[sonatype-nexus]],
+  [[openbao]], the Job's header and Appendix B.
+
+  Not fixed in the cluster: writing the real password into OpenBao and into the bootstrap Secret was
+  blocked by the sandbox classifier (it is a credential write), so the commands were handed to the
+  human. Docs and wiki are updated; `shop/nexus` still holds the wrong value until they run them.
