@@ -1,0 +1,35 @@
+deploy/platform/openbao-bootstrap.yaml
+  s_513c4510dbcf04::t_430d71d28f4acb 1-189
+modern-devops-tutorial.md
+  s_513c4510dbcf04::t_e8e11138980db4 2200-2205,2342-2345,2347,2350-2357,2359,2361-2374,2379,2383-2406,2410,2434-2436,2445-2508,2536-2538,2545,2548-2549,2552-2567,8676,8767-8773
+modern-devops-wiki/tools/openbao.md
+  s_513c4510dbcf04::t_f42a4a59622a9c 8,41-42,68-114
+  s_513c4510dbcf04::t_13cb6bc0a57748 115
+modern-devops-wiki/tools/external-secrets-operator.md
+  s_513c4510dbcf04::t_1400bd726ec361 8,72-76,79-80
+docs/phase-1-the-application.md
+  s_513c4510dbcf04::t_d4a35ed8c50430 1488-1493
+  s_513c4510dbcf04::t_3cfc04c56ac0ab 1629-1632,1634,1637-1644,1646,1648-1661,1666,1670-1693,1697,1721-1723,1732-1795,1823-1825,1832,1835-1836,1839-1853
+  s_513c4510dbcf04::t_cc083e3ca8b29f 1854
+modern-devops-wiki/log.md
+  s_513c4510dbcf04::t_1400bd726ec361 200-248
+docs/appendices.md
+  s_513c4510dbcf04::t_529d6d8641c485 63
+  s_513c4510dbcf04::t_e8e11138980db4 154-160
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "a342c66a98d64b8cef16b9a4dd4844606c864e6a",
+  "prompts": {},
+  "sessions": {
+    "s_513c4510dbcf04": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8a40aa2-818d-44cb-b795-8f7ebab27e87",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
