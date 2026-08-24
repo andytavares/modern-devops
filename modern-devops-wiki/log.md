@@ -429,3 +429,25 @@ files, a record of what was learned.
   `:8000/metrics` serves no `orders_received_total` either, which is consistent — the counter does not
   exist until the first order is received. That 502 is at the reader's current point in §9 and is a
   separate thread.
+
+- **2026-08-23** — **The corrected PodMonitor produced nothing, because Argo CD had not applied it.**
+  After pushing the chart fix, the §9.6 target check returned zero lines. The instinct — and the one
+  the tutorial's wording encouraged — is to go back and debug the monitor.
+
+  It was applied to nothing. `Application/order-platform` reported `sync.status: Synced`,
+  `health: Healthy`, `reconciledAt` **72 seconds old** — against `df0a7fc`, while `origin/main` was
+  `1251eaf`. Argo polls, and until it does it is *truthfully* synced, to the previous commit. Nothing
+  in the object says stale. `kubectl -n argocd annotate app order-platform
+  argocd.argoproj.io/refresh=hard --overwrite` moved it to the pushed revision, the live PodMonitor
+  picked up the `relabelings`, and Prometheus had **targets `up` on
+  `<pod-ip>:15020/stats/prometheus`** within a scrape interval.
+
+  Already recorded on [[argo-cd]] as the `Synced`+`Degraded` stale-cache case (Appendix B). What was
+  missing is that **it also presents with nothing wrong at all** — Synced, Healthy, freshly
+  reconciled, and simply one commit behind. That variant costs more, because there is no anomaly to
+  notice.
+
+  §9.6 now checks the right thing: `Synced` alone is not the check, comparing
+  `.status.sync.revision` to `git rev-parse HEAD` is, with the hard-refresh escape hatch and an
+  explicit "do not go debug the thing you just changed" — the failure mode here is spending the next
+  twenty minutes on an object that was never applied.

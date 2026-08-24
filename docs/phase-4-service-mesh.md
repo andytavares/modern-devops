@@ -481,8 +481,25 @@ git add deploy/charts/order-platform/values.yaml
 git commit -m "fix(observability): scrape the sidecar's merged endpoint under strict mtls"
 git push
 
-kubectl -n argocd get application order-platform -w   # Synced, then the pods roll
+# `Synced` alone is not the check — compare the revision Argo applied to the one you pushed.
+kubectl -n argocd get application order-platform \
+  -o jsonpath='{.status.sync.status} {.status.sync.revision}{"\n"}'
+git rev-parse HEAD
 ```
+
+> [!warning] **Argo CD reports `Synced` against a revision it has not fetched yet.**
+> It polls, and until it does it is truthfully synced — to the *previous* commit. The two SHAs above
+> disagree, `kubectl -n shop get podmonitor order-platform -o yaml` still shows the old spec, and
+> nothing anywhere says "stale": the Application is `Synced`, `Healthy`, and `reconciledAt` is
+> seconds old. This is the same stale-cache behaviour as the `Synced`+`Degraded` case in Appendix B,
+> and it is worth meeting here, where the only cost is confusion. Force it:
+>
+> ```bash
+> kubectl -n argocd annotate app order-platform argocd.argoproj.io/refresh=hard --overwrite
+> ```
+>
+> **Do not skip to debugging the thing you just changed.** Every minute spent on a PodMonitor that
+> was never applied is spent on the wrong object.
 
 > [!warning] **`helm upgrade` cannot work here any more, and this is the first section where you will
 > try it.** Argo CD syncs this Application with `ServerSideApply=true`, so the API server records
