@@ -1,0 +1,26 @@
+docs/appendices.md
+  s_513c4510dbcf04::t_76c3e4bcd9482a 60
+docs/phase-5-developer-portal.md
+  s_513c4510dbcf04::t_76c3e4bcd9482a 48-53,63,65-68,71-92
+  s_513c4510dbcf04::t_b3f45142893396 93
+modern-devops-tutorial.md
+  s_513c4510dbcf04::t_76c3e4bcd9482a 6130-6135,6145,6147-6150,6153-6175,10324
+modern-devops-wiki/log.md
+  s_513c4510dbcf04::t_a5c73a61de4276 582-611
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "42a2dbea2116cff8cde9afa8648e154fa86e8bf3",
+  "prompts": {},
+  "sessions": {
+    "s_513c4510dbcf04": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8a40aa2-818d-44cb-b795-8f7ebab27e87",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
