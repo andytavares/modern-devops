@@ -1,0 +1,27 @@
+modern-devops-tutorial.md
+  s_513c4510dbcf04::t_685874776fa656 5372-5398,8890
+docs/phase-4-service-mesh.md
+  s_513c4510dbcf04::t_685874776fa656 665-691
+docs/appendices.md
+  s_513c4510dbcf04::t_685874776fa656 78
+modern-devops-wiki/log.md
+  s_513c4510dbcf04::t_123c53f0bc2216 454-477
+modern-devops-wiki/tools/istio.md
+  s_513c4510dbcf04::t_cd624135d08995 8,152-181
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "6885b5568957ed5952ab5e557c2106f150b5c8e7",
+  "prompts": {},
+  "sessions": {
+    "s_513c4510dbcf04": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8a40aa2-818d-44cb-b795-8f7ebab27e87",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
