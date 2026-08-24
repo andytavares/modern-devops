@@ -6043,7 +6043,7 @@ What to watch, in the order it becomes visible:
 | `order-api` logs | `pricing call failed ... code=DEADLINE_EXCEEDED` |
 | `POST /orders` | HTTP **502** on the affected fraction — no fallback, a failed pricing call *is* a failed order |
 | the frontend | its error counter climbing in lockstep with the 50% fault rate |
-| [[kiali]] | elevated error rate on `pricing`, and pods being **ejected** from the pool |
+| Kiali | elevated error rate on `pricing`, and pods being **ejected** from the pool |
 
 That last row is the subtle one and the reason this drill is worth running. A client-side injected
 delay registers in `order-api`'s **own sidecar** as a gateway timeout against the `pricing` cluster
@@ -8055,48 +8055,93 @@ reads `pants_version` out of `pants.toml` and fetches the matching Pants itself.
 from its GitHub release, checksum-verified:
 
 ```bash
-curl -fsSL -o /usr/local/bin/pants \
+# Download to a temp path and verify BEFORE it goes on PATH. A checksum
+# checked *after* installation has already installed the thing.
+curl -fsSL -o /tmp/scie-pants \
   https://github.com/pantsbuild/scie-pants/releases/download/v0.13.2/scie-pants-macos-aarch64
-echo "a6f3231413ca1f793caffa621171a4b1a0158e7488cd0b5bb3e742cb99cc72a8  /usr/local/bin/pants" \
+echo "a6f3231413ca1f793caffa621171a4b1a0158e7488cd0b5bb3e742cb99cc72a8  /tmp/scie-pants" \
   | shasum -a 256 -c -
-chmod 755 /usr/local/bin/pants
+# /tmp/scie-pants: OK
+
+# /usr/local/bin is root:wheel on macOS, so this needs sudo — and `install`
+# sets the mode in the same step, so there is no window where the file is on
+# PATH without one.
+sudo install -m 755 /tmp/scie-pants /usr/local/bin/pants
+rm /tmp/scie-pants
+
+command -v pants
 ```
 
+> [!warning] **`curl -o /usr/local/bin/pants` without `sudo` fails, and the error names neither.**
+> `/usr/local/bin` is `root:wheel` on macOS. curl reports
+> `curl: (56) Failure writing output to destination, passed 16375 returned 4294967295` — a libcurl
+> write error with a 32-bit unsigned `-1` in it, which reads like a network fault. The next line then
+> fails on a file that was never created. The whole thing is a permission denied wearing a costume.
+>
+> `pants --version` is deliberately not the check here: `scie-pants` reads `pants_version` out of
+> `pants.toml`, which does not exist until the next command, so it would fail for an unrelated reason.
+> `command -v pants` is what proves the install.
+
 > **This one binary comes from outside the choke point, deliberately and once.** Everything Pants
-> then resolves — Python wheels, Go modules — goes through [[sonatype-nexus]]
+> then resolves — Python wheels, Go modules — goes through Nexus
 > ([§5.1](#51-what-nexus-is-actually-for)), and CI does not repeat this
 > download at all: `.buildkite/pants-ci.Dockerfile` bakes the same checksum-verified launcher into an
 > image that lives in Nexus ([§19.5](#195-one-ci-step-instead-of-two)). A pinned, hashed, one-time
 > fetch is an honest compromise; `curl … | bash` on every build is not.
 
-The configuration, comments stripped:
+**`pants.toml`**
 
 ```toml
 [GLOBAL]
 pants_version = "2.33.0"
 
+# One build system, four languages. The Python and protobuf-Python backends are
+# stable; go, javascript and typescript are still shipped under
+# `pants.backend.experimental.*` upstream. That is a real risk and it is taken
+# knowingly: the value of a polyglot monorepo is precisely that one tool builds,
+# tests and lints everything, and the escape hatch for any of them is the
+# language's own toolchain, one command away.
 backend_packages = [
+  # Python — stable (ruff lives under experimental.* in 2.33, mypy does not)
   "pants.backend.python",
   "pants.backend.experimental.python.lint.ruff.check",
   "pants.backend.experimental.python.lint.ruff.format",
   "pants.backend.python.typecheck.mypy",
   "pants.backend.codegen.protobuf.python",
+
+  # Go — experimental upstream
   "pants.backend.experimental.go",
   "pants.backend.experimental.codegen.protobuf.go",
+
+  # Frontend — experimental upstream
   "pants.backend.experimental.javascript",
   "pants.backend.experimental.typescript",
 ]
 
+# Everything that is not source. dist/ holds `pants package` output — the PEXes
+# and Go binaries that Buildah later copies into images.
 pants_ignore.add = [
+  # Scaffolder templates, not source. Their BUILD files contain nunjucks
+  # placeholders and are not valid Python until Backstage renders them —
+  # Pants would otherwise fail the whole repo with a BuildFileSyntaxError.
   "/deploy/backstage/templates",
-  "/portal",
+  "/portal",          # Backstage owns its own Yarn workspace; not ours to build
   "/modern-devops-wiki",
   "/raw",
+  # Pants honours only the root .gitignore — `--pants-ignore-use-gitignore`
+  # "does not yet support reading nested gitignore files" — so frontend/.gitignore
+  # does not reach it and `pants tailor` walks into installed packages and build
+  # output.
   "/frontend/node_modules",
   "/frontend/dist",
 ]
+# `/docs` is deliberately NOT ignored: `checks/` reads the phase files to
+# assemble the single-file edition and to verify every listing still matches
+# the file it names, so Pants has to be able to see them.
 
 [source]
+# Import roots. `protos` is listed so generated code is importable as
+# `shop.v1.pricing_pb2` rather than by a path that leaks the directory layout.
 root_patterns = ["/", "/services/*", "/protos"]
 
 [python]
@@ -8108,13 +8153,41 @@ default_resolve = "python-default"
 python-default = "locks/python-default.lock"
 
 [python-bootstrap]
+# Where Pants looks for a CPython matching the interpreter constraints above.
+# <PYENV> and <PATH> are the defaults; the Homebrew path is added because
+# `brew install python@3.13` puts an unversioned `python` in libexec/bin that
+# is not on PATH, and without it Pants reports
+# "No working interpreter compatible with the requested constraints was found"
+# while a perfectly good 3.13 sits on disk.
 search_path = ["<PYENV>", "<PATH>", "/opt/homebrew/opt/python@3.13/libexec/bin"]
 
 [python-repos]
+# The supply-chain choke point (§5.1) applies to the build system too. Pants
+# resolves through Nexus, not pypi.org, exactly like uv did before it.
 indexes = ["http://nexus:8081/repository/pypi-proxy/simple"]
 
 [golang]
+# Pants defaults cgo_enabled to TRUE, which produces a dynamically linked
+# binary needing /lib/ld-linux-aarch64.so.1. gcr.io/distroless/static has no
+# libc and no linker, so the pod dies with:
+#   exec /order-worker: no such file or directory
+# — on a file that is present and executable, which is why it reads as a
+# missing binary rather than a missing loader. The original hand-written
+# Dockerfile set CGO_ENABLED=0 for exactly this reason; moving the build into
+# Pants silently dropped it.
 cgo_enabled = false
+
+# Go modules resolve through Nexus. Nothing else is overridden here, and that
+# is the point: `go.sum` records a hash for every module in the build list, so
+# verification happens locally against it and never needs the checksum
+# database. Turning GOSUMDB off would not speed that up — it would only disarm
+# verification for the next dependency someone adds. If a genuinely private
+# module ever arrives, the documented escape is scoped, not global:
+# `GOPRIVATE=github.com/yourorg/*`.
+#
+# -mod=readonly is already Go's default; it is stated because it is
+# load-bearing. Under -mod=mod a build may rewrite go.mod and succeed against a
+# dependency set nobody committed.
 subprocess_env_vars = [
   "GOPROXY=http://nexus:8081/repository/go-proxy",
   "GOFLAGS=-mod=readonly",
@@ -8123,12 +8196,19 @@ subprocess_env_vars = [
 ]
 
 [python-protobuf]
+# protoc also emits .pyi stubs for each generated file. Without this, mypy sees
+# pricing_pb2.py building its message classes dynamically via
+# _builder.BuildTopDescriptorsAndMessages(...) into globals() and reports
+# "PriceOrderRequest is not defined" — the classes genuinely do not exist
+# statically. Pants' help prefers this over the older mypy_plugin option.
 generate_type_stubs = true
 
 [mypy]
 install_from_resolve = "python-default"
 
 [test]
+# A test that depends on network or wall-clock is a test that fails in CI at
+# 2am for reasons unrelated to the change. Fail loudly instead.
 timeout_default = 60
 
 [anonymous-telemetry]
@@ -9791,7 +9871,7 @@ context and the Dockerfile `COPY` by name.
 > **One constraint follows from cross-packaging.** Every platform-specific dependency must be
 > available as a **prebuilt wheel** for the target — Pants can only build sdists for the local
 > machine. A dependency that ships source-only for `linux/aarch64` cannot be cross-packaged at all;
-> you would have to build the wheel yourself and host it in [[sonatype-nexus]]. This is not a Pants
+> you would have to build the wheel yourself and host it in Nexus. This is not a Pants
 > quirk. Any tool that resolves wheels on the build host and ships them elsewhere has it, and it is
 > the same class of mistake as building a Go binary with `CGO_ENABLED=1` and putting it in `scratch`.
 
@@ -9919,7 +9999,7 @@ kubectl -n shop get pods -l app.kubernetes.io/name=pricing
 ### 19.4 The frontend: Vite, and a live tally
 
 
-`frontend/` is a [[vite]] + TypeScript page with no framework. It POSTs orders to `order-api`,
+`frontend/` is a Vite + TypeScript page with no framework. It POSTs orders to `order-api`,
 tallies the `priced_by` on each response, and draws a bar. A 90/10 → 50/50 weight change is visible in a
 browser within seconds.
 
@@ -10194,17 +10274,22 @@ tries to resolve the name.
 `verify_chart.py` runs as a plain script rather than through Pants, for the same reason
 `verify_doc_listings.py` does: it reads files a hermetic sandbox would not contain. That has two
 consequences in the repo. It still needs an owning target, or `pants tailor --check` reports the file
-as unowned — hence the glob in **`checks/BUILD`** (comments stripped):
+as unowned — hence the glob in **`checks/BUILD`**:
 
 ```python
 python_sources(
     name="lib",
+    # Everything that is not a test. `verify_chart.py` is not imported by the
+    # test suite — it runs in CI against a rendered chart — but it still needs
+    # an owning target, or `pants tailor --check` reports the file as unowned.
     sources=["*.py", "!test_*.py"],
 )
 
 python_tests(
     name="tests",
     sources=["test_*.py"],
+    # Prose read as plain text. Nothing here is reachable by import, which is
+    # exactly why the two editions of the tutorial were free to drift apart.
     dependencies=[
         ":lib",
         "docs:docs",

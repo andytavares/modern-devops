@@ -1320,7 +1320,7 @@ What to watch, in the order it becomes visible:
 | `order-api` logs | `pricing call failed ... code=DEADLINE_EXCEEDED` |
 | `POST /orders` | HTTP **502** on the affected fraction — no fallback, a failed pricing call *is* a failed order |
 | the frontend | its error counter climbing in lockstep with the 50% fault rate |
-| [[kiali]] | elevated error rate on `pricing`, and pods being **ejected** from the pool |
+| Kiali | elevated error rate on `pricing`, and pods being **ejected** from the pool |
 
 That last row is the subtle one and the reason this drill is worth running. A client-side injected
 delay registers in `order-api`'s **own sidecar** as a gateway timeout against the `pricing` cluster

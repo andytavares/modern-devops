@@ -609,3 +609,35 @@ files, a record of what was learned.
   different one**, and every place the docs hardcode a credential is a place that drifts.
 
   Appendix B gained the symptom row.
+
+- **2026-08-23** — **§17.3 installed Pants into a directory the user cannot write, and the error named
+  neither the directory nor the permission.**
+
+  ```
+  curl: (56) Failure writing output to destination, passed 16375 returned 4294967295
+  shasum: /usr/local/bin/pants: No such file or directory
+  ```
+
+  `/usr/local/bin` is `root:wheel` on macOS. curl reports a libcurl **write** error carrying a 32-bit
+  unsigned `-1`, which reads like a network fault, and the checksum line then fails on a file that was
+  never created. A permission denied in a costume.
+
+  Verified the parts that were *not* wrong before touching them: the release URL resolves and the
+  8,834,509-byte artifact matches the documented SHA-256 exactly. Only the destination was broken.
+
+  Fixed, and improved while there: download to `/tmp`, **verify, then** `sudo install -m 755`. The
+  original checksummed the file *after* writing it to `PATH` — by then it is installed, and `install`
+  sets the mode in the same step so there is no window where it is executable and unverified. The
+  check is `command -v pants`, not `pants --version`, because `scie-pants` reads `pants_version` out
+  of a `pants.toml` that does not exist until the next command — the obvious check would have failed
+  for an unrelated reason.
+
+  **Two more whole-file violations found in the same phase**, both outside the bolded-path pattern the
+  audit scanned: `pants.toml` introduced as *"The configuration, comments stripped"* (the repo file is
+  121 lines) and `checks/BUILD` as *"(comments stripped)"*. Both now whole, and `pants.toml` gained
+  the bolded path it never had — which is also what puts it under the checker.
+
+  **And `[[wikilinks]]` had leaked into `docs/`** — `[[pants]]`, `[[sonatype-nexus]]` ×2, `[[vite]]`,
+  `[[kiali]]`. Those render as literal double brackets to a reader of the tutorial, which is not the
+  audience for this wiki's link syntax. Replaced with plain names. `[[tool.uv.index]]` stays: that is
+  TOML, not a link.
