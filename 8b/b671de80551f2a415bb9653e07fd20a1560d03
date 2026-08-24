@@ -1,0 +1,23 @@
+modern-devops-tutorial.md
+  s_513c4510dbcf04::t_334e92913d3917 8388,8391-8508,8510-8512
+docs/phase-7-polyglot-monorepo.md
+  s_513c4510dbcf04::t_4d575a8a892be6 420-537,540-542
+modern-devops-wiki/log.md
+  s_513c4510dbcf04::t_7554f657276578 676-709
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "8bb671de80551f2a415bb9653e07fd20a1560d03",
+  "prompts": {},
+  "sessions": {
+    "s_513c4510dbcf04": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8a40aa2-818d-44cb-b795-8f7ebab27e87",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
