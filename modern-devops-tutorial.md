@@ -5017,15 +5017,39 @@ kubectl apply -f deploy/platform/istio/peer-authentication.yaml
 ```
 
 The two `Ingress` resources written in [§10.1](#101-one-chart-two-workloads)
-are now dead, and they will fight this one: two Ingresses claiming the same host and path is a
-conflict the nginx admission webhook rejects outright. Delete them from the chart — the whole
-`{{- if .Values.orderApi.ingress.enabled }}` block at the end of `order-api.yaml`, and the matching
-block in `frontend.yaml` — along with the now-unused `ingress:` keys in `values.yaml`. Routing for
-these two services lives in the VirtualServices above from here on.
+are now dead, and leaving them is not harmless — **it breaks the site completely.** Delete them from
+the chart: the whole `{{- if .Values.orderApi.ingress.enabled }}` block at the end of
+`order-api.yaml`, the matching block in `frontend.yaml`, and the now-unused `ingress:` keys under
+`orderApi` and `frontend` in `values.yaml`. Routing for these two services lives in the
+VirtualServices above from here on.
+
+This is a chart change, so it goes through git — Argo CD owns this release
+([§11](#11-argo-cd-pull-based-delivery)) and will recreate anything you delete
+with `kubectl`:
 
 ```bash
-kubectl -n shop delete ingress order-api frontend --ignore-not-found
+git add deploy/charts/order-platform
+git commit -m "fix(mesh): drop the dead ingresses; routing lives in the VirtualService"
+git push
+
+kubectl -n argocd annotate app order-platform argocd.argoproj.io/refresh=hard --overwrite
+kubectl -n shop get ingress          # No resources found — that is the check
 ```
+
+> [!warning] **Skip this and every request to `shop.localtest.me` returns `502 Bad Gateway`, with
+> nothing in the mesh reporting a fault.**
+> Not an admission conflict — the two Ingresses declare *different* hosts (`shop.localtest.me` and
+> `*.localtest.me`), so nginx admits both without complaint. The exact host then wins, exactly as the
+> callout above says it does, and nginx forwards straight to `order-api`'s Service **in plaintext,
+> from outside the mesh**. STRICT mTLS refuses it, nginx has no upstream response to return, and you
+> get a 502.
+>
+> Everything you would check looks correct: pods `2/2`, `istioctl analyze` clean apart from its
+> [expected baseline](#98-commit-and-a-word-on-what-you-cannot-verify-yet), the `Gateway` and
+> `VirtualService` applied, the gateway pod healthy. `kubectl -n shop get ingress` is the one command
+> that names it, and it is the last place anyone looks — the object is a leftover from Phase 1 that
+> nothing in Phase 4 draws your attention to. **The route you deleted is not the route that is
+> serving.**
 
 That is the trade the Gateway asks for, stated plainly: one more component to install, and routing
 that no longer lives in a second proxy's annotations.
@@ -8862,6 +8886,7 @@ Two version rules worth internalising:
 |---|---|---|
 | `ImagePullBackOff` on `nexus:8082/...` | containerd can't reach or auth to Nexus | `docker exec devops-worker curl -s -o /dev/null -w '%{http_code}' http://nexus:8082/v2/` — expect `401`. Not `401`? Re-run [§5.9](#59-teach-containerd-on-the-kind-nodes-about-nexus). `401` but still failing? The pod is missing `imagePullSecrets` or the ExternalSecret hasn't synced. |
 | `ImagePullBackOff`, and the event says `code = NotFound` | The image was never pushed — not an auth or DNS problem | Check the event text: `NotFound` means the registry answered and does not have that tag, so re-running §5.9 will not help. Confirm with `docker images 'nexus:8082/shop/*'` — if it is missing locally too, the **build** failed. On a laptop the usual cause is a `docker build` with no `--add-host nexus:<ip>`, which only breaks the services that resolve dependencies through Nexus ([§10.4](#104-build-the-images-by-hand-once)). |
+| `502 Bad Gateway` on `shop.localtest.me` after [§9.4](#94-mtls-and-proving-it-is-actually-on), everything else healthy | The Phase 1 `Ingress` for the exact host is still there, so nginx never sends the request to the gateway — it forwards to `order-api` in plaintext, from outside the mesh, and STRICT mTLS refuses it | `kubectl -n shop get ingress` — anything listed is the bug; the wildcard `mesh-edge` Ingress in `istio-system` is the only one that should serve these hosts. An exact host beats a wildcard, so the leftover silently wins. Remove the `ingress:` blocks from the chart and **push** — `kubectl delete ingress` is undone by the next Argo CD sync ([§9.4](#94-mtls-and-proving-it-is-actually-on)). |
 | `curl http://localhost` returns **`000`** | Ingress controller scheduled on a node with no port mappings | `000` = nothing listening, not a 404. `kubectl -n ingress-nginx get pods -o wide` — if `NODE` isn't `devops-control-plane`, apply the `ingress-ready` nodeSelector patch in [§4.3](#43-install-the-ingress-controller). Upstream dropped that selector in controller-v1.13.0. |
 | Ingress Service stuck `EXTERNAL-IP <pending>` | `type: LoadBalancer` with no cloud provider | Harmless on kind — traffic arrives via `hostPort`, not the Service. Don't install MetalLB to "fix" it. |
 | Pods can't resolve `nexus` | The CoreDNS `hosts` entry and the container disagree | The container is pinned to `172.18.255.10` by `--ip` in [§5.3](#53-run-nexus). Confirm with `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nexus`; if it differs, the container was recreated without `--ip`. Re-run [§5.10](#510-teach-pods-about-nexus-coredns), which replaces the block rather than appending. |

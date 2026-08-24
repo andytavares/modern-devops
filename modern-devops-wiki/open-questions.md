@@ -14,13 +14,6 @@ observed**, and every entry here would be settled by one successful run.
 - **§14–§16 have never run.** [[kiali]], [[backstage]] and the [[prometheus]]/[[grafana]] stack are
   written from their manifests and their vendor docs. Their pages carry
   `status: documented-not-observed`.
-- **§9.6's "confirm you get both halves" has never been seen to pass.** As of 2026-08-23 the
-  corrected `PodMonitor` is verified working — 4 targets `up` on `<pod-ip>:15020/stats/prometheus`,
-  observed — but on that cluster `POST http://shop.localtest.me/orders` returned **502**, so no
-  application traffic flowed and both `orders_received_total` and `istio_requests_total` were
-  legitimately empty. The scrape path is proven; **the assertion the section actually makes is not**.
-  *To settle:* fix the edge, send traffic, and record both queries returning non-zero. See
-  [[prometheus]] and [[istio]].
 - **The canary and the fault-injection drill have never been run against a live cluster.** §9.9 and
   §9.10 are written from the manifests and their reasoning, and every manifest passes
   `kubectl apply --dry-run=server` against the live CRDs — but the 90/10 split, the weight shift, the

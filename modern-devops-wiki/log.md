@@ -475,3 +475,38 @@ files, a record of what was learned.
   Extended to [[kiali]]'s Istio Config tab, which validates the same objects and shows the same five
   in red. Appendix B's `RBAC: access denied` row now names the baseline before recommending the
   command. Recorded on [[istio]].
+
+- **2026-08-23** — **The 502 was a Phase 1 Ingress that Phase 4 never told you to remove — and §9.6's
+  both-halves check now passes for the first time.**
+
+  Every request to `shop.localtest.me` returned `502 Bad Gateway` while everything else looked right:
+  pods `2/2`, Gateway and VirtualService applied, gateway healthy, `istioctl analyze` at its expected
+  baseline. `kubectl -n shop get ingress` had the answer — the chart's exact-host Ingress from §10.1
+  was still there, recreated by Argo CD from `orderApi.ingress.enabled: true`.
+
+  Exact host beats wildcard, so nginx routed to the `order-api` Service directly, **in plaintext from
+  outside the mesh**, and STRICT mTLS refused it. The mesh was healthy; the request never entered it.
+
+  **§9.4 did say to remove them, and got it wrong twice:**
+
+  1. Its only *command* was `kubectl -n shop delete ingress order-api frontend`. Argo CD owns the
+     chart — the Ingress comes back on the next reconcile. Same defect as the §9.6 `helm upgrade`
+     instruction, in a costume that raises no error: it works, then stops working, with no edit
+     nearby to blame. The chart edit was prose above the fence, which is exactly the placement lesson
+     from the Kiali move.
+  2. It claimed *"two Ingresses claiming the same host and path is a conflict the nginx admission
+     webhook rejects outright."* **False.** The hosts differ — `shop.localtest.me` versus
+     `*.localtest.me` — so nginx admitted both without complaint and the exact one silently won. The
+     doc predicted a loud rejection and the reality is a quiet 502, which is the opposite failure
+     mode and sends you looking for a mesh fault that does not exist.
+
+  Fixed: §9.4 now removes the blocks in git, commits, pushes, hard-refreshes and verifies with
+  `kubectl -n shop get ingress` → no resources; the warning states the real mechanism and that
+  everything you would normally check reports health. Appendix B gained the symptom row.
+
+  **Then §9.6's closing assertion passed, observed, for the first time in this repo's history:**
+  `GET /healthz` → 200, `POST /orders` → 202, `orders_received_total` = **41** across 2 series,
+  `istio_requests_total` present — including
+  `connection_security_policy="mutual_tls"` with
+  `source_principal="spiffe://cluster.local/ns/istio-system/sa/istio-ingressgateway"`, which is
+  §9.8's evidence sentence, verified rather than reasoned. Removed from [[open-questions]].

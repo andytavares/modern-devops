@@ -179,6 +179,43 @@ only, and neither was reported against.
 > Record the baseline, alert on the delta. This is the ordinary condition of any linter pointed at a
 > system built in stages, and it is worth more as a habit than as a fact about Istio.
 
+## The leftover Ingress that 502s everything, silently
+
+Observed 2026-08-23. Every request to `shop.localtest.me` returned `502 Bad Gateway` while the mesh
+was, by every other measure, correct: pods `2/2`, `Gateway` and `VirtualService` applied, gateway pod
+healthy, `istioctl analyze` showing only its expected baseline, `connection_security_policy` reporting
+`mutual_tls` on the hops that did complete.
+
+`kubectl -n shop get ingress` named it in one line: the Phase 1 `Ingress` for `shop.localtest.me` was
+still there, recreated by [[argo-cd]] from `orderApi.ingress.enabled: true` in the chart.
+
+The chain:
+
+1. §9.4 adds a **wildcard** `*.localtest.me` Ingress in `istio-system` pointing at
+   `istio-ingressgateway`.
+2. The Phase 1 chart still ships an **exact-host** `shop.localtest.me` Ingress pointing at the
+   `order-api` Service.
+3. Different hosts, so nginx admits both without complaint — **this is not an admission conflict**,
+   which is what the docs claimed. The exact host wins, by the same precedence rule that keeps Argo CD
+   and Grafana off the gateway.
+4. nginx therefore talks to `order-api` **in plaintext, from outside the mesh**. STRICT mTLS refuses
+   the connection, nginx has no upstream response, and returns 502.
+
+> [!warning] The route you deleted is not the route that is serving
+> Nothing in Phase 4 draws attention to an object created in Phase 1, and every diagnostic you would
+> reach for reports health, because the mesh **is** healthy — the request never enters it. Worse, the
+> tutorial's own instruction was `kubectl -n shop delete ingress order-api frontend`, an imperative
+> delete of an object Argo CD recreates from git within the reconcile window: it works, then stops
+> working, with no edit nearby to blame. Same failure as [[argo-cd]]'s `helm upgrade` conflict, in a
+> costume that does not raise an error.
+
+Fixed by removing the `ingress:` blocks and their values keys from the chart and **pushing**.
+Verified: `kubectl -n shop get ingress` → no resources, `GET /healthz` → **200**, `POST /orders` →
+**202**, and both halves of §9.6's check non-zero for the first time —
+`orders_received_total` = 41 across 2 series, `istio_requests_total` present with
+`connection_security_policy="mutual_tls"` and
+`source_principal="spiffe://cluster.local/ns/istio-system/sa/istio-ingressgateway"`.
+
 ## Related
 
 [[service-mesh]] · [[mtls]] · [[kiali]] · [[ingress-nginx]] · [[prometheus]] · [[port-naming]] · [[timeouts-and-retries]] · [[grpc]] · [[observability]]
