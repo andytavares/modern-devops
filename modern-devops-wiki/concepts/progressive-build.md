@@ -40,6 +40,28 @@ That catches staleness. It cannot catch **incompleteness**, and the difference b
 neither block. Every line of it *was* in the repo file, in order, so the check passed while a reader
 following the docs got eleven compile errors (fixed 2026-08-18 — see [[franz-go]]).
 
+## The rule, as of 2026-08-23: every listing is a whole file
+
+Snippets are banned outright. A listing under a bolded path must be the **complete file**, pasteable
+1:1, with no elision and no "the rest is as above". A listing may show an earlier *stage* of a file —
+that is the progressive build, and it still pastes — but never a fragment of one.
+
+This came from a reader hitting `pricing-fault-injection.yaml.disabled`: 11 lines on the page, 71 in
+the file, four lines above a `kubectl apply -f` of that path. Auditing the rest found the same shape
+in 19 more listings — `(comments stripped)` blocks, "add one line next to the other `backend.add()`
+calls", a `main.py` shown as one function with no imports, and a `pipeline.sh` shown as the 40-line
+block you were meant to splice in.
+
+`verify_doc_listings.py` now **hard-fails** on any elision marker under a bolded path, in either form:
+a bare `...` line, or a comment whose content starts with `...`. Prose that merely contains an
+ellipsis does not match — that was the first cut and it false-positived on two files.
+
+The one case that needed reconstruction rather than substitution: §14's `pipeline.sh`. Showing the
+end-state file there would leak §19.5's Pants steps into a phase that has not built them. It was
+rebuilt instead from §12.5's whole-file listing plus the portal block, then **verified rather than
+assumed** — `bash -n`, then executed against the repo, then the emitted YAML parsed and its six step
+labels read back, `:backstage: build portal` among them.
+
 The general shape: **a subsequence test proves a listing is not out of date; it proves nothing about
 whether the listing is enough.** For a compiled language "enough" means the file compiles, and the
 only real check for that is compiling it. Worth knowing before trusting a green `checks/` run to mean

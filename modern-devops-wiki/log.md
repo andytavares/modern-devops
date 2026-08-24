@@ -535,3 +535,47 @@ files, a record of what was learned.
   if the page needs to breathe; never elide structure. [[progressive-build]] already said a
   subsequence test proves a listing is not stale and proves nothing about whether it is sufficient —
   that observation is now enforced for the one case where insufficiency is guaranteed to bite.
+
+- **2026-08-23** — **Snippets are banned; every listing is now a whole file.** After §9.10's abridged
+  manifest, the human set the rule: *"there should never be a case ever again where I can't copy the
+  code and have it work."* Audited all 41 tracked listings in `docs/` and fixed **20**.
+
+  Method, because "looks complete" is not a test: parse every listing standalone for its file type
+  (YAML via Ruby's parser, `compile()` for Python, `bash -n` for shell, package/syntax clauses for Go
+  and proto) — **all 41 passed**, which is the point. The breakage was never syntactic. A single
+  Python function with no imports compiles fine and is still not a file. So the real classifier was
+  comparing each listing's non-comment lines against the repo file: `IDENTICAL`, `COMMENTS-ONLY`,
+  `PARTIAL n/m`, `DIVERGED`.
+
+  What that found, and what was done:
+
+  - **6 `(comments stripped)` listings** — `edge-gateway.yaml`, `edge-ingress.yaml`, `pricing.proto`,
+    two `BUILD` files, `settings.py`. Mechanically replaced with the full files.
+  - **4 fragments of single-stage files** — `authorization-policy.yaml` (61/81 lines),
+    `pricing-traffic.yaml` (26/54), `scaffolded.yaml`, `services/pricing/BUILD`. Confirmed each
+    listing was a subsequence of the file before substituting, so nothing was invented.
+  - **6 listings differing only in whitespace or comments** — the Argo CD apps, `catalog-info.yaml`,
+    `app-config.production.yaml`, `order-worker.yaml`. Replaced.
+  - **4 genuine "edit an existing file" snippets** — `.yarnrc.yml`, `index.ts` ("add one line next to
+    the other `backend.add(...)` calls"), `services/pricing/pricing/main.py` shown as **one function
+    with no imports**, and phase-7's `test_api.py` starting at `class _FakePricingClient:`. All now
+    whole files.
+
+  **The one that could not be substituted:** §14's `.buildkite/pipeline.sh`, a 40-line block you were
+  told to splice in "after the services loop, before the deploy step". Pasting the end-state file
+  there would leak §19.5's Pants steps into a phase that has not built them. Reconstructed from
+  §12.5's whole-file listing plus the portal block, then verified — `bash -n` clean, executed against
+  the repo, output parsed as YAML, six step labels read back including `:backstage: build portal`. 314
+  lines, and it runs.
+
+  **What is left, and why it is correct:** 12 listings still differ from the end-state file. Every one
+  starts at the top of its file and is a complete, pasteable snapshot of an earlier *stage* —
+  `main.py` at 107 of its eventual 231 lines before gRPC exists, the two Dockerfiles before Pants
+  shrinks them, `values.yaml` before three more services. That is the progressive build working as
+  designed, and flattening it would hand the reader code importing services they have not built.
+
+  `verify_doc_listings.py` now hard-fails on any elision marker under a bolded path — a bare `...`
+  line or a comment whose content *starts* with `...`. Prose containing an ellipsis does not match;
+  that was the first cut and it false-positived on `authorization-policy.yaml` and
+  `backstage-secrets.yaml`. Verified by reintroducing an elision into `pipeline.sh`: exits 1, names
+  the line. Recorded on [[progressive-build]].

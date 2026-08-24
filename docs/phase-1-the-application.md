@@ -2399,6 +2399,9 @@ metadata:
   labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.orderWorker.replicas }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: order-worker
@@ -2412,16 +2415,28 @@ spec:
     metadata:
       labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 8 }}
       annotations:
-        checksum/config: {{ toJson .Values | sha256sum }}
+        # Hashes this service's rendered ConfigMap, which is what reaches the
+        # container through envFrom and therefore never changes the pod template
+        # on its own. Scoping the hash to one file is what keeps an image-tag
+        # rewrite elsewhere in the values tree from rolling this Deployment and
+        # triggering a consumer-group rebalance for no reason.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-order-worker.yaml") . | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ .Values.orderWorker.metricsPort | quote }}
     spec:
-      # Same reason as order-api: no Docker-link env vars in this pod.
+      # Kubernetes injects a Docker-link env var per Service in this namespace:
+      # ORDER_API_PORT, ORDER_WORKER_PORT, PRICING_PORT, FRONTEND_PORT — each
+      # set to "tcp://<clusterIP>:<port>". Any app reading a variable of that
+      # name as its own config gets a URL where it expected an integer:
+      #   ValueError: invalid literal for int() with base 10: 'tcp://10.96...'
+      # Env vars outrank every other config source, so the app cannot win.
+      # Service links are a Docker-links relic nothing here uses.
       enableServiceLinks: false
       serviceAccountName: order-worker
       imagePullSecrets:
-        - name: {{ .Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" . }}
       # Give the worker time to finish the in-flight batch and commit offsets
       # after SIGTERM before Kubernetes SIGKILLs it.
       terminationGracePeriodSeconds: 45
@@ -2433,15 +2448,13 @@ spec:
           image: {{ include "op.image" (dict "root" $ "img" .Values.orderWorker.image) }}
           imagePullPolicy: IfNotPresent
           ports:
-            # http-metrics, not metrics. Istio reads the protocol off the port
-            # name, and a name it does not recognise is treated as plain TCP.
             - { name: http-metrics, containerPort: {{ .Values.orderWorker.metricsPort }} }
+          envFrom:
+            - configMapRef: { name: order-worker-config }
           env:
-            {{- include "op.commonEnv" . | nindent 12 }}
-            - name: DDB_TABLE
-              value: {{ .Values.aws.ddbTable | quote }}
-            - name: KAFKA_GROUP
-              value: {{ .Values.orderWorker.consumerGroup | quote }}
+            {{- include "op.awsCredentialEnv" . | nindent 12 }}
+            # Image identity, not configuration: it tracks the tag, so it belongs
+            # in the pod template rather than in the ConfigMap.
             - name: SERVICE_VERSION
               value: {{ .Values.orderWorker.image.tag | quote }}
           startupProbe:
@@ -2471,6 +2484,7 @@ spec:
     app.kubernetes.io/name: order-worker
   ports:
     - { name: http-metrics, port: 9090, targetPort: http-metrics }
+{{- include "op.pdb" (dict "name" "order-worker" "root" $ "replicas" .Values.orderWorker.replicas "selector" (dict "app.kubernetes.io/name" "order-worker")) }}
 {{- end }}
 ```
 

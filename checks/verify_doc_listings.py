@@ -190,33 +190,29 @@ def drifted_complete_listings(repo):
 # LEADING `...` counts; prose that merely contains an ellipsis does not.
 ELISION_LEAD = re.compile(r"^\s*(#|//|--)\s*(\.\.\.|…)\s*\S")
 
-APPLY = re.compile(r"(?:kubectl\s+(?:apply|create|delete|replace)[^\n]*?|helm[^\n]*?)-f\s+(\S+)")
-
-
-def elided_but_applied(repo):
-    """A listing the reader is told to `apply -f` must be paste-able.
+def elided_listings(repo):
+    """Every listing must be copy-pasteable as a whole file. No snippets.
 
     `drifted_final_listings` proves a listing is not out of date. It says
-    nothing about whether the listing is *enough*, and an elision inside a file
-    the docs then tell you to apply is the worst case of that: the reader is
-    handed a fragment and a command that needs the whole file. §9.10 shipped an
-    11-line abridgement of a 71-line manifest for exactly this long.
+    nothing about whether the listing is *enough*, and that is the difference
+    that keeps biting: §3.2 shipped a `main_test.go` block missing five imports,
+    and §9.10 shipped an 11-line abridgement of a 71-line manifest four lines
+    above a `kubectl apply -f` of that path.
+
+    A listing may show an earlier *stage* of a file — that is the progressive
+    build, and it still pastes. It may never show a *fragment*. An elision
+    marker is the unambiguous signature of one, so it is a hard failure
+    wherever it appears under a bolded path.
     """
     repo = Path(repo)
     _, final = _scan(repo)
-    applied = set()
-    for doc in sorted((repo / "docs").glob("*.md")):
-        for m in APPLY.finditer(doc.read_text()):
-            applied.add(m.group(1).strip("`'\""))
     out = []
     for (_track, path), (_order, doc, line_no, body) in sorted(final.items()):
-        if path not in applied:
-            continue
         for ln in body.splitlines():
             if ELISION.match(ln) or ELISION_LEAD.match(ln):
                 out.append(
                     f"{doc.relative_to(repo)}:{line_no} {path} is elided "
-                    f"({ln.strip()[:60]}) but the docs say to apply it — show the whole file"
+                    f"({ln.strip()[:60]}) — show the whole file, never a snippet"
                 )
                 break
     return out
@@ -233,7 +229,7 @@ def main():
     repo = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
     missing = missing_paths(repo)
     incomplete = drifted_complete_listings(repo)
-    elided = elided_but_applied(repo)
+    elided = elided_listings(repo)
     partial = drifted_final_listings(repo)
 
     for x in missing:

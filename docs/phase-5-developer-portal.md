@@ -86,12 +86,22 @@ release.
 
 Point it at Nexus rather than the public registry — the same choke point the services use:
 
-**`portal/.yarnrc.yml`** (add to what `create-app` generated)
+**`portal/.yarnrc.yml`**
 
 ```yaml
+nodeLinker: node-modules
+
 npmRegistryServer: "http://nexus:8081/repository/npm-proxy/"
+
 unsafeHttpWhitelist:
   - nexus
+
+npmMinimalAgeGate: 3d
+
+npmPreapprovedPackages:
+  - "@backstage/*"
+
+yarnPath: .yarn/releases/yarn-4.18.0.cjs
 ```
 
 Add the scaffolder's GitHub actions. In the new backend system every provider's actions ship as their own module and none are on by default:
@@ -100,12 +110,81 @@ Add the scaffolder's GitHub actions. In the new backend system every provider's 
 yarn --cwd packages/backend add @backstage/plugin-scaffolder-backend-module-github
 ```
 
-**`portal/packages/backend/src/index.ts`** — add one line next to the other `backend.add(...)` calls:
+**`portal/packages/backend/src/index.ts`**
 
 ```typescript
-// Without this, `publish:github:pull-request` does not exist and every template
-// run fails at the last step with "action not found" — after doing all the work.
+/*
+ * Hi!
+ *
+ * Note that this is an EXAMPLE Backstage backend. Please check the README.
+ *
+ * Happy hacking!
+ */
+
+import { createBackend } from '@backstage/backend-defaults';
+
+const backend = createBackend();
+
+backend.add(import('@backstage/plugin-app-backend'));
+backend.add(import('@backstage/plugin-proxy-backend'));
+
+// scaffolder plugin
+backend.add(import('@backstage/plugin-scaffolder-backend'));
 backend.add(import('@backstage/plugin-scaffolder-backend-module-github'));
+backend.add(
+  import('@backstage/plugin-scaffolder-backend-module-notifications'),
+);
+
+// techdocs plugin
+backend.add(import('@backstage/plugin-techdocs-backend'));
+
+// auth plugin
+backend.add(import('@backstage/plugin-auth-backend'));
+// See https://backstage.io/docs/backend-system/building-backends/migrating#the-auth-plugin
+backend.add(import('@backstage/plugin-auth-backend-module-guest-provider'));
+// See https://backstage.io/docs/auth/guest/provider
+
+// catalog plugin
+backend.add(import('@backstage/plugin-catalog-backend'));
+backend.add(
+  import('@backstage/plugin-catalog-backend-module-scaffolder-entity-model'),
+);
+
+// See https://backstage.io/docs/features/software-catalog/configuration#subscribing-to-catalog-errors
+backend.add(import('@backstage/plugin-catalog-backend-module-logs'));
+
+// permission plugin
+backend.add(import('@backstage/plugin-permission-backend'));
+// See https://backstage.io/docs/permissions/getting-started for how to create your own permission policy
+backend.add(
+  import('@backstage/plugin-permission-backend-module-allow-all-policy'),
+);
+
+// search plugin
+backend.add(import('@backstage/plugin-search-backend'));
+
+// search engine
+// See https://backstage.io/docs/features/search/search-engines
+backend.add(import('@backstage/plugin-search-backend-module-pg'));
+
+// search collators
+backend.add(import('@backstage/plugin-search-backend-module-catalog'));
+backend.add(import('@backstage/plugin-search-backend-module-techdocs'));
+
+// kubernetes plugin
+backend.add(import('@backstage/plugin-kubernetes-backend'));
+
+// user settings plugin
+backend.add(import('@backstage/plugin-user-settings-backend'));
+
+// notifications and signals plugins
+backend.add(import('@backstage/plugin-notifications-backend'));
+backend.add(import('@backstage/plugin-signals-backend'));
+
+// mcp actions plugin
+backend.add(import('@backstage/plugin-mcp-actions-backend'));
+
+backend.start();
 ```
 
 Check it boots locally before you think about containers:
@@ -126,6 +205,11 @@ TLS at the edge and every URL it knows about itself has to agree ([§14.8](#148-
 
 ```yaml
 app:
+  # https, not http. The UI calls crypto.randomUUID, which the browser only
+  # exposes in a secure context — over plain http Backstage renders a blank
+  # page. And once the page is served over https, a backend baseUrl on http
+  # gets every API call blocked as mixed content, so all three URLs here have
+  # to agree.
   baseUrl: https://backstage.localtest.me
 
 backend:
@@ -165,12 +249,12 @@ catalog:
     - allow: [Component, System, API, Resource, Location, Template, Group, User]
   locations:
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/catalog-info.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/catalog-info.yaml
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/deploy/backstage/templates/new-service/template.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/deploy/backstage/templates/new-service/template.yaml
       rules: [{ allow: [Template] }]
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/deploy/backstage/templates/new-bucket/template.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/deploy/backstage/templates/new-bucket/template.yaml
       rules: [{ allow: [Template] }]
 ```
 
@@ -180,7 +264,7 @@ catalog:
 
 The catalog is only as useful as it is complete, and it goes stale the moment it lives somewhere other than the code.
 
-**`catalog-info.yaml`** (repo root)
+**`catalog-info.yaml`**
 
 ```yaml
 apiVersion: backstage.io/v1alpha1
@@ -197,7 +281,7 @@ metadata:
   name: order-api
   description: FastAPI order intake; prices every order over gRPC before accepting it
   annotations:
-    github.com/project-slug: <your-github-user>/modern-devops
+    github.com/project-slug: andytavares/modern-devops
 spec:
   type: service
   lifecycle: production
@@ -229,7 +313,7 @@ metadata:
     Istio can shift traffic between them; the version that answered is returned
     to the caller as `served_by` (§18).
   annotations:
-    github.com/project-slug: <your-github-user>/modern-devops
+    github.com/project-slug: andytavares/modern-devops
 spec:
   type: service
   lifecycle: production
@@ -246,7 +330,7 @@ metadata:
     orders, so a traffic shift is something you watch rather than something you
     read out of a metric (§19).
   annotations:
-    github.com/project-slug: <your-github-user>/modern-devops
+    github.com/project-slug: andytavares/modern-devops
 spec:
   type: website
   lifecycle: production
@@ -514,6 +598,9 @@ metadata:
   labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 4 }}
 spec:
   replicas: {{ $svc.replicas | default 1 }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ $svc.name }}
@@ -521,6 +608,10 @@ spec:
     metadata:
       labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 8 }}
       annotations:
+        # Scaffolded services read their config from the shared ConfigMap through
+        # envFrom, so nothing in the pod template changes when that config does.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-scaffolded.yaml") $ | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ $svc.port | quote }}
@@ -535,7 +626,7 @@ spec:
       enableServiceLinks: false
       serviceAccountName: {{ $svc.name }}
       imagePullSecrets:
-        - name: {{ $.Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" $ }}
       securityContext:
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
@@ -543,11 +634,14 @@ spec:
         - name: {{ $svc.name }}
           # Every scaffolded service is built from the same commit, so they all
           # carry the same tag. CI writes it once, in deploy/env/local/values.yaml.
-          image: "{{ $.Values.global.registry }}/shop/{{ $svc.name }}:{{ $.Values.scaffolded.tag }}"
+          image: {{ include "op.image" (dict "root" $ "img" (dict "repository" (printf "shop/%s" $svc.name) "tag" $.Values.scaffolded.tag)) }}
           ports:
             - { name: http, containerPort: {{ $svc.port }} }
-          env:
-            {{- include "op.commonEnv" $ | nindent 12 }}
+          envFrom:
+            - configMapRef: { name: scaffolded-config }
+          {{- with include "op.awsCredentialEnv" $ }}
+          env: {{- . | nindent 12 }}
+          {{- end }}
           readinessProbe:
             httpGet: { path: /readyz, port: http }
           resources:
@@ -578,6 +672,7 @@ spec:
     app.kubernetes.io/name: {{ $svc.name }}
   ports:
     - { name: http, port: 80, targetPort: http }
+{{- include "op.pdb" (dict "name" $svc.name "root" $ "replicas" ($svc.replicas | default 1) "selector" (dict "app.kubernetes.io/name" $svc.name)) }}
 {{- if $svc.ingress.enabled }}
 ---
 apiVersion: networking.istio.io/v1
@@ -876,9 +971,224 @@ plugins
 
 > **Leave `packages/*/src` commented out.** `create-app` writes that exclusion for a host build, where `dist/` is already compiled; our multi-stage build compiles *from* those sources, and excluding them fails `yarn tsc` with `error TS18003: No inputs were found in config file '/app/tsconfig.json'` — an error that names `tsconfig.json` and never mentions Docker. `plugins` stays excluded, because the `COPY plugins plugins` line is commented out above.
 
-**`.buildkite/pipeline.sh`** — after the services loop, before the deploy step:
+**`.buildkite/pipeline.sh`** — the whole file, with the portal build inserted after the
+services loop and before the CD handoff. The only change from
+[§12.5](phase-3-delivery.md#125-the-pipeline) is the `:backstage: build portal` block:
 
 ```sh
+#!/bin/sh
+# Emits this build's pipeline as YAML on stdout. It talks to nothing and
+# changes nothing - run it locally and read what it prints.
+#
+# POSIX sh, deliberately: this runs in the default agent image, whose only
+# guaranteed shell is /bin/sh.
+set -eu
+
+REGISTRY="nexus:8082"
+# A build triggered by hand in the UI sets BUILDKITE_COMMIT to the literal
+# string "HEAD" rather than a SHA, which would tag images `:HEAD` — a mutable
+# tag that means a different image on every build, and the exact thing §10.3
+# says a tag must never be. Resolve it to a real SHA before it reaches a tag.
+if [ "$BUILDKITE_COMMIT" = "HEAD" ]; then
+  BUILDKITE_COMMIT="$(git rev-parse HEAD)"
+fi
+SHA="$(echo "$BUILDKITE_COMMIT" | cut -c1-12)"
+
+case "$SHA" in
+  *[!0-9a-f]*|"") echo "refusing to build: BUILDKITE_COMMIT is not a SHA ($BUILDKITE_COMMIT)" >&2; exit 1 ;;
+esac
+
+# Services are discovered, not listed. A directory under services/ with a
+# Dockerfile in it is a service, and that is the entire contract. This is what
+# lets the Backstage paved path (§14.6) add a service without touching CI.
+SERVICES="$(cd services && ls -d */ 2>/dev/null | sed 's#/##' | while read -r s; do
+  [ -f "$s/Dockerfile" ] && echo "$s"
+done | sort | tr '\n' ' ')"
+
+if [ -z "$SERVICES" ]; then
+  echo "no services found under services/*/Dockerfile" >&2
+  exit 1
+fi
+
+# ── LOOP GUARD ─────────────────────────────────────────────────────────────
+# The deploy step at the bottom commits into the repo we build from, so
+# without this every deploy triggers a build that makes another deploy,
+# forever. Deciding it here, before any step exists, is the whole reason this
+# is a script.
+if git log -1 --pretty=%s | grep -q '^chore(deploy):'; then
+  cat <<'YAML'
+steps:
+  - label: ":fast_forward: deploy commit, nothing to build"
+    agents: { queue: kubernetes }
+    command: "echo 'HEAD is a deploy commit; skipping'"
+YAML
+  exit 0
+fi
+
+# ── Header ─────────────────────────────────────────────────────────────────
+# Every step runs in its own Kubernetes pod, created by agent-stack-k8s.
+# The `kubernetes` plugin is how a step describes the pod it wants.
+cat <<'YAML'
+env:
+  # Nexus proxies. Builds never talk to pypi.org or proxy.golang.org directly:
+  # that is the supply-chain choke point from §5.1, made real.
+  # pip needs these to install uv itself. uv does NOT get its index from here:
+  # it reads [[tool.uv.index]] in services/order-api/pyproject.toml, so the
+  # registry is recorded in uv.lock and `--locked` validates the same way on a
+  # laptop and in this pod. Setting UV_DEFAULT_INDEX here instead would put the
+  # index in CI only, and the committed lock would never match it.
+  PIP_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
+  PIP_TRUSTED_HOST: "nexus"
+  GOPROXY: "http://nexus:8081/repository/go-proxy"
+  # Nothing disables checksum verification. go.sum records a hash for every
+  # module in the build list, so the go command verifies against it locally and
+  # never reaches for the checksum database. GOSUMDB=off would not help here —
+  # it would only disarm verification for the next dependency added.
+  GOFLAGS: "-mod=readonly"
+
+steps:
+  # ── 1. Tests, in parallel ────────────────────────────────────────────────
+  - label: ":python: test order-api"
+    key: test-api
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - image: python:3.13-slim
+                command:
+                  - |
+                    set -euo pipefail
+                    cd services/order-api
+                    pip install --quiet uv
+                    uv sync --locked --dev
+                    uv run ruff check .
+                    uv run pytest -q
+
+  - label: ":go: test order-worker"
+    key: test-worker
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              # Debian, not alpine: `go test -race` needs cgo, and the alpine
+              # image ships CGO_ENABLED=0 with no C toolchain. Adding gcc and
+              # musl-dev to alpine also works; this is one word instead.
+              - image: golang:1.26
+                command:
+                  - |
+                    set -euo pipefail
+                    cd services/order-worker
+                    go vet ./...
+                    go test -race ./...
+
+  - wait
+YAML
+
+# `golang:1.26` and not `golang:1.26-alpine` for the TEST step specifically:
+#
+#   golang:1.26-alpine : CGO_ENABLED=0, no gcc
+#   golang:1.26        : CGO_ENABLED=1, gcc 14.2.0, git 2.47.3
+#
+# `go test -race` is implemented with a C runtime, so on alpine it refuses with
+# `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1` — and setting
+# that variable alone doesn't help, because there is no compiler to use. The
+# Dockerfile in §3.2 still builds FROM golang:1.26-alpine, and should: there we
+# *want* CGO_ENABLED=0 for a static binary in a scratch image. Test and build
+# want opposite things from the same toolchain, which is why they differ.
+
+# ── 2. Build and push images ───────────────────────────────────────────────
+# One template, one step per service. When these were two hand-maintained
+# YAML blocks they differed only in a name, which is exactly the kind of
+# duplication that drifts without anyone noticing.
+for SVC in $SERVICES; do
+  # Only the Go image takes a version stamp (services/order-worker/Dockerfile
+  # declares ARG VERSION); buildah warns about build-args the Dockerfile never
+  # declares, so don't pass it to the Python one.
+  case "$SVC" in
+    order-worker) BUILD_ARGS="--build-arg \"VERSION=$SHA\" " ;;
+    *)            BUILD_ARGS="" ;;
+  esac
+
+  cat <<YAML
+
+  - label: ":docker: build $SVC ($SHA)"
+    key: build-$SVC
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            volumes:
+              - name: nexus-auth
+                secret: { secretName: nexus-push }
+            containers:
+              - image: quay.io/buildah/stable:v1.40.1
+                # Not privileged. Buildah documents chroot isolation plus the
+                # vfs storage driver for running inside an unprivileged
+                # container: chroot avoids CLONE_NEWUSER, and vfs avoids the
+                # overlayfs mknod. What remains is the default OCI capability
+                # set, which Buildah hands to each RUN step and therefore has to
+                # hold itself. Naming those capabilities is the point — the pod
+                # cannot load kernel modules, ptrace, or touch host devices, all
+                # of which full privilege grants.
+                securityContext:
+                  privileged: false
+                  allowPrivilegeEscalation: true
+                  capabilities:
+                    drop: ["ALL"]
+                    add:
+                      - SYS_ADMIN          # mount(2) for the build root
+                      - SYS_CHROOT         # chroot isolation
+                      - SETUID
+                      - SETGID
+                      - SETPCAP
+                      - SETFCAP
+                      - CHOWN
+                      - DAC_OVERRIDE
+                      - FOWNER
+                      - FSETID
+                      - MKNOD
+                      - KILL
+                      - NET_RAW
+                      - NET_BIND_SERVICE
+                      - AUDIT_WRITE
+                  seccompProfile:
+                    type: Unconfined
+                env:
+                  - name: STORAGE_DRIVER
+                    value: vfs
+                  - name: BUILDAH_ISOLATION
+                    value: chroot
+                  - name: BUILDAH_FORMAT
+                    value: docker
+                  - name: REGISTRY_AUTH_FILE
+                    value: /auth/config.json
+                volumeMounts:
+                  - name: nexus-auth
+                    mountPath: /auth
+                    readOnly: true
+                command:
+                  - |
+                    set -euo pipefail
+
+                    # --tls-verify=false exists only because §5.8 runs Nexus
+                    # on plain HTTP. It disables certificate verification on a
+                    # connection that carries push credentials. Behind real TLS
+                    # you delete the flag and mount the CA instead — it is not
+                    # a Buildah setting you keep.
+                    buildah bud \\
+                      --tls-verify=false \\
+                      ${BUILD_ARGS}--file services/$SVC/Dockerfile \\
+                      --tag "$REGISTRY/shop/$SVC:$SHA" \\
+                      services/$SVC
+
+                    buildah push --tls-verify=false "$REGISTRY/shop/$SVC:$SHA"
+
+                    echo "pushed $REGISTRY/shop/$SVC:$SHA"
+YAML
+done
+
 # The portal is not a service and does not fit the services template: a
 # different Dockerfile path, a different context, and a build measured in
 # double-digit minutes.
@@ -920,6 +1230,65 @@ cat <<YAML
                       portal
 
                     buildah push --tls-verify=false "$REGISTRY/shop/portal:$SHA"
+YAML
+
+# ── 3. The handoff to CD: write the tag into git ───────────────────────────
+cat <<YAML
+
+  - wait
+
+  - label: ":git: bump image tags to $SHA"
+    key: deploy
+    branches: "main"
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          checkout:
+            gitCredentialsSecret:
+              secretName: git-https-credentials
+          podSpec:
+            volumes:
+              - name: git-creds
+                secret: { secretName: git-https-credentials }
+            containers:
+              - image: alpine/git:2.47.2
+                volumeMounts:
+                  - name: git-creds
+                    mountPath: /gitcreds
+                    readOnly: true
+                command:
+                  - |
+                    set -eu
+                    git config user.name  "buildkite"
+                    git config user.email "buildkite@localtest.me"
+                    git config credential.helper "store --file=/gitcreds/.git-credentials"
+
+                    # The overlay has exactly one job - carry the two tags - so
+                    # rewriting it wholesale is deterministic and needs no yq.
+                    # The tags are literals: pipeline.sh already resolved them.
+                    cat > deploy/env/local/values.yaml <<'VALUES'
+                    # Generated by Buildkite. Do not edit by hand.
+                    orderApi:
+                      image:
+                        tag: "$SHA"
+                    orderWorker:
+                      image:
+                        tag: "$SHA"
+                    # Every scaffolded service (§14.6) is built from this same
+                    # commit, so one tag covers all of them.
+                    scaffolded:
+                      tag: "$SHA"
+                    VALUES
+
+                    git add deploy/env/local/values.yaml
+                    if git diff --cached --quiet; then
+                      echo "no change; nothing to deploy"
+                      exit 0
+                    fi
+
+                    git commit -m "chore(deploy): order-platform $SHA [skip ci]"
+                    git push origin HEAD:main
+                    echo "pushed deploy commit; Argo CD will sync"
 YAML
 ```
 

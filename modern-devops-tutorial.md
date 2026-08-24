@@ -3155,6 +3155,9 @@ metadata:
   labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.orderWorker.replicas }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: order-worker
@@ -3168,16 +3171,28 @@ spec:
     metadata:
       labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 8 }}
       annotations:
-        checksum/config: {{ toJson .Values | sha256sum }}
+        # Hashes this service's rendered ConfigMap, which is what reaches the
+        # container through envFrom and therefore never changes the pod template
+        # on its own. Scoping the hash to one file is what keeps an image-tag
+        # rewrite elsewhere in the values tree from rolling this Deployment and
+        # triggering a consumer-group rebalance for no reason.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-order-worker.yaml") . | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ .Values.orderWorker.metricsPort | quote }}
     spec:
-      # Same reason as order-api: no Docker-link env vars in this pod.
+      # Kubernetes injects a Docker-link env var per Service in this namespace:
+      # ORDER_API_PORT, ORDER_WORKER_PORT, PRICING_PORT, FRONTEND_PORT — each
+      # set to "tcp://<clusterIP>:<port>". Any app reading a variable of that
+      # name as its own config gets a URL where it expected an integer:
+      #   ValueError: invalid literal for int() with base 10: 'tcp://10.96...'
+      # Env vars outrank every other config source, so the app cannot win.
+      # Service links are a Docker-links relic nothing here uses.
       enableServiceLinks: false
       serviceAccountName: order-worker
       imagePullSecrets:
-        - name: {{ .Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" . }}
       # Give the worker time to finish the in-flight batch and commit offsets
       # after SIGTERM before Kubernetes SIGKILLs it.
       terminationGracePeriodSeconds: 45
@@ -3189,15 +3204,13 @@ spec:
           image: {{ include "op.image" (dict "root" $ "img" .Values.orderWorker.image) }}
           imagePullPolicy: IfNotPresent
           ports:
-            # http-metrics, not metrics. Istio reads the protocol off the port
-            # name, and a name it does not recognise is treated as plain TCP.
             - { name: http-metrics, containerPort: {{ .Values.orderWorker.metricsPort }} }
+          envFrom:
+            - configMapRef: { name: order-worker-config }
           env:
-            {{- include "op.commonEnv" . | nindent 12 }}
-            - name: DDB_TABLE
-              value: {{ .Values.aws.ddbTable | quote }}
-            - name: KAFKA_GROUP
-              value: {{ .Values.orderWorker.consumerGroup | quote }}
+            {{- include "op.awsCredentialEnv" . | nindent 12 }}
+            # Image identity, not configuration: it tracks the tag, so it belongs
+            # in the pod template rather than in the ConfigMap.
             - name: SERVICE_VERSION
               value: {{ .Values.orderWorker.image.tag | quote }}
           startupProbe:
@@ -3227,6 +3240,7 @@ spec:
     app.kubernetes.io/name: order-worker
   ports:
     - { name: http-metrics, port: 9090, targetPort: http-metrics }
+{{- include "op.pdb" (dict "name" "order-worker" "root" $ "replicas" .Values.orderWorker.replicas "selector" (dict "app.kubernetes.io/name" "order-worker")) }}
 {{- end }}
 ```
 
@@ -3997,7 +4011,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    repoURL: https://github.com/andytavares/modern-devops.git
     targetRevision: main
     path: deploy/argocd/apps
   destination:
@@ -4024,7 +4038,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    repoURL: https://github.com/andytavares/modern-devops.git
     targetRevision: main
     path: deploy/charts/order-platform
     helm:
@@ -4045,7 +4059,7 @@ spec:
       backoff: { duration: 10s, factor: 2, maxDuration: 3m }
 ```
 
-**`deploy/argocd/apps/platform.yaml`** — the infrastructure we applied by hand, now under GitOps:
+**`deploy/argocd/apps/platform.yaml`**
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -4068,7 +4082,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    repoURL: https://github.com/andytavares/modern-devops.git
     targetRevision: main
     path: deploy/platform
     directory:
@@ -4906,15 +4920,26 @@ Before you apply it, build the edge, because STRICT is what makes the edge's sha
 That is `istio-ingressgateway`, and it needs two objects — a `Gateway` declaring which ports and
 hostnames the proxy accepts, and a `VirtualService` per hostname declaring where it goes.
 
-**`deploy/platform/istio/edge-gateway.yaml`** (comments stripped here; the file carries them)
+**`deploy/platform/istio/edge-gateway.yaml`**
 
 ```yaml
+# The mesh's own entry point, which is what Istio documents for north-south
+# traffic. A Gateway describes the port and hostnames the edge proxy accepts;
+# the VirtualServices below describe where those hostnames go. Routing lives in
+# the same objects and the same language as the canary in §9.8, rather than
+# being split between an Ingress controller's annotations and Istio's config.
+#
+# ingress-nginx still owns hostPort 80/443 on the kind node and forwards these
+# two hostnames here (see edge-ingress.yaml). That is the same shape as the
+# production topology Istio documents: an external load balancer in front of
+# istio-ingressgateway.
 apiVersion: networking.istio.io/v1
 kind: Gateway
 metadata:
   name: edge
   namespace: istio-system
 spec:
+  # Matches the pod labels the istio/gateway chart applies.
   selector:
     istio: ingressgateway
   servers:
@@ -4922,9 +4947,16 @@ spec:
         number: 80
         name: http
         protocol: HTTP
+      # Wildcard, so a service the paved path (§14.6) adds needs only a
+      # VirtualService — no edit to this file and no edit to the nginx Ingress
+      # in front of it. A hostname with no VirtualService gets a 404 from the
+      # gateway, which is the correct answer for a route nobody declared.
       hosts:
         - "*.localtest.me"
 ---
+# A VirtualService binds a hostname to the Gateway and routes it to a Service.
+# `gateways` names the Gateway in namespace/name form because the Gateway lives
+# in istio-system and these route to workloads in shop.
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
@@ -4974,9 +5006,25 @@ is the correct answer for a route nobody declared.
 Then the hop in front of it. nginx owns `hostPort` 80/443 on the kind node and hands the meshed
 hostnames to the gateway's Service:
 
-**`deploy/platform/istio/edge-ingress.yaml`** (comments stripped here; the file carries them)
+**`deploy/platform/istio/edge-ingress.yaml`**
 
 ```yaml
+# ingress-nginx owns hostPort 80/443 on the kind control-plane node and is the
+# edge for everything that is not in the mesh — Argo CD, Grafana, Kiali,
+# Backstage, Nexus. It keeps that job. This Ingress hands the two meshed
+# hostnames straight to istio-ingressgateway and does nothing else with them:
+# no rewriting, no per-service annotations, no knowledge of what is behind it.
+#
+# That split is the point. Each proxy does the job its own documentation
+# describes — nginx routes a hostname to a Service, Istio owns everything from
+# the mesh boundary inward — and neither is asked to understand the other. It is
+# also the shape of the production topology Istio documents, with nginx standing
+# in for the cloud load balancer that would forward to the gateway there.
+#
+# Nothing here needs `service-upstream` or `upstream-vhost`. istio-system has no
+# STRICT PeerAuthentication, so the gateway accepts this plaintext hop exactly as
+# it would from a cloud load balancer; mTLS begins at the gateway, which is
+# in the mesh and calls shop workloads with a real workload identity.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -4985,6 +5033,10 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
+    # A wildcard host, so a scaffolded service reaches the mesh without anyone
+    # editing this file. The platform's own UIs — Argo CD, Grafana, Kiali,
+    # Backstage — keep their exact-host Ingresses, and an exact host always wins
+    # over a wildcard, so they never come through here.
     - host: "*.localtest.me"
       http:
         paths:
@@ -5110,6 +5162,13 @@ spec:
               - "cluster.local/ns/shop/sa/order-api"
               - "cluster.local/ns/shop/sa/order-worker"
 ---
+# 3. The same deny-all, for shop. Without this, Istio's default applies: a
+# workload that no ALLOW policy selects accepts traffic from anything in the
+# mesh. Policies 4 and 5 below select order-api and pricing, so those two were
+# already covered -- but frontend and order-worker were selected by nothing,
+# and were therefore reachable from every workload in the cluster. Deny-by-
+# default is a property of the namespace, not of the workloads you remembered
+# to write a policy for.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -5118,6 +5177,11 @@ metadata:
 spec:
   {}
 ---
+# 4. The frontend is a browser-facing page. It is reachable from the mesh's
+# ingress gateway and from nowhere else -- it has no callers inside the mesh.
+# The principal is the gateway's own workload identity: traffic entering
+# through it is authenticated as istio-ingressgateway, not as whatever sits in
+# front of it.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -5134,6 +5198,14 @@ spec:
             principals:
               - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
 ---
+# 5. order-worker takes no inbound traffic at all. It consumes from Kafka and
+# writes to Floci; nothing calls it. The one exception is Prometheus scraping
+# its metrics port, which reaches the sidecar's merged endpoint rather than the
+# application, so it needs no allow rule here. An empty rules list would deny
+# everything including that, so the policy allows precisely one thing: nothing
+# inbound to the application ports.
+#
+# 6. order-api is reachable from the edge, and from the frontend -- nowhere else.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -5149,6 +5221,32 @@ spec:
         - source:
             principals:
               - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/shop/sa/frontend"
+---
+# 4. pricing is the canary target (v1/v2, one Service). It is called
+# synchronously on the order path with no fallback on failure (see
+# services/order-api/order_api/main.py: `_price_order` raises HTTP 502 on any
+# grpc.RpcError, it never guesses a price) -- so its blast radius must be as
+# small as possible. order-api is the only workload with any business calling
+# it. Not order-worker, not frontend, not anything in floci.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-order-api-to-pricing
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pricing
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/shop/sa/order-api"
 ```
 
 ```bash
@@ -5527,9 +5625,26 @@ Confirm with `kubectl -n shop get svc pricing -o jsonpath='{.spec.ports[*].name}
 
 #### `DestinationRule` — subsets, and the pool policy
 
-**`deploy/platform/istio/pricing-traffic.yaml`** (the file itself carries all of the arithmetic below as inline comments; stripped here so the prose can do the work)
+**`deploy/platform/istio/pricing-traffic.yaml`**
 
 ```yaml
+# Canary routing and resilience for shop.v1.Pricing (services/pricing), consumed
+# by order-api's PricingClient over gRPC with a 2s client-side deadline
+# (order_api/main.py: `self._stub.PriceOrder(request, timeout=self._timeout_seconds)`).
+# order-api never falls back to a local price on failure — it returns HTTP 502 —
+# so every value below is chosen against that 2s budget, worked out explicitly
+# in the comments rather than left as Istio defaults.
+#
+# gRPC-over-HTTP/2 note: Istio does NOT have a separate "grpc:" route stanza.
+# gRPC rides HTTP/2, so it is routed with the ordinary `http:` block below.
+# What makes Istio treat this Service's traffic as HTTP/2-aware in the first
+# place (rather than opaque TCP) is the Service port *name* -- `grpc` (see the
+# Service manifest: ports named `grpc` and `metrics`). Istio's port-name
+# protocol sniffing maps the `grpc` / `grpc-*` prefix to HTTP/2 with gRPC
+# semantics, which is what makes header-based routing, retries and
+# gRPC-status-aware outlier detection possible at all. Get the port name
+# wrong (e.g. call it `pricing` or `tcp-grpc`) and Istio falls back to plain
+# TCP passthrough -- this whole file would silently stop doing anything.
 apiVersion: networking.istio.io/v1
 kind: DestinationRule
 metadata:
@@ -5545,17 +5660,121 @@ spec:
       labels:
         version: v2
   trafficPolicy:
+    # Applies to both subsets (v1 and v2 each get their own Envoy cluster, but
+    # both inherit this trafficPolicy since neither subset overrides it).
     connectionPool:
+      # Modest limits for a 2-3 replica internal service taking gRPC calls from
+      # order-api (and order-worker). HTTP/2 multiplexes many requests over one
+      # connection, so we don't need -- and don't want -- a large connection count.
       tcp:
         maxConnections: 20
       http:
+        # Concurrent in-flight requests across the whole pool. 100 is generous
+        # headroom over expected order volume for a demo service while still
+        # bounding worst-case fan-out from a client bug.
         http2MaxRequests: 100
+        # 0 = unlimited requests per HTTP/2 connection. HTTP/2 is designed for
+        # long-lived multiplexed connections; forcing periodic reconnects (a
+        # nonzero cap) only adds handshake latency to a service already living
+        # inside a 2s client deadline, for no gRPC-specific benefit.
         maxRequestsPerConnection: 0
     outlierDetection:
+      # Eject a pod after 3 consecutive gateway/5xx errors. Justification for a
+      # 2-3 replica subset: with `consecutive5xxErrors` left at its default of
+      # 5, a single bad replica in a pool that small could account for a large
+      # share of total request volume before ejection ever kicks in -- the
+      # blast radius is too big to wait for 5. 3 is fast enough to react to a
+      # genuinely broken pod within a handful of requests, without being so
+      # low (e.g. 1-2) that ordinary transient errors trip it.
       consecutive5xxErrors: 3
+      # How often Envoy sweeps for ejection candidates.
       interval: 15s
+      # Minimum time a pod stays ejected once flagged. Kept at the 30s
+      # default: long enough that the ejected pod isn't immediately
+      # reconsidered on the next 15s sweep, short enough that a transient
+      # blip (e.g. a fault-injection drill, see pricing-fault-injection.yaml.disabled)
+      # self-heals without operator intervention.
       baseEjectionTime: 30s
+      # Cap ejections at 50%, not the 10% default. Rationale: with only 2-3
+      # replicas per subset, 10% of the pool rounds down to zero ejectable
+      # hosts -- outlier detection would be configured but functionally
+      # inert. 50% guarantees room to eject at least one bad replica out of
+      # two while always leaving at least one healthy replica standing, so a
+      # single failing pod can never take the whole subset out of rotation.
       maxEjectionPercent: 50
+---
+# 90/10 canary split between pricing-v1 and pricing-v2, with a request-level
+# timeout and retry policy sized against order-api's 2s client-side gRPC
+# deadline (order_api/main.py PricingClient, settings.pricing_timeout_seconds).
+#
+# The arithmetic, in order:
+#
+#   1. route `timeout: 1800ms` -- deliberately LESS than the client's 2000ms
+#      deadline, never more. A route timeout longer than 2s is pointless:
+#      order-api's own grpc timeout fires at 2s regardless of what Envoy is
+#      still doing, so anything Envoy does past that point is wasted work the
+#      caller has already given up on. Setting it a bit *under* 2s (200ms of
+#      slack) means Envoy is the one that gives up and returns a clean
+#      "upstream request timeout" to order-api's stub, rather than the two
+#      timers racing to fire at effectively the same instant, which would
+#      make the failure mode nondeterministic (sometimes a proxy-side error,
+#      sometimes a bare DEADLINE_EXCEEDED from the grpc lib itself).
+#
+#   2. retries: attempts=2, perTryTimeout=500ms -- worst case this is the
+#      initial try plus 2 retries = 3 attempts * 500ms = 1500ms of pure
+#      per-try time. Add Istio's exponential backoff between attempts
+#      (minimum ~25ms per gap, 2 gaps = ~50ms) and the worst-case total is
+#      ~1550ms. That leaves ~250ms of slack under the 1800ms route timeout,
+#      and ~450ms of slack under order-api's 2000ms client deadline. Retries
+#      that could exceed the caller's own deadline are worse than useless --
+#      they burn the time budget on attempts the caller will never see the
+#      result of -- so every number here is chosen to keep the full retry
+#      envelope inside both ceilings, not just the outer one.
+#
+#   3. retryOn -- gRPC-over-HTTP/2 conditions, deliberately narrow:
+#        - unavailable, cancelled: transient / connection-level failures
+#          (matches Istio's own cluster-wide default retry set) -- exactly
+#          the class of error a retry against a *different* pod is likely to
+#          fix.
+#        - connect-failure, refused-stream: HTTP/2-level conditions (TCP
+#          connect failure, stream reset before headers) -- the request
+#          never reached an application handler, so retrying is safe and
+#          cheap.
+#      Deliberately NOT retried:
+#        - deadline-exceeded: the request already burned its per-try time
+#          budget once; retrying just spends more of the same 2s budget on
+#          the same failure mode.
+#        - resource-exhausted / internal: these usually mean the instance is
+#          already overloaded or broken. Retrying hammers a struggling pod
+#          instead of giving it room to recover -- that's what
+#          outlierDetection above is for (eject it), not what retries are for.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: pricing
+  namespace: shop
+spec:
+  hosts:
+    - pricing.shop.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v1
+            port:
+              number: 50051
+          weight: 90
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v2
+            port:
+              number: 50051
+          weight: 10
+      timeout: 1800ms
+      retries:
+        attempts: 2
+        perTryTimeout: 500ms
+        retryOn: cancelled,unavailable,connect-failure,refused-stream
 ```
 
 A `DestinationRule` names subsets; it does not route to them. Routing is the `VirtualService`, below.
@@ -5950,12 +6169,22 @@ release.
 
 Point it at Nexus rather than the public registry — the same choke point the services use:
 
-**`portal/.yarnrc.yml`** (add to what `create-app` generated)
+**`portal/.yarnrc.yml`**
 
 ```yaml
+nodeLinker: node-modules
+
 npmRegistryServer: "http://nexus:8081/repository/npm-proxy/"
+
 unsafeHttpWhitelist:
   - nexus
+
+npmMinimalAgeGate: 3d
+
+npmPreapprovedPackages:
+  - "@backstage/*"
+
+yarnPath: .yarn/releases/yarn-4.18.0.cjs
 ```
 
 Add the scaffolder's GitHub actions. In the new backend system every provider's actions ship as their own module and none are on by default:
@@ -5964,12 +6193,81 @@ Add the scaffolder's GitHub actions. In the new backend system every provider's 
 yarn --cwd packages/backend add @backstage/plugin-scaffolder-backend-module-github
 ```
 
-**`portal/packages/backend/src/index.ts`** — add one line next to the other `backend.add(...)` calls:
+**`portal/packages/backend/src/index.ts`**
 
 ```typescript
-// Without this, `publish:github:pull-request` does not exist and every template
-// run fails at the last step with "action not found" — after doing all the work.
+/*
+ * Hi!
+ *
+ * Note that this is an EXAMPLE Backstage backend. Please check the README.
+ *
+ * Happy hacking!
+ */
+
+import { createBackend } from '@backstage/backend-defaults';
+
+const backend = createBackend();
+
+backend.add(import('@backstage/plugin-app-backend'));
+backend.add(import('@backstage/plugin-proxy-backend'));
+
+// scaffolder plugin
+backend.add(import('@backstage/plugin-scaffolder-backend'));
 backend.add(import('@backstage/plugin-scaffolder-backend-module-github'));
+backend.add(
+  import('@backstage/plugin-scaffolder-backend-module-notifications'),
+);
+
+// techdocs plugin
+backend.add(import('@backstage/plugin-techdocs-backend'));
+
+// auth plugin
+backend.add(import('@backstage/plugin-auth-backend'));
+// See https://backstage.io/docs/backend-system/building-backends/migrating#the-auth-plugin
+backend.add(import('@backstage/plugin-auth-backend-module-guest-provider'));
+// See https://backstage.io/docs/auth/guest/provider
+
+// catalog plugin
+backend.add(import('@backstage/plugin-catalog-backend'));
+backend.add(
+  import('@backstage/plugin-catalog-backend-module-scaffolder-entity-model'),
+);
+
+// See https://backstage.io/docs/features/software-catalog/configuration#subscribing-to-catalog-errors
+backend.add(import('@backstage/plugin-catalog-backend-module-logs'));
+
+// permission plugin
+backend.add(import('@backstage/plugin-permission-backend'));
+// See https://backstage.io/docs/permissions/getting-started for how to create your own permission policy
+backend.add(
+  import('@backstage/plugin-permission-backend-module-allow-all-policy'),
+);
+
+// search plugin
+backend.add(import('@backstage/plugin-search-backend'));
+
+// search engine
+// See https://backstage.io/docs/features/search/search-engines
+backend.add(import('@backstage/plugin-search-backend-module-pg'));
+
+// search collators
+backend.add(import('@backstage/plugin-search-backend-module-catalog'));
+backend.add(import('@backstage/plugin-search-backend-module-techdocs'));
+
+// kubernetes plugin
+backend.add(import('@backstage/plugin-kubernetes-backend'));
+
+// user settings plugin
+backend.add(import('@backstage/plugin-user-settings-backend'));
+
+// notifications and signals plugins
+backend.add(import('@backstage/plugin-notifications-backend'));
+backend.add(import('@backstage/plugin-signals-backend'));
+
+// mcp actions plugin
+backend.add(import('@backstage/plugin-mcp-actions-backend'));
+
+backend.start();
 ```
 
 Check it boots locally before you think about containers:
@@ -5991,6 +6289,11 @@ TLS at the edge and every URL it knows about itself has to agree ([§14.8](#148-
 
 ```yaml
 app:
+  # https, not http. The UI calls crypto.randomUUID, which the browser only
+  # exposes in a secure context — over plain http Backstage renders a blank
+  # page. And once the page is served over https, a backend baseUrl on http
+  # gets every API call blocked as mixed content, so all three URLs here have
+  # to agree.
   baseUrl: https://backstage.localtest.me
 
 backend:
@@ -6030,12 +6333,12 @@ catalog:
     - allow: [Component, System, API, Resource, Location, Template, Group, User]
   locations:
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/catalog-info.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/catalog-info.yaml
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/deploy/backstage/templates/new-service/template.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/deploy/backstage/templates/new-service/template.yaml
       rules: [{ allow: [Template] }]
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/deploy/backstage/templates/new-bucket/template.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/deploy/backstage/templates/new-bucket/template.yaml
       rules: [{ allow: [Template] }]
 ```
 
@@ -6046,7 +6349,7 @@ catalog:
 
 The catalog is only as useful as it is complete, and it goes stale the moment it lives somewhere other than the code.
 
-**`catalog-info.yaml`** (repo root)
+**`catalog-info.yaml`**
 
 ```yaml
 apiVersion: backstage.io/v1alpha1
@@ -6063,7 +6366,7 @@ metadata:
   name: order-api
   description: FastAPI order intake; prices every order over gRPC before accepting it
   annotations:
-    github.com/project-slug: <your-github-user>/modern-devops
+    github.com/project-slug: andytavares/modern-devops
 spec:
   type: service
   lifecycle: production
@@ -6095,7 +6398,7 @@ metadata:
     Istio can shift traffic between them; the version that answered is returned
     to the caller as `served_by` (§18).
   annotations:
-    github.com/project-slug: <your-github-user>/modern-devops
+    github.com/project-slug: andytavares/modern-devops
 spec:
   type: service
   lifecycle: production
@@ -6112,7 +6415,7 @@ metadata:
     orders, so a traffic shift is something you watch rather than something you
     read out of a metric (§19).
   annotations:
-    github.com/project-slug: <your-github-user>/modern-devops
+    github.com/project-slug: andytavares/modern-devops
 spec:
   type: website
   lifecycle: production
@@ -6381,6 +6684,9 @@ metadata:
   labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 4 }}
 spec:
   replicas: {{ $svc.replicas | default 1 }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ $svc.name }}
@@ -6388,6 +6694,10 @@ spec:
     metadata:
       labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 8 }}
       annotations:
+        # Scaffolded services read their config from the shared ConfigMap through
+        # envFrom, so nothing in the pod template changes when that config does.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-scaffolded.yaml") $ | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ $svc.port | quote }}
@@ -6402,7 +6712,7 @@ spec:
       enableServiceLinks: false
       serviceAccountName: {{ $svc.name }}
       imagePullSecrets:
-        - name: {{ $.Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" $ }}
       securityContext:
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
@@ -6410,11 +6720,14 @@ spec:
         - name: {{ $svc.name }}
           # Every scaffolded service is built from the same commit, so they all
           # carry the same tag. CI writes it once, in deploy/env/local/values.yaml.
-          image: "{{ $.Values.global.registry }}/shop/{{ $svc.name }}:{{ $.Values.scaffolded.tag }}"
+          image: {{ include "op.image" (dict "root" $ "img" (dict "repository" (printf "shop/%s" $svc.name) "tag" $.Values.scaffolded.tag)) }}
           ports:
             - { name: http, containerPort: {{ $svc.port }} }
-          env:
-            {{- include "op.commonEnv" $ | nindent 12 }}
+          envFrom:
+            - configMapRef: { name: scaffolded-config }
+          {{- with include "op.awsCredentialEnv" $ }}
+          env: {{- . | nindent 12 }}
+          {{- end }}
           readinessProbe:
             httpGet: { path: /readyz, port: http }
           resources:
@@ -6445,6 +6758,7 @@ spec:
     app.kubernetes.io/name: {{ $svc.name }}
   ports:
     - { name: http, port: 80, targetPort: http }
+{{- include "op.pdb" (dict "name" $svc.name "root" $ "replicas" ($svc.replicas | default 1) "selector" (dict "app.kubernetes.io/name" $svc.name)) }}
 {{- if $svc.ingress.enabled }}
 ---
 apiVersion: networking.istio.io/v1
@@ -6745,9 +7059,224 @@ plugins
 
 > **Leave `packages/*/src` commented out.** `create-app` writes that exclusion for a host build, where `dist/` is already compiled; our multi-stage build compiles *from* those sources, and excluding them fails `yarn tsc` with `error TS18003: No inputs were found in config file '/app/tsconfig.json'` — an error that names `tsconfig.json` and never mentions Docker. `plugins` stays excluded, because the `COPY plugins plugins` line is commented out above.
 
-**`.buildkite/pipeline.sh`** — after the services loop, before the deploy step:
+**`.buildkite/pipeline.sh`** — the whole file, with the portal build inserted after the
+services loop and before the CD handoff. The only change from
+[§12.5](#125-the-pipeline) is the `:backstage: build portal` block:
 
 ```sh
+#!/bin/sh
+# Emits this build's pipeline as YAML on stdout. It talks to nothing and
+# changes nothing - run it locally and read what it prints.
+#
+# POSIX sh, deliberately: this runs in the default agent image, whose only
+# guaranteed shell is /bin/sh.
+set -eu
+
+REGISTRY="nexus:8082"
+# A build triggered by hand in the UI sets BUILDKITE_COMMIT to the literal
+# string "HEAD" rather than a SHA, which would tag images `:HEAD` — a mutable
+# tag that means a different image on every build, and the exact thing §10.3
+# says a tag must never be. Resolve it to a real SHA before it reaches a tag.
+if [ "$BUILDKITE_COMMIT" = "HEAD" ]; then
+  BUILDKITE_COMMIT="$(git rev-parse HEAD)"
+fi
+SHA="$(echo "$BUILDKITE_COMMIT" | cut -c1-12)"
+
+case "$SHA" in
+  *[!0-9a-f]*|"") echo "refusing to build: BUILDKITE_COMMIT is not a SHA ($BUILDKITE_COMMIT)" >&2; exit 1 ;;
+esac
+
+# Services are discovered, not listed. A directory under services/ with a
+# Dockerfile in it is a service, and that is the entire contract. This is what
+# lets the Backstage paved path (§14.6) add a service without touching CI.
+SERVICES="$(cd services && ls -d */ 2>/dev/null | sed 's#/##' | while read -r s; do
+  [ -f "$s/Dockerfile" ] && echo "$s"
+done | sort | tr '\n' ' ')"
+
+if [ -z "$SERVICES" ]; then
+  echo "no services found under services/*/Dockerfile" >&2
+  exit 1
+fi
+
+# ── LOOP GUARD ─────────────────────────────────────────────────────────────
+# The deploy step at the bottom commits into the repo we build from, so
+# without this every deploy triggers a build that makes another deploy,
+# forever. Deciding it here, before any step exists, is the whole reason this
+# is a script.
+if git log -1 --pretty=%s | grep -q '^chore(deploy):'; then
+  cat <<'YAML'
+steps:
+  - label: ":fast_forward: deploy commit, nothing to build"
+    agents: { queue: kubernetes }
+    command: "echo 'HEAD is a deploy commit; skipping'"
+YAML
+  exit 0
+fi
+
+# ── Header ─────────────────────────────────────────────────────────────────
+# Every step runs in its own Kubernetes pod, created by agent-stack-k8s.
+# The `kubernetes` plugin is how a step describes the pod it wants.
+cat <<'YAML'
+env:
+  # Nexus proxies. Builds never talk to pypi.org or proxy.golang.org directly:
+  # that is the supply-chain choke point from §5.1, made real.
+  # pip needs these to install uv itself. uv does NOT get its index from here:
+  # it reads [[tool.uv.index]] in services/order-api/pyproject.toml, so the
+  # registry is recorded in uv.lock and `--locked` validates the same way on a
+  # laptop and in this pod. Setting UV_DEFAULT_INDEX here instead would put the
+  # index in CI only, and the committed lock would never match it.
+  PIP_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
+  PIP_TRUSTED_HOST: "nexus"
+  GOPROXY: "http://nexus:8081/repository/go-proxy"
+  # Nothing disables checksum verification. go.sum records a hash for every
+  # module in the build list, so the go command verifies against it locally and
+  # never reaches for the checksum database. GOSUMDB=off would not help here —
+  # it would only disarm verification for the next dependency added.
+  GOFLAGS: "-mod=readonly"
+
+steps:
+  # ── 1. Tests, in parallel ────────────────────────────────────────────────
+  - label: ":python: test order-api"
+    key: test-api
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - image: python:3.13-slim
+                command:
+                  - |
+                    set -euo pipefail
+                    cd services/order-api
+                    pip install --quiet uv
+                    uv sync --locked --dev
+                    uv run ruff check .
+                    uv run pytest -q
+
+  - label: ":go: test order-worker"
+    key: test-worker
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              # Debian, not alpine: `go test -race` needs cgo, and the alpine
+              # image ships CGO_ENABLED=0 with no C toolchain. Adding gcc and
+              # musl-dev to alpine also works; this is one word instead.
+              - image: golang:1.26
+                command:
+                  - |
+                    set -euo pipefail
+                    cd services/order-worker
+                    go vet ./...
+                    go test -race ./...
+
+  - wait
+YAML
+
+# `golang:1.26` and not `golang:1.26-alpine` for the TEST step specifically:
+#
+#   golang:1.26-alpine : CGO_ENABLED=0, no gcc
+#   golang:1.26        : CGO_ENABLED=1, gcc 14.2.0, git 2.47.3
+#
+# `go test -race` is implemented with a C runtime, so on alpine it refuses with
+# `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1` — and setting
+# that variable alone doesn't help, because there is no compiler to use. The
+# Dockerfile in §3.2 still builds FROM golang:1.26-alpine, and should: there we
+# *want* CGO_ENABLED=0 for a static binary in a scratch image. Test and build
+# want opposite things from the same toolchain, which is why they differ.
+
+# ── 2. Build and push images ───────────────────────────────────────────────
+# One template, one step per service. When these were two hand-maintained
+# YAML blocks they differed only in a name, which is exactly the kind of
+# duplication that drifts without anyone noticing.
+for SVC in $SERVICES; do
+  # Only the Go image takes a version stamp (services/order-worker/Dockerfile
+  # declares ARG VERSION); buildah warns about build-args the Dockerfile never
+  # declares, so don't pass it to the Python one.
+  case "$SVC" in
+    order-worker) BUILD_ARGS="--build-arg \"VERSION=$SHA\" " ;;
+    *)            BUILD_ARGS="" ;;
+  esac
+
+  cat <<YAML
+
+  - label: ":docker: build $SVC ($SHA)"
+    key: build-$SVC
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            volumes:
+              - name: nexus-auth
+                secret: { secretName: nexus-push }
+            containers:
+              - image: quay.io/buildah/stable:v1.40.1
+                # Not privileged. Buildah documents chroot isolation plus the
+                # vfs storage driver for running inside an unprivileged
+                # container: chroot avoids CLONE_NEWUSER, and vfs avoids the
+                # overlayfs mknod. What remains is the default OCI capability
+                # set, which Buildah hands to each RUN step and therefore has to
+                # hold itself. Naming those capabilities is the point — the pod
+                # cannot load kernel modules, ptrace, or touch host devices, all
+                # of which full privilege grants.
+                securityContext:
+                  privileged: false
+                  allowPrivilegeEscalation: true
+                  capabilities:
+                    drop: ["ALL"]
+                    add:
+                      - SYS_ADMIN          # mount(2) for the build root
+                      - SYS_CHROOT         # chroot isolation
+                      - SETUID
+                      - SETGID
+                      - SETPCAP
+                      - SETFCAP
+                      - CHOWN
+                      - DAC_OVERRIDE
+                      - FOWNER
+                      - FSETID
+                      - MKNOD
+                      - KILL
+                      - NET_RAW
+                      - NET_BIND_SERVICE
+                      - AUDIT_WRITE
+                  seccompProfile:
+                    type: Unconfined
+                env:
+                  - name: STORAGE_DRIVER
+                    value: vfs
+                  - name: BUILDAH_ISOLATION
+                    value: chroot
+                  - name: BUILDAH_FORMAT
+                    value: docker
+                  - name: REGISTRY_AUTH_FILE
+                    value: /auth/config.json
+                volumeMounts:
+                  - name: nexus-auth
+                    mountPath: /auth
+                    readOnly: true
+                command:
+                  - |
+                    set -euo pipefail
+
+                    # --tls-verify=false exists only because §5.8 runs Nexus
+                    # on plain HTTP. It disables certificate verification on a
+                    # connection that carries push credentials. Behind real TLS
+                    # you delete the flag and mount the CA instead — it is not
+                    # a Buildah setting you keep.
+                    buildah bud \\
+                      --tls-verify=false \\
+                      ${BUILD_ARGS}--file services/$SVC/Dockerfile \\
+                      --tag "$REGISTRY/shop/$SVC:$SHA" \\
+                      services/$SVC
+
+                    buildah push --tls-verify=false "$REGISTRY/shop/$SVC:$SHA"
+
+                    echo "pushed $REGISTRY/shop/$SVC:$SHA"
+YAML
+done
+
 # The portal is not a service and does not fit the services template: a
 # different Dockerfile path, a different context, and a build measured in
 # double-digit minutes.
@@ -6789,6 +7318,65 @@ cat <<YAML
                       portal
 
                     buildah push --tls-verify=false "$REGISTRY/shop/portal:$SHA"
+YAML
+
+# ── 3. The handoff to CD: write the tag into git ───────────────────────────
+cat <<YAML
+
+  - wait
+
+  - label: ":git: bump image tags to $SHA"
+    key: deploy
+    branches: "main"
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          checkout:
+            gitCredentialsSecret:
+              secretName: git-https-credentials
+          podSpec:
+            volumes:
+              - name: git-creds
+                secret: { secretName: git-https-credentials }
+            containers:
+              - image: alpine/git:2.47.2
+                volumeMounts:
+                  - name: git-creds
+                    mountPath: /gitcreds
+                    readOnly: true
+                command:
+                  - |
+                    set -eu
+                    git config user.name  "buildkite"
+                    git config user.email "buildkite@localtest.me"
+                    git config credential.helper "store --file=/gitcreds/.git-credentials"
+
+                    # The overlay has exactly one job - carry the two tags - so
+                    # rewriting it wholesale is deterministic and needs no yq.
+                    # The tags are literals: pipeline.sh already resolved them.
+                    cat > deploy/env/local/values.yaml <<'VALUES'
+                    # Generated by Buildkite. Do not edit by hand.
+                    orderApi:
+                      image:
+                        tag: "$SHA"
+                    orderWorker:
+                      image:
+                        tag: "$SHA"
+                    # Every scaffolded service (§14.6) is built from this same
+                    # commit, so one tag covers all of them.
+                    scaffolded:
+                      tag: "$SHA"
+                    VALUES
+
+                    git add deploy/env/local/values.yaml
+                    if git diff --cached --quiet; then
+                      echo "no change; nothing to deploy"
+                      exit 0
+                    fi
+
+                    git commit -m "chore(deploy): order-platform $SHA [skip ci]"
+                    git push origin HEAD:main
+                    echo "pushed deploy commit; Argo CD will sync"
 YAML
 ```
 
@@ -7617,16 +8205,24 @@ reading imports.
 ### 18.1 The contract
 
 
-**`protos/shop/v1/pricing.proto`** (comments stripped — the file itself carries the reasoning inline)
+**`protos/shop/v1/pricing.proto`**
 
 ```protobuf
 syntax = "proto3";
 
 package shop.v1;
 
+// One .proto, two languages, one build system. Pants generates Python stubs for
+// order-api and pricing, and Go stubs for order-worker, from this single file —
+// which is the entire argument for a polyglot monorepo. Change a field here and
+// both languages fail to compile in the same `pants check ::`, before anything
+// reaches a cluster.
 option go_package = "github.com/andytavares/modern-devops/protos/shop/v1;shopv1";
 
 service Pricing {
+  // Priced synchronously on the order path, which is what makes it a useful
+  // subject for §9: a timeout here is a user-visible failure, so retries,
+  // outlier detection and traffic shifting all have observable consequences.
   rpc PriceOrder(PriceOrderRequest) returns (PriceOrderResponse);
 }
 
@@ -7641,6 +8237,10 @@ message PriceOrderResponse {
   int32 total_amount_cents = 1;
   int32 discount_cents = 2;
   string rule_applied = 3;
+
+  // Which pricing implementation served this call. The frontend tallies it, so
+  // a VirtualService weight change is visible in a browser within seconds
+  // rather than only in Kiali. This field is the whole canary demo.
   string served_by = 4;
 }
 ```
@@ -7652,9 +8252,12 @@ change something you watch in a browser rather than infer from a metric.
 
 Money is `int32` cents throughout. Floating-point currency is a bug you ship once.
 
-**`protos/shop/v1/BUILD`** (comments stripped)
+**`protos/shop/v1/BUILD`**
 
 ```python
+# grpc=True generates the service stubs, not just the messages. One target feeds
+# both language backends — Python via pants.backend.codegen.protobuf.python and
+# Go via pants.backend.experimental.codegen.protobuf.go.
 protobuf_sources(
     name="protos",
     sources=["*.proto"],
@@ -7750,6 +8353,118 @@ local copy of the `.proto`.
 **`services/pricing/pricing/main.py`**
 
 ```python
+import logging
+import signal
+import sys
+import time
+from concurrent import futures
+from types import FrameType
+
+import grpc
+
+# typeshed publishes types-grpcio-health-checking and types-grpcio-reflection,
+# but neither is in 3rdparty/python/requirements.txt, so mypy has nothing to
+# read. The ignore is per-import and per-error-code: it silences these two
+# packages and nothing else.
+from grpc_health.v1 import (  # type: ignore[import-untyped]
+    health,
+    health_pb2,
+    health_pb2_grpc,
+)
+from grpc_reflection.v1alpha import reflection  # type: ignore[import-untyped]
+from prometheus_client import Counter, Histogram, start_http_server
+from shop.v1 import pricing_pb2, pricing_pb2_grpc
+
+from .settings import settings  # pants: no-infer-dep (already colocated in this target)
+
+# ---------- logging ----------
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format='{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}',
+)
+log = logging.getLogger("pricing")
+
+# ---------- metrics ----------
+PRICING_REQUESTS = Counter(
+    "pricing_requests_total",
+    "Priced orders, by rule and serving version",
+    ["rule", "version"],
+)
+PRICING_DURATION = Histogram(
+    "pricing_request_duration_seconds", "Time to price one order"
+)
+
+# Service names are read off the generated descriptors rather than written out
+# as string literals, so renaming a service in the .proto cannot leave a stale
+# name registered with health checking or reflection.
+PRICING_SERVICE_NAME = pricing_pb2.DESCRIPTOR.services_by_name["Pricing"].full_name
+HEALTH_SERVICE_NAME = health_pb2.DESCRIPTOR.services_by_name["Health"].full_name
+
+# Seconds in-flight RPCs get to finish after SIGTERM before they are aborted.
+SHUTDOWN_GRACE_SECONDS = 5
+
+
+def calculate_price(
+    quantity: int, unit_amount_cents: int, version: str
+) -> tuple[int, int, str]:
+    """Pure pricing logic, version-switched.
+
+    v1: list price, no discount.
+    v2: same, but a 3+ quantity line gets 10% off (integer math, rounded down).
+    """
+    list_total = unit_amount_cents * quantity
+    discount_cents = 0
+    rule_applied = "list-price"
+    if version == "v2" and quantity >= 3:
+        discount_cents = (list_total * 10) // 100
+        rule_applied = "bulk-10pct"
+    return list_total - discount_cents, discount_cents, rule_applied
+
+
+def validate_request(sku: str, quantity: int, unit_amount_cents: int) -> None:
+    """Raises ValueError with a useful message on invalid input."""
+    if not sku:
+        raise ValueError("sku must not be empty")
+    if quantity < 1:
+        raise ValueError(f"quantity must be >= 1, got {quantity}")
+    if unit_amount_cents < 1:
+        raise ValueError(f"unit_amount_cents must be >= 1, got {unit_amount_cents}")
+
+
+class PricingServicer(pricing_pb2_grpc.PricingServicer):
+    def PriceOrder(
+        self, request: pricing_pb2.PriceOrderRequest, context: grpc.ServicerContext
+    ) -> pricing_pb2.PriceOrderResponse:
+        started = time.perf_counter()
+        try:
+            validate_request(request.sku, request.quantity, request.unit_amount_cents)
+        except ValueError as exc:
+            # abort() raises, so it terminates the RPC in one call and cannot be
+            # followed by an accidental successful return.
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+
+        total_amount_cents, discount_cents, rule_applied = calculate_price(
+            request.quantity, request.unit_amount_cents, settings.version
+        )
+
+        PRICING_REQUESTS.labels(rule=rule_applied, version=settings.version).inc()
+        PRICING_DURATION.observe(time.perf_counter() - started)
+        log.info(
+            "priced sku=%s quantity=%d rule=%s served_by=%s",
+            request.sku,
+            request.quantity,
+            rule_applied,
+            settings.version,
+        )
+        return pricing_pb2.PriceOrderResponse(
+            total_amount_cents=total_amount_cents,
+            discount_cents=discount_cents,
+            rule_applied=rule_applied,
+            served_by=settings.version,
+        )
+
+
 def build_server() -> tuple[grpc.Server, health.HealthServicer]:
     """Assemble the gRPC server: pricing, health checking and reflection.
 
@@ -7759,19 +8474,67 @@ def build_server() -> tuple[grpc.Server, health.HealthServicer]:
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     pricing_pb2_grpc.add_PricingServicer_to_server(PricingServicer(), server)
 
+    # The non-blocking servicer answers Watch from its own pool instead of
+    # parking a request thread per watcher, which is what the gRPC health
+    # example uses.
     health_servicer = health.HealthServicer(
         experimental_non_blocking=True,
         experimental_thread_pool=futures.ThreadPoolExecutor(max_workers=10),
     )
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    # The protocol requires the server to register every service explicitly,
+    # including the empty service name that carries overall server health. A
+    # name that is not registered gets NOT_FOUND, not NOT_SERVING, so anything
+    # a probe may ask for has to be set here.
     for service_name in ("", PRICING_SERVICE_NAME):
         health_servicer.set(service_name, health_pb2.HealthCheckResponse.SERVING)
 
+    # Python reflection has no automatic service discovery: every service the
+    # server exposes has to be named, including reflection itself. Without this,
+    # grpcurl needs a local copy of the .proto to call anything.
     reflection.enable_server_reflection(
         (PRICING_SERVICE_NAME, HEALTH_SERVICE_NAME, reflection.SERVICE_NAME),
         server,
     )
     return server, health_servicer
+
+
+def serve() -> None:
+    server, health_servicer = build_server()
+    server.add_insecure_port(f"[::]:{settings.grpc_port}")
+
+    # prometheus_client's own server, in a daemon thread, is the documented way
+    # to expose metrics from a process that is not a web application.
+    start_http_server(settings.http_port)
+    server.start()
+
+    log.info(
+        "pricing started version=%s grpc_port=%d metrics_port=%d",
+        settings.version,
+        settings.grpc_port,
+        settings.http_port,
+    )
+
+    def handle_sigterm(signum: int, frame: FrameType | None) -> None:
+        log.info("received signal %d, shutting down", signum)
+        # Flips every registered service to NOT_SERVING and fails later Check
+        # calls, so readiness probes see the pod leaving before the listener
+        # disappears.
+        health_servicer.enter_graceful_shutdown()
+        server.stop(SHUTDOWN_GRACE_SECONDS)
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
+    server.wait_for_termination()
+    log.info("pricing stopped")
+
+
+def main() -> None:
+    serve()
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 Three things are load-bearing:
@@ -7868,9 +8631,14 @@ class Settings(BaseSettings):
     kafka_topic: str = "orders"
 
     s3_bucket: str
+    # boto3 owns the name AWS_DEFAULT_REGION, so the field cannot simply be
+    # called `default_region`; the alias binds the field to the variable boto3
+    # and every AWS tool already expect.
     aws_region: str = Field(default="us-east-1", validation_alias="AWS_DEFAULT_REGION")
     aws_endpoint_url: str | None = None
 
+    # Injected by External Secrets Operator from OpenBao. See §7. The alias keeps
+    # the variable namespaced to this service while the field stays generic.
     signing_key: str = Field(validation_alias="ORDER_SIGNING_KEY")
 
     service_version: str = "dev"
@@ -7878,9 +8646,15 @@ class Settings(BaseSettings):
 
     pricing_addr: str = "pricing.shop.svc.cluster.local:50051"
     pricing_timeout_seconds: float = 2.0
+    # Readiness must answer fast enough that a probe times out on the probe's
+    # terms, not ours. Kept well under the order-path timeout above.
     pricing_health_timeout_seconds: float = 1.0
 
 
+# pydantic's metaclass is a PEP 681 `dataclass_transform`, so mypy synthesises an
+# `__init__` taking every field and reports the three required ones as missing
+# arguments. They are not passed as arguments — BaseSettings reads them from the
+# environment, which is the entire point of the class.
 settings = Settings()  # type: ignore[call-arg]
 ```
 
@@ -7913,11 +8687,311 @@ schedule, not on the order path's.
 **`services/order-api/order_api/main.py`**
 
 ```python
+import hashlib
+import hmac
+import json
+import logging
+import sys
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+import boto3
 import grpc
+import uvicorn  # pants: no-infer-dep  (via fastapi[standard])
+from aiokafka import AIOKafkaProducer
+from botocore.config import Config as BotoConfig  # pants: no-infer-dep  (via boto3)
+from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
+
+# grpcio-health-checking ships no py.typed marker, so mypy cannot see the
+# generated health stubs. Declared at the import rather than behind a global
+# ignore_missing_imports, which would silence real typos as well.
 from grpc_health.v1 import health_pb2, health_pb2_grpc  # type: ignore[import-untyped]
 from prometheus_client import Counter, Histogram, make_asgi_app
+from pydantic import BaseModel, Field
+
 from shop.v1 import pricing_pb2, pricing_pb2_grpc
+
+from .settings import settings
+
+# ---------- logging ----------
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format='{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}',
+)
+log = logging.getLogger("order-api")
+
+# ---------- metrics ----------
+ORDERS_RECEIVED = Counter(
+    "orders_received_total", "Orders accepted by the API", ["result"]
+)
+ORDER_LATENCY = Histogram(
+    "order_ingest_duration_seconds", "Time to persist and publish one order"
+)
+PRICING_CALLS = Counter(
+    "pricing_calls_total",
+    "Outcomes of calls to the pricing service",
+    ["result", "served_by"],
+)
+
+# The key pricing registers itself under with the health checking protocol is its
+# fully-qualified proto service name. Read off the descriptor rather than written
+# as a literal, so the two sides cannot drift when the .proto is renamed. An empty
+# string would ask for the server's overall health; we want the one service we
+# depend on. https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+PRICING_SERVICE_NAME = pricing_pb2.DESCRIPTOR.services_by_name["Pricing"].full_name
+
+# The standard gRPC → HTTP status mapping. Collapsing every upstream failure to
+# 502 tells the caller nothing: a deadline, an overload and a malformed order are
+# three different problems with three different correct responses. Anything not
+# listed is a genuine upstream fault, which is what 502 means.
+GRPC_TO_HTTP_STATUS: dict[grpc.StatusCode, int] = {
+    grpc.StatusCode.DEADLINE_EXCEEDED: 504,
+    grpc.StatusCode.UNAVAILABLE: 503,
+    grpc.StatusCode.INVALID_ARGUMENT: 400,
+    grpc.StatusCode.RESOURCE_EXHAUSTED: 429,
+}
+
+# A server that answers Check with one of these is demonstrably reachable and
+# responsive; it simply does not publish health for this service name. gRPC's own
+# documentation requires clients to handle a server without the Health service,
+# so this is "reachable, health unknown" — not a readiness failure.
+HEALTH_NOT_PUBLISHED = (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED)
+
+
+class PricingClient:
+    """Thin async wrapper around the generated Pricing stub.
+
+    Uses grpc.aio so a slow or unavailable pricing service can't block the
+    event loop. Deliberately has no fallback path: a failed price is a failed
+    order, not a locally guessed one.
+    """
+
+    def __init__(
+        self, address: str, timeout_seconds: float, health_timeout_seconds: float
+    ) -> None:
+        self._channel = grpc.aio.insecure_channel(address)
+        self._stub = pricing_pb2_grpc.PricingStub(self._channel)
+        self._health_stub = health_pb2_grpc.HealthStub(self._channel)
+        self._timeout_seconds = timeout_seconds
+        self._health_timeout_seconds = health_timeout_seconds
+
+    async def price_order(
+        self, *, sku: str, quantity: int, unit_amount_cents: int, customer: str
+    ) -> pricing_pb2.PriceOrderResponse:
+        request = pricing_pb2.PriceOrderRequest(
+            sku=sku,
+            quantity=quantity,
+            unit_amount_cents=unit_amount_cents,
+            customer=customer,
+        )
+        return await self._stub.PriceOrder(request, timeout=self._timeout_seconds)
+
+    async def is_ready(self) -> bool:
+        """Ask pricing whether it is serving, over grpc.health.v1.
+
+        This is a real RPC with a deadline, which is the only thing that proves
+        the dependency is answering. Channel connectivity state does not: a
+        channel that has never reached anything is IDLE or CONNECTING, both of
+        which look fine and neither of which means a call would succeed.
+        https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+        """
+        request = health_pb2.HealthCheckRequest(service=PRICING_SERVICE_NAME)
+        try:
+            response = await self._health_stub.Check(
+                request, timeout=self._health_timeout_seconds
+            )
+        except grpc.aio.AioRpcError as exc:
+            if exc.code() in HEALTH_NOT_PUBLISHED:
+                log.warning(
+                    "pricing does not publish health for %s (code=%s); "
+                    "treating a live response as ready",
+                    PRICING_SERVICE_NAME,
+                    exc.code(),
+                )
+                return True
+            log.warning("pricing health check failed code=%s", exc.code())
+            return False
+        return response.status == health_pb2.HealthCheckResponse.SERVING
+
+    async def close(self) -> None:
+        await self._channel.close()
+
+
+# ---------- state ----------
+state: dict = {"producer": None, "s3": None, "pricing": None, "ready": False}
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Start dependencies before serving; drain them on shutdown."""
+    state["s3"] = boto3.client(
+        "s3",
+        endpoint_url=settings.aws_endpoint_url,
+        region_name=settings.aws_region,
+        # Floci, like S3-compatible stores generally, needs path-style addressing.
+        config=BotoConfig(s3={"addressing_style": "path"}, retries={"max_attempts": 3}),
+    )
+    producer = AIOKafkaProducer(
+        bootstrap_servers=settings.kafka_brokers,
+        acks="all",  # do not consider a write done until all ISRs have it
+        enable_idempotence=True,  # no duplicates on internal retry
+        linger_ms=5,
+    )
+    await producer.start()
+    state["producer"] = producer
+    state["pricing"] = PricingClient(
+        settings.pricing_addr,
+        settings.pricing_timeout_seconds,
+        settings.pricing_health_timeout_seconds,
+    )
+    state["ready"] = True
+    log.info("order-api started version=%s", settings.service_version)
+    try:
+        yield
+    finally:
+        state["ready"] = False
+        await producer.stop()
+        await state["pricing"].close()
+        log.info("order-api stopped")
+
+
+app = FastAPI(title="order-api", version=settings.service_version, lifespan=lifespan)
+
+# prometheus_client ships an ASGI app for this; mounting it is what its docs
+# prescribe. It negotiates content type and compression, and a mount is not a
+# route, so /metrics stays out of the OpenAPI document Backstage renders.
+# https://prometheus.github.io/client_python/exporting/http/fastapi-gunicorn/
+app.mount("/metrics", make_asgi_app())
+
+
+class OrderIn(BaseModel):
+    customer: str = Field(min_length=1, max_length=128)
+    sku: str = Field(min_length=1, max_length=64)
+    quantity: int = Field(ge=1, le=1000)
+    amount_cents: int = Field(ge=1)
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    """Liveness: the process is running. Deliberately checks nothing else."""
+    return {"status": "ok", "version": settings.service_version}
+
+
+@app.get("/readyz")
+async def readyz() -> dict:
+    """Readiness: dependencies are up. Kubernetes pulls us out of the Service if this fails.
+
+    Async because the pricing health check is a real RPC and must be awaited.
+    """
+    if not state["ready"]:
+        raise HTTPException(status_code=503, detail="dependencies not ready")
+    pricing = state["pricing"]
+    if pricing is None or not await pricing.is_ready():
+        raise HTTPException(status_code=503, detail="pricing not serving")
+    return {"status": "ready"}
+
+
+async def _price_order(order: OrderIn) -> pricing_pb2.PriceOrderResponse:
+    """Call shop.v1.Pricing/PriceOrder. Any failure is an HTTPException carrying the
+    gRPC status translated to its HTTP equivalent — never a locally computed price,
+    so a pricing outage is a visible order failure rather than a silently wrong total."""
+    pricing = state["pricing"]
+    try:
+        response = await pricing.price_order(
+            sku=order.sku,
+            quantity=order.quantity,
+            unit_amount_cents=order.amount_cents,
+            customer=order.customer,
+        )
+    except grpc.RpcError as exc:
+        code = exc.code()
+        result = "timeout" if code == grpc.StatusCode.DEADLINE_EXCEEDED else "error"
+        PRICING_CALLS.labels(result=result, served_by="unknown").inc()
+        log.warning("pricing call failed sku=%s code=%s", order.sku, code)
+        raise HTTPException(
+            status_code=GRPC_TO_HTTP_STATUS.get(code, 502),
+            detail=f"pricing call failed: {code.name if code else 'UNKNOWN'}",
+        ) from exc
+    PRICING_CALLS.labels(result="ok", served_by=response.served_by).inc()
+    return response
+
+
+@app.post("/orders", status_code=202)
+async def create_order(order: OrderIn) -> dict:
+    started = time.perf_counter()
+    order_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    try:
+        pricing = await _price_order(order)
+
+        payload = order.model_dump() | {
+            "order_id": order_id,
+            "created_at": created_at,
+            "total_amount_cents": pricing.total_amount_cents,
+            "priced_by": pricing.served_by,
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+
+        # Sign the payload with a key that only ever exists in OpenBao.
+        signature = hmac.new(
+            settings.signing_key.encode(), body, hashlib.sha256
+        ).hexdigest()
+
+        key = f"orders/{created_at[:10]}/{order_id}.json"
+        # boto3 is synchronous. Calling it directly from an `async def` path
+        # operation blocks the event loop for the whole S3 round trip, which
+        # stalls every other in-flight request and both probes with it. FastAPI's
+        # answer for blocking I/O inside an async endpoint is to hand it to the
+        # threadpool. https://fastapi.tiangolo.com/async/
+        await run_in_threadpool(
+            state["s3"].put_object,
+            Bucket=settings.s3_bucket,
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+            Metadata={"signature": signature},
+        )
+        event = payload | {"s3_key": key, "signature": signature}
+        await state["producer"].send_and_wait(
+            settings.kafka_topic,
+            value=json.dumps(event, separators=(",", ":")).encode(),
+            key=order_id.encode(),  # partition by order id → per-order ordering
+        )
+    except HTTPException:
+        ORDERS_RECEIVED.labels(result="error").inc()
+        raise
+    except Exception:
+        ORDERS_RECEIVED.labels(result="error").inc()
+        log.exception("failed to ingest order_id=%s", order_id)
+        raise HTTPException(status_code=502, detail="downstream failure")
+    finally:
+        ORDER_LATENCY.observe(time.perf_counter() - started)
+
+    ORDERS_RECEIVED.labels(result="ok").inc()
+    log.info("accepted order_id=%s key=%s", order_id, key)
+    return {
+        "order_id": order_id,
+        "status": "accepted",
+        "s3_key": key,
+        "total_amount_cents": pricing.total_amount_cents,
+        "discount_cents": pricing.discount_cents,
+        "rule_applied": pricing.rule_applied,
+        "priced_by": pricing.served_by,
+    }
+
+
+def main() -> None:
+    """Entry point for the packaged pex_binary: run the ASGI app under uvicorn."""
+    uvicorn.run(app, host="0.0.0.0", port=settings.order_api_port)
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 `grpcio-health-checking` ships no `py.typed` marker, so the ignore goes on the import rather than in a
@@ -8206,6 +9280,48 @@ pants dependencies --transitive services/order-api:bin | grep protos
 **`services/order-api/tests/test_api.py`**
 
 ```python
+import asyncio
+import os
+import threading
+
+# Settings are read at import time, so the environment must be set first.
+os.environ.setdefault("KAFKA_BROKERS", "localhost:9092")
+os.environ.setdefault("S3_BUCKET", "test-bucket")
+os.environ.setdefault("ORDER_SIGNING_KEY", "test-key")
+
+import grpc  # noqa: E402
+import pytest  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
+from grpc_health.v1 import health_pb2  # type: ignore[import-untyped]  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
+
+from order_api.main import (  # noqa: E402
+    OrderIn,
+    PricingClient,
+    app,
+    create_order,
+    healthz,
+    readyz,
+    state,
+)
+from shop.v1 import pricing_pb2  # noqa: E402
+
+
+class _FakeS3:
+    """Records the thread `put_object` ran on, because that is the thing under test."""
+
+    def __init__(self) -> None:
+        self.thread_name: str | None = None
+
+    def put_object(self, **kwargs):
+        self.thread_name = threading.current_thread().name
+
+
+class _FakeProducer:
+    async def send_and_wait(self, *args, **kwargs):
+        pass
+
+
 class _FakePricingClient:
     """Stands in for PricingClient so tests never touch the network."""
 
@@ -8245,6 +9361,185 @@ class _FakeHealthStub:
         if self._error is not None:
             raise self._error
         return health_pb2.HealthCheckResponse(status=self._status)
+
+
+def _aio_rpc_error(code: grpc.StatusCode) -> grpc.aio.AioRpcError:
+    return grpc.aio.AioRpcError(code, grpc.aio.Metadata(), grpc.aio.Metadata())
+
+
+def _order() -> OrderIn:
+    return OrderIn(customer="ada", sku="W-1", quantity=3, amount_cents=4999)
+
+
+def _priced_state() -> _FakeS3:
+    s3 = _FakeS3()
+    state["s3"] = s3
+    state["producer"] = _FakeProducer()
+    return s3
+
+
+async def _health_result(**stub_kwargs) -> bool:
+    client = PricingClient(
+        "localhost:1", timeout_seconds=1.0, health_timeout_seconds=1.0
+    )
+    client._health_stub = _FakeHealthStub(**stub_kwargs)
+    try:
+        return await client.is_ready()
+    finally:
+        await client.close()
+
+
+def test_healthz_needs_no_dependencies():
+    """Liveness must answer without Kafka or S3, or a broker outage kills every pod."""
+    assert healthz()["status"] == "ok"
+
+
+def test_readyz_is_not_ready_before_startup():
+    assert state["ready"] is False
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("quantity", 0), ("quantity", 1001), ("amount_cents", 0), ("customer", "")],
+)
+def test_invalid_orders_are_rejected(field, value):
+    payload = {"customer": "ada", "sku": "W-1", "quantity": 1, "amount_cents": 100}
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        OrderIn(**payload)
+
+
+def test_valid_order_is_accepted():
+    order = OrderIn(customer="ada", sku="W-1", quantity=3, amount_cents=4999)
+    assert order.quantity == 3
+
+
+def test_routes_are_registered():
+    paths = {r.path for r in app.routes}
+    assert {"/orders", "/healthz", "/readyz", "/metrics"} <= paths
+
+
+def test_metrics_is_mounted_not_a_route():
+    """prometheus_client's ASGI app is mounted, which keeps /metrics out of the
+    OpenAPI document. A hand-rolled route would put it back in."""
+    assert "/metrics" not in app.openapi()["paths"]
+
+
+def test_order_response_includes_pricing_result():
+    _priced_state()
+    state["pricing"] = _FakePricingClient(
+        response=pricing_pb2.PriceOrderResponse(
+            total_amount_cents=4499,
+            discount_cents=500,
+            rule_applied="volume-discount",
+            served_by="pricing-v1",
+        )
+    )
+
+    result = asyncio.run(create_order(_order()))
+
+    assert result["status"] == "accepted"
+    assert result["total_amount_cents"] == 4499
+    assert result["discount_cents"] == 500
+    assert result["rule_applied"] == "volume-discount"
+    assert result["priced_by"] == "pricing-v1"
+
+
+def test_s3_put_does_not_run_on_the_event_loop_thread():
+    """boto3 is synchronous. Called directly from this `async def` endpoint it
+    would stall the loop — and every other request with it — for the whole S3
+    round trip, so it has to go to the threadpool."""
+    s3 = _priced_state()
+    state["pricing"] = _FakePricingClient(
+        response=pricing_pb2.PriceOrderResponse(total_amount_cents=1)
+    )
+
+    asyncio.run(create_order(_order()))
+
+    assert s3.thread_name is not None
+    assert s3.thread_name != threading.current_thread().name
+
+
+@pytest.mark.parametrize(
+    "code,expected_status",
+    [
+        (grpc.StatusCode.DEADLINE_EXCEEDED, 504),
+        (grpc.StatusCode.UNAVAILABLE, 503),
+        (grpc.StatusCode.INVALID_ARGUMENT, 400),
+        (grpc.StatusCode.RESOURCE_EXHAUSTED, 429),
+        (grpc.StatusCode.INTERNAL, 502),
+        (grpc.StatusCode.UNKNOWN, 502),
+    ],
+)
+def test_pricing_failures_map_to_their_http_equivalent(code, expected_status):
+    """One gRPC status, one HTTP status. Collapsing them all to 502 tells the
+    caller a timeout, an overload and a malformed order are the same thing."""
+    _priced_state()
+    state["pricing"] = _FakePricingClient(error=_FakeRpcError(code))
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(create_order(_order()))
+
+    assert exc_info.value.status_code == expected_status
+
+
+def test_readyz_fails_when_pricing_is_not_serving():
+    state["ready"] = True
+    state["pricing"] = _FakePricingClient(ready=False)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(readyz())
+    finally:
+        state["ready"] = False
+
+    assert exc_info.value.status_code == 503
+
+
+def test_readyz_passes_when_pricing_is_serving():
+    state["ready"] = True
+    state["pricing"] = _FakePricingClient(ready=True)
+    try:
+        assert asyncio.run(readyz()) == {"status": "ready"}
+    finally:
+        state["ready"] = False
+
+
+def test_health_check_serving_is_ready():
+    assert (
+        asyncio.run(_health_result(status=health_pb2.HealthCheckResponse.SERVING))
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        health_pb2.HealthCheckResponse.NOT_SERVING,
+        health_pb2.HealthCheckResponse.SERVICE_UNKNOWN,
+        health_pb2.HealthCheckResponse.UNKNOWN,
+    ],
+)
+def test_health_check_not_serving_is_not_ready(status):
+    """Only SERVING means ready. Channel connectivity would report every one of
+    these as fine, which is why readiness asks over grpc.health.v1 instead."""
+    assert asyncio.run(_health_result(status=status)) is False
+
+
+def test_unreachable_pricing_is_not_ready():
+    """A pricing backend that has never existed must not report ready."""
+    assert (
+        asyncio.run(_health_result(error=_aio_rpc_error(grpc.StatusCode.UNAVAILABLE)))
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "code", [grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED]
+)
+def test_server_without_the_health_service_is_still_ready(code):
+    """gRPC's docs require clients to handle a server that does not publish
+    health. It answered, so it is reachable — health is unknown, not failing."""
+    assert asyncio.run(_health_result(error=_aio_rpc_error(code))) is True
 ```
 
 `grpc.RpcError` is a bare `Exception` subclass with no constructor of its own, so a real one cannot be
@@ -8376,7 +9671,7 @@ docker run --rm python:3.13-slim sh -c \
   'pip install pex && pex3 interpreter inspect --markers --tags' > 3rdparty/python/linux.json
 ```
 
-**`3rdparty/python/BUILD`** (comments stripped):
+**`3rdparty/python/BUILD`**
 
 ```python
 python_requirements(
@@ -8384,21 +9679,59 @@ python_requirements(
     source="requirements.txt",
 )
 
+# The cluster's real platform: linux/aarch64, CPython 3.13. Generated with
+#   docker run --rm python:3.13-slim sh -c 'pip install pex && pex3 interpreter inspect --markers --tags'
+#
+# Every pex_binary MUST reference this via `complete_platforms`. Without it,
+# `pants package` on a macOS laptop resolves macOS wheels — grpcio, pydantic
+# core, uvloop and watchfiles are all native — and produces a PEX that builds
+# cleanly, passes every check, and then dies on import inside a linux
+# container. The failure is at runtime, in the cluster, far from the cause.
 file(
     name="linux-platform",
     source="linux.json",
 )
 ```
 
-**`services/pricing/BUILD`**, the `pex_binary` (comments stripped):
+**`services/pricing/BUILD`**
 
 ```python
+python_sources(
+    name="lib",
+    sources=["pricing/**/*.py"],
+    # Dependency inference resolves the `shop.v1.pricing_pb2*` imports back to the
+    # protobuf_sources target, but it's declared explicitly here too since it's
+    # cross-source-root (protos/ vs services/pricing/) and easy to miss on inference
+    # cache invalidation.
+    dependencies=["protos/shop/v1:protos"],
+)
+
+python_sources(
+    name="tests_pkg",
+    sources=["tests/__init__.py"],
+)
+
+python_tests(
+    name="tests",
+    sources=["tests/test_*.py"],
+    # The `app` top-level package name collides with order-api's own `app` package
+    # under the shared `/services/*` source root, so dependency inference can't
+    # disambiguate `from pricing.main import ...` on its own.
+    dependencies=[":lib"],
+)
+
 pex_binary(
     name="bin",
     tags=["deployable"],
     entry_point="pricing/main.py:main",
     dependencies=[":lib"],
+    # The cluster runs linux/aarch64 CPython 3.13, not this macOS laptop. grpcio
+    # is a native extension; without this, `pants package` resolves macOS wheels
+    # that build and pass every check here, then fail to import in the cluster.
     complete_platforms=["3rdparty/python:linux-platform"],
+    # Land in dist/ under a predictable name so dist/ can be used
+    # directly as the Buildah build context and the Dockerfile can COPY by
+    # name. Default would be dist/services.<name>/bin.pex.
     output_path="pricing.pex",
 )
 ```

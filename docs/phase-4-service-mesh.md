@@ -203,15 +203,26 @@ Before you apply it, build the edge, because STRICT is what makes the edge's sha
 That is `istio-ingressgateway`, and it needs two objects — a `Gateway` declaring which ports and
 hostnames the proxy accepts, and a `VirtualService` per hostname declaring where it goes.
 
-**`deploy/platform/istio/edge-gateway.yaml`** (comments stripped here; the file carries them)
+**`deploy/platform/istio/edge-gateway.yaml`**
 
 ```yaml
+# The mesh's own entry point, which is what Istio documents for north-south
+# traffic. A Gateway describes the port and hostnames the edge proxy accepts;
+# the VirtualServices below describe where those hostnames go. Routing lives in
+# the same objects and the same language as the canary in §9.8, rather than
+# being split between an Ingress controller's annotations and Istio's config.
+#
+# ingress-nginx still owns hostPort 80/443 on the kind node and forwards these
+# two hostnames here (see edge-ingress.yaml). That is the same shape as the
+# production topology Istio documents: an external load balancer in front of
+# istio-ingressgateway.
 apiVersion: networking.istio.io/v1
 kind: Gateway
 metadata:
   name: edge
   namespace: istio-system
 spec:
+  # Matches the pod labels the istio/gateway chart applies.
   selector:
     istio: ingressgateway
   servers:
@@ -219,9 +230,16 @@ spec:
         number: 80
         name: http
         protocol: HTTP
+      # Wildcard, so a service the paved path (§14.6) adds needs only a
+      # VirtualService — no edit to this file and no edit to the nginx Ingress
+      # in front of it. A hostname with no VirtualService gets a 404 from the
+      # gateway, which is the correct answer for a route nobody declared.
       hosts:
         - "*.localtest.me"
 ---
+# A VirtualService binds a hostname to the Gateway and routes it to a Service.
+# `gateways` names the Gateway in namespace/name form because the Gateway lives
+# in istio-system and these route to workloads in shop.
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
@@ -271,9 +289,25 @@ is the correct answer for a route nobody declared.
 Then the hop in front of it. nginx owns `hostPort` 80/443 on the kind node and hands the meshed
 hostnames to the gateway's Service:
 
-**`deploy/platform/istio/edge-ingress.yaml`** (comments stripped here; the file carries them)
+**`deploy/platform/istio/edge-ingress.yaml`**
 
 ```yaml
+# ingress-nginx owns hostPort 80/443 on the kind control-plane node and is the
+# edge for everything that is not in the mesh — Argo CD, Grafana, Kiali,
+# Backstage, Nexus. It keeps that job. This Ingress hands the two meshed
+# hostnames straight to istio-ingressgateway and does nothing else with them:
+# no rewriting, no per-service annotations, no knowledge of what is behind it.
+#
+# That split is the point. Each proxy does the job its own documentation
+# describes — nginx routes a hostname to a Service, Istio owns everything from
+# the mesh boundary inward — and neither is asked to understand the other. It is
+# also the shape of the production topology Istio documents, with nginx standing
+# in for the cloud load balancer that would forward to the gateway there.
+#
+# Nothing here needs `service-upstream` or `upstream-vhost`. istio-system has no
+# STRICT PeerAuthentication, so the gateway accepts this plaintext hop exactly as
+# it would from a cloud load balancer; mTLS begins at the gateway, which is
+# in the mesh and calls shop workloads with a real workload identity.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -282,6 +316,10 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
+    # A wildcard host, so a scaffolded service reaches the mesh without anyone
+    # editing this file. The platform's own UIs — Argo CD, Grafana, Kiali,
+    # Backstage — keep their exact-host Ingresses, and an exact host always wins
+    # over a wildcard, so they never come through here.
     - host: "*.localtest.me"
       http:
         paths:
@@ -406,6 +444,13 @@ spec:
               - "cluster.local/ns/shop/sa/order-api"
               - "cluster.local/ns/shop/sa/order-worker"
 ---
+# 3. The same deny-all, for shop. Without this, Istio's default applies: a
+# workload that no ALLOW policy selects accepts traffic from anything in the
+# mesh. Policies 4 and 5 below select order-api and pricing, so those two were
+# already covered -- but frontend and order-worker were selected by nothing,
+# and were therefore reachable from every workload in the cluster. Deny-by-
+# default is a property of the namespace, not of the workloads you remembered
+# to write a policy for.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -414,6 +459,11 @@ metadata:
 spec:
   {}
 ---
+# 4. The frontend is a browser-facing page. It is reachable from the mesh's
+# ingress gateway and from nowhere else -- it has no callers inside the mesh.
+# The principal is the gateway's own workload identity: traffic entering
+# through it is authenticated as istio-ingressgateway, not as whatever sits in
+# front of it.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -430,6 +480,14 @@ spec:
             principals:
               - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
 ---
+# 5. order-worker takes no inbound traffic at all. It consumes from Kafka and
+# writes to Floci; nothing calls it. The one exception is Prometheus scraping
+# its metrics port, which reaches the sidecar's merged endpoint rather than the
+# application, so it needs no allow rule here. An empty rules list would deny
+# everything including that, so the policy allows precisely one thing: nothing
+# inbound to the application ports.
+#
+# 6. order-api is reachable from the edge, and from the frontend -- nowhere else.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -445,6 +503,32 @@ spec:
         - source:
             principals:
               - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/shop/sa/frontend"
+---
+# 4. pricing is the canary target (v1/v2, one Service). It is called
+# synchronously on the order path with no fallback on failure (see
+# services/order-api/order_api/main.py: `_price_order` raises HTTP 502 on any
+# grpc.RpcError, it never guesses a price) -- so its blast radius must be as
+# small as possible. order-api is the only workload with any business calling
+# it. Not order-worker, not frontend, not anything in floci.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-order-api-to-pricing
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pricing
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/shop/sa/order-api"
 ```
 
 ```bash
@@ -819,9 +903,26 @@ Confirm with `kubectl -n shop get svc pricing -o jsonpath='{.spec.ports[*].name}
 
 #### `DestinationRule` — subsets, and the pool policy
 
-**`deploy/platform/istio/pricing-traffic.yaml`** (the file itself carries all of the arithmetic below as inline comments; stripped here so the prose can do the work)
+**`deploy/platform/istio/pricing-traffic.yaml`**
 
 ```yaml
+# Canary routing and resilience for shop.v1.Pricing (services/pricing), consumed
+# by order-api's PricingClient over gRPC with a 2s client-side deadline
+# (order_api/main.py: `self._stub.PriceOrder(request, timeout=self._timeout_seconds)`).
+# order-api never falls back to a local price on failure — it returns HTTP 502 —
+# so every value below is chosen against that 2s budget, worked out explicitly
+# in the comments rather than left as Istio defaults.
+#
+# gRPC-over-HTTP/2 note: Istio does NOT have a separate "grpc:" route stanza.
+# gRPC rides HTTP/2, so it is routed with the ordinary `http:` block below.
+# What makes Istio treat this Service's traffic as HTTP/2-aware in the first
+# place (rather than opaque TCP) is the Service port *name* -- `grpc` (see the
+# Service manifest: ports named `grpc` and `metrics`). Istio's port-name
+# protocol sniffing maps the `grpc` / `grpc-*` prefix to HTTP/2 with gRPC
+# semantics, which is what makes header-based routing, retries and
+# gRPC-status-aware outlier detection possible at all. Get the port name
+# wrong (e.g. call it `pricing` or `tcp-grpc`) and Istio falls back to plain
+# TCP passthrough -- this whole file would silently stop doing anything.
 apiVersion: networking.istio.io/v1
 kind: DestinationRule
 metadata:
@@ -837,17 +938,121 @@ spec:
       labels:
         version: v2
   trafficPolicy:
+    # Applies to both subsets (v1 and v2 each get their own Envoy cluster, but
+    # both inherit this trafficPolicy since neither subset overrides it).
     connectionPool:
+      # Modest limits for a 2-3 replica internal service taking gRPC calls from
+      # order-api (and order-worker). HTTP/2 multiplexes many requests over one
+      # connection, so we don't need -- and don't want -- a large connection count.
       tcp:
         maxConnections: 20
       http:
+        # Concurrent in-flight requests across the whole pool. 100 is generous
+        # headroom over expected order volume for a demo service while still
+        # bounding worst-case fan-out from a client bug.
         http2MaxRequests: 100
+        # 0 = unlimited requests per HTTP/2 connection. HTTP/2 is designed for
+        # long-lived multiplexed connections; forcing periodic reconnects (a
+        # nonzero cap) only adds handshake latency to a service already living
+        # inside a 2s client deadline, for no gRPC-specific benefit.
         maxRequestsPerConnection: 0
     outlierDetection:
+      # Eject a pod after 3 consecutive gateway/5xx errors. Justification for a
+      # 2-3 replica subset: with `consecutive5xxErrors` left at its default of
+      # 5, a single bad replica in a pool that small could account for a large
+      # share of total request volume before ejection ever kicks in -- the
+      # blast radius is too big to wait for 5. 3 is fast enough to react to a
+      # genuinely broken pod within a handful of requests, without being so
+      # low (e.g. 1-2) that ordinary transient errors trip it.
       consecutive5xxErrors: 3
+      # How often Envoy sweeps for ejection candidates.
       interval: 15s
+      # Minimum time a pod stays ejected once flagged. Kept at the 30s
+      # default: long enough that the ejected pod isn't immediately
+      # reconsidered on the next 15s sweep, short enough that a transient
+      # blip (e.g. a fault-injection drill, see pricing-fault-injection.yaml.disabled)
+      # self-heals without operator intervention.
       baseEjectionTime: 30s
+      # Cap ejections at 50%, not the 10% default. Rationale: with only 2-3
+      # replicas per subset, 10% of the pool rounds down to zero ejectable
+      # hosts -- outlier detection would be configured but functionally
+      # inert. 50% guarantees room to eject at least one bad replica out of
+      # two while always leaving at least one healthy replica standing, so a
+      # single failing pod can never take the whole subset out of rotation.
       maxEjectionPercent: 50
+---
+# 90/10 canary split between pricing-v1 and pricing-v2, with a request-level
+# timeout and retry policy sized against order-api's 2s client-side gRPC
+# deadline (order_api/main.py PricingClient, settings.pricing_timeout_seconds).
+#
+# The arithmetic, in order:
+#
+#   1. route `timeout: 1800ms` -- deliberately LESS than the client's 2000ms
+#      deadline, never more. A route timeout longer than 2s is pointless:
+#      order-api's own grpc timeout fires at 2s regardless of what Envoy is
+#      still doing, so anything Envoy does past that point is wasted work the
+#      caller has already given up on. Setting it a bit *under* 2s (200ms of
+#      slack) means Envoy is the one that gives up and returns a clean
+#      "upstream request timeout" to order-api's stub, rather than the two
+#      timers racing to fire at effectively the same instant, which would
+#      make the failure mode nondeterministic (sometimes a proxy-side error,
+#      sometimes a bare DEADLINE_EXCEEDED from the grpc lib itself).
+#
+#   2. retries: attempts=2, perTryTimeout=500ms -- worst case this is the
+#      initial try plus 2 retries = 3 attempts * 500ms = 1500ms of pure
+#      per-try time. Add Istio's exponential backoff between attempts
+#      (minimum ~25ms per gap, 2 gaps = ~50ms) and the worst-case total is
+#      ~1550ms. That leaves ~250ms of slack under the 1800ms route timeout,
+#      and ~450ms of slack under order-api's 2000ms client deadline. Retries
+#      that could exceed the caller's own deadline are worse than useless --
+#      they burn the time budget on attempts the caller will never see the
+#      result of -- so every number here is chosen to keep the full retry
+#      envelope inside both ceilings, not just the outer one.
+#
+#   3. retryOn -- gRPC-over-HTTP/2 conditions, deliberately narrow:
+#        - unavailable, cancelled: transient / connection-level failures
+#          (matches Istio's own cluster-wide default retry set) -- exactly
+#          the class of error a retry against a *different* pod is likely to
+#          fix.
+#        - connect-failure, refused-stream: HTTP/2-level conditions (TCP
+#          connect failure, stream reset before headers) -- the request
+#          never reached an application handler, so retrying is safe and
+#          cheap.
+#      Deliberately NOT retried:
+#        - deadline-exceeded: the request already burned its per-try time
+#          budget once; retrying just spends more of the same 2s budget on
+#          the same failure mode.
+#        - resource-exhausted / internal: these usually mean the instance is
+#          already overloaded or broken. Retrying hammers a struggling pod
+#          instead of giving it room to recover -- that's what
+#          outlierDetection above is for (eject it), not what retries are for.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: pricing
+  namespace: shop
+spec:
+  hosts:
+    - pricing.shop.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v1
+            port:
+              number: 50051
+          weight: 90
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v2
+            port:
+              number: 50051
+          weight: 10
+      timeout: 1800ms
+      retries:
+        attempts: 2
+        perTryTimeout: 500ms
+        retryOn: cancelled,unavailable,connect-failure,refused-stream
 ```
 
 A `DestinationRule` names subsets; it does not route to them. Routing is the `VirtualService`, below.
