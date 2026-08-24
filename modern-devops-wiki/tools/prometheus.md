@@ -5,7 +5,7 @@ role: scraping, storage, alert evaluation
 version: kube-prometheus-stack 88.3.0 (Prometheus Operator v0.93.0)
 docs: https://prometheus.io/docs/
 date_added: 2026-08-17
-date_updated: 2026-08-17
+date_updated: 2026-08-23
 status: in-use
 ---
 
@@ -92,6 +92,67 @@ should be something a human must act on right now; if it is not, it is a dashboa
 
 **`for:` is not padding.** Without it a 20-second blip during a rolling deploy pages someone at 3am.
 Tune it against your actual deploy duration.
+
+## `port:`/`portNumber:` on a PodMonitor are filters, not a dial
+
+The single most expensive misreading of the Prometheus Operator API in this platform, found
+2026-08-23 with the mesh running and every pod `2/2`:
+
+```yaml
+podMetricsEndpoints:
+  - portNumber: 15020        # scrapes nothing, ever
+    path: /stats/prometheus
+```
+
+`port` (by name) and `portNumber` select **among the container ports the pod declares**. They do not
+tell Prometheus which port to connect to. Nothing declares 15020 — `istio-proxy` declares **15090**
+(`http-envoy-prom`, Envoy-only) and **15021** (`status`) — so the operator emits a keep rule that
+matches no container and every candidate is discarded during relabeling.
+
+> [!warning] The failure is an absence, which is why it survives a review
+> The job does not error and does not show a down target. `/targets` shows **nothing at all** for
+> `podMonitor/shop/order-platform/0`, which looks exactly like a monitor whose label selectors are
+> wrong — so you go and re-check selectors that were right the whole time. The evidence is in
+> `droppedTargets`, which the UI hides by default:
+>
+> ```
+> /api/v1/targets?state=any
+> podMonitor/shop/order-platform/0  order-api-...  port=8000   order-api
+> podMonitor/shop/order-platform/0  order-api-...  port=15090  istio-proxy
+> ```
+>
+> Every pod discovered, every one dropped, and the port numbers say why.
+
+The working form builds the address from the annotations Istio's injector rewrites onto the pod —
+with metrics merging on (the default) `prometheus.io/port` is already `15020`
+([Istio](https://istio.io/latest/docs/ops/integrations/prometheus/)):
+
+```yaml
+podMetricsEndpoints:
+  - path: /stats/prometheus
+    interval: 15s
+    relabelings:
+      - action: keep          # one target per pod, not one per container
+        sourceLabels: [__meta_kubernetes_pod_container_name]
+        regex: istio-proxy
+      - action: keep
+        sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        regex: "true"
+      - action: replace
+        sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+        regex: (\d+);((([0-9]+?)(\.|$)){4})
+        replacement: $2:$1
+        targetLabel: __address__
+```
+
+Verified on the live cluster: 0 targets before, **4 up** on `http://<pod-ip>:15020/stats/prometheus`
+after, within one scrape interval.
+
+**The trap behind the trap:** switching to `portNumber: 15090` makes the symptom disappear, because
+15090 *is* declared. The targets come up, `istio_requests_total` flows, [[kiali]] draws a healthy
+graph — and the application's own metrics never arrive, because 15090 is Envoy-only. A wrong answer
+that turns the page green is worse than the one that leaves it blank. See [[istio]] and
+[[observability]].
 
 ## Related
 

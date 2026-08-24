@@ -370,3 +370,62 @@ files, a record of what was learned.
   `SERVICE_VERSION` are what [[buildkite]] rewrites into `deploy/env/local/values.yaml`, and
   `checksum/config` is the chart's pod-restart annotation. All three are values the delivery path owns
   — the conflict list is a precise statement of the boundary.
+
+- **2026-08-23** — **§9.6's fix did not work either, and the chart was missing a template the docs
+  told you to enable.** Started from a reported `helm upgrade` failure at §9.6; pulling that thread
+  found three defects stacked on each other.
+
+  **1. `helm upgrade` cannot run after §11** — see the entry above; fixed by committing and pushing
+  instead.
+
+  **2. `templates/servicemonitor.yaml` exists in the repo and appears in no listing.** §10.1 shows
+  only `podmonitor.yaml`, then §13.3 says "turn on the ServiceMonitor" and verifies with
+  `kubectl -n shop get servicemonitor`. A reader who followed the docs has no such template, so the
+  values key is inert, the verification returns nothing, and §9.6's swap turns off something that was
+  never on. Confirmed against a reader's repo: `templates/` held four files, no servicemonitor. The
+  reference repo's own `values.yaml` disagreed with the docs too — podMonitor's comment said "flip to
+  true in §13.3" while §13.3's prose flips serviceMonitor. Both fixed; §10.1 now lists both monitors
+  and states that exactly one is ever on.
+
+  **3. The PodMonitor could not have worked.** This is the one worth remembering:
+
+  ```yaml
+  podMetricsEndpoints:
+    - portNumber: 15020        # scrapes nothing, ever
+  ```
+
+  **`port:` and `portNumber:` on a PodMonitor are filters over the container ports a pod DECLARES**,
+  not an instruction about where to connect. Nothing declares 15020 — istio-proxy declares 15090
+  (`http-envoy-prom`) and 15021 (`status`) — so the operator emits a keep rule matching no container
+  and drops every target during relabeling.
+
+  The docs asserted the opposite, in bold, twice: *"15020 is unnamed in the pod spec, so `port:`
+  cannot reach it and `portNumber: 15020` is required."* The first clause is true and the conclusion
+  does not follow.
+
+  **And it fails as an absence.** `/targets` showed no `podMonitor/shop/order-platform/0` entries at
+  all — not a down target, not an error — which is indistinguishable from wrong label selectors, so
+  the natural next move is to re-check selectors that were correct. `?state=any` is where the answer
+  was: every pod discovered, every one in `droppedTargets`, with
+  `__meta_kubernetes_pod_container_port_number` of 8000, 9090 and 15090 and no 15020 anywhere.
+
+  Fixed by building the address from the `prometheus.io/*` annotations Istio's injector rewrites onto
+  the pod — with metrics merging on (the default) `prometheus.io/port` is already 15020
+  ([Istio](https://istio.io/latest/docs/ops/integrations/prometheus/), via Context7). Verified on the
+  live cluster before writing it down: **0 targets before, 4 `up` on
+  `http://<pod-ip>:15020/stats/prometheus` after**, one scrape interval later. A `keep` on
+  `container_name=istio-proxy` is load-bearing — without it every container in the pod yields a target
+  and all of them rewrite to the same address, tripling the scrape.
+
+  **The trap behind the trap**, now stated in the chart, §9.6 and [[prometheus]]: switching to
+  `portNumber: 15090` makes the symptom vanish, because 15090 *is* declared. Targets come up,
+  `istio_requests_total` flows, [[kiali]] looks healthy — and the application's own metrics never
+  arrive, because 15090 is Envoy-only. The wrong answer that turns the page green is worse than the
+  one that leaves it blank.
+
+  **Not fixed, and reported rather than guessed at:** on that cluster `POST http://shop.localtest.me/orders`
+  returns **502**, so no application traffic is flowing and both `orders_received_total` and
+  `istio_requests_total` are legitimately empty regardless of the monitor. The app's own
+  `:8000/metrics` serves no `orders_received_total` either, which is consistent — the counter does not
+  exist until the first order is received. That 502 is at the reader's current point in §9 and is a
+  separate thread.

@@ -509,12 +509,21 @@ kubectl -n argocd get application order-platform -w   # Synced, then the pods ro
 > on the sidecar's own port, and is not fronted by any Service — so a `ServiceMonitor`, which selects
 > Services, has nothing to select. That is the whole reason the kind changes.
 >
-> And it must be addressed by **number**. Istio's docs: *"forwards requests to the sidecar telemetry
-> port **15020 for merged metrics** or **15090 for Envoy-only metrics**"*. 15090 is the port carrying
-> the name `http-envoy-prom`; **15020 is unnamed in the pod spec**, so `port:` cannot reach it and
-> `portNumber: 15020` is required. Pick 15090 by name and you will get `istio_requests_total` — so
-> Kiali looks perfectly healthy — while your application's own `orders_received_total` never appears
-> again. A half-failure that looks like a success is worse than an outage.
+> And it cannot be addressed by port at all. Istio's docs: *"forwards requests to the sidecar
+> telemetry port **15020 for merged metrics** or **15090 for Envoy-only metrics**"* — but `port:` and
+> `portNumber:` on a `PodMonitor` are **filters over the container ports a pod declares**, not a dial.
+> **Nothing declares 15020.** istio-proxy declares 15090 (`http-envoy-prom`) and 15021 (`status`), so
+> `portNumber: 15020` compiles to a keep rule matching no container, and every target is dropped
+> during relabeling. `/targets` then shows **nothing at all** for the job — not a failed target, not
+> an error, an absence — which is indistinguishable from a monitor whose selectors are wrong. The
+> address is built from the `prometheus.io/*` annotations the injector rewrote onto the pod, which is
+> what the `relabelings` in
+> [§10.1](phase-1-the-application.md#101-one-chart-two-workloads)'s `podmonitor.yaml` do.
+>
+> And do not reach for 15090 to make the error go away: it is a real declared port, so the targets
+> come **up**, and you get `istio_requests_total` — Kiali looks perfectly healthy — while your
+> application's own `orders_received_total` never appears again. A half-failure that looks like a
+> success is worse than an outage.
 
 Now confirm you get **both halves** from one scrape:
 

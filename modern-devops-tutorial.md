@@ -3243,6 +3243,58 @@ spec:
 > This bites at [Phase 4](#), not here — which is exactly why it goes in now.
 > Renaming a port later means editing the Service, the probes and every monitor that selects by name.
 
+**Two monitors ship, and exactly one is ever on.** Both start `false`, because
+`monitoring.coreos.com` does not exist until [§13.2](#132-install) installs
+kube-prometheus-stack — and Argo CD does not skip a resource whose CRD is missing, it fails the whole
+Application sync, which would strand every workload in `shop`.
+[§13.3](#133-confirm-your-app-is-being-scraped) turns on the `ServiceMonitor`;
+[§9.6](#96-the-metrics-problem-you-just-created) turns it off and the
+`PodMonitor` on, and the reason it has to is the most useful failure in this tutorial. Turning both on
+double-scrapes every target and doubles your counters.
+
+**`deploy/charts/order-platform/templates/servicemonitor.yaml`**
+
+```yaml
+{{- if .Values.serviceMonitor.enabled }}
+# The pre-mesh scrape path. Prometheus talks straight to each Service's metrics
+# port over plaintext, which is the obvious thing and works fine — right up
+# until STRICT mTLS (§9.4) starts refusing it, at which point every one of these
+# targets goes down and *nothing logs an error*.
+#
+# §9.6 is that failure. The fix is podmonitor.yaml, which scrapes the sidecar's
+# merged endpoint instead. Exactly one of these two should be enabled:
+#   before Istio -> serviceMonitor.enabled: true
+#   after Istio  -> podMonitor.enabled: true
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: order-platform
+  labels:
+    # kube-prometheus-stack's Prometheus selects monitors by this label in the
+    # default configuration we install in §13.
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames: ["shop"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: order-platform
+  endpoints:
+    # One entry per port name in use, because a ServiceMonitor selects by port
+    # *name* and silently skips a name that does not exist on a given Service.
+    # order-api serves the app and its metrics on `http`; order-worker and
+    # pricing expose `http-metrics` separately. The `http-` prefix is not
+    # decoration — Istio reads the protocol off the port name, and a name it
+    # does not recognise is treated as plain TCP.
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+    - port: http-metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}
+```
+
 **`deploy/charts/order-platform/templates/podmonitor.yaml`**
 
 ```yaml
@@ -3262,24 +3314,48 @@ spec:
     matchLabels:
       app.kubernetes.io/part-of: order-platform
   podMetricsEndpoints:
-    # istio-proxy's MERGED endpoint on 15020: our application metrics (scraped
-    # over loopback inside the pod, per the prometheus.io/* annotations above)
-    # plus Envoy's and Istio's. One scrape, all of it, and it survives STRICT.
+    # istio-proxy's MERGED endpoint on 15020: our application metrics (which the
+    # sidecar scrapes over loopback, from the port and path recorded in
+    # ISTIO_PROMETHEUS_ANNOTATIONS at injection time) plus Envoy's and Istio's.
+    # One scrape, all of it, and it survives STRICT mTLS.
     #
-    # It must be 15020 and it must be addressed by number. Istio: "forwards
-    # requests to the sidecar telemetry port 15020 for merged metrics or 15090
-    # for Envoy-only metrics". 15090 is the one carrying the port NAME
-    # `http-envoy-prom`; 15020 is unnamed in the pod spec, so `port:` cannot
-    # reach it and `portNumber:` is required. Selecting http-envoy-prom gets
-    # you istio_requests_total (Kiali works) but never the application's own
-    # metrics, which is a silent half-failure.
-    - portNumber: 15020
-      path: /stats/prometheus
+    # The address CANNOT be written as `portNumber: 15020`. A PodMonitor's
+    # `port`/`portNumber` are filters on the container ports a pod DECLARES, and
+    # 15020 is not declared by anything — istio-proxy declares 15090
+    # (`http-envoy-prom`, Envoy-only) and 15021 (`status`). Ask for 15020 by
+    # number and the operator emits a keep rule that matches no container, so
+    # every target is dropped during relabeling and the job goes silently empty:
+    # `/targets` shows nothing at all rather than a failure.
+    #
+    # Build the address from the annotations instead. With metrics merging on
+    # (the Istio default) the injector rewrites the pod's prometheus.io/* to
+    # point at the merged endpoint, so `prometheus.io/port` is already 15020.
+    # https://istio.io/latest/docs/ops/integrations/prometheus/
+    - path: /stats/prometheus
       interval: {{ .Values.podMonitor.interval }}
+      relabelings:
+        # One target per pod, not one per container: without this, every
+        # container in the pod produces a target and all of them get rewritten
+        # to the same address, tripling the scrape.
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_container_name]
+          regex: istio-proxy
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          regex: "true"
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_annotation_prometheus_io_port
+            - __meta_kubernetes_pod_ip
+          regex: (\d+);((([0-9]+?)(\.|$)){4})
+          replacement: $2:$1
+          targetLabel: __address__
 {{- end }}
 ```
 
-> **Why a PodMonitor and not a ServiceMonitor.** A `ServiceMonitor` selects *Services* and scrapes their endpoints by port name — which is exactly what we did before Istio, with one entry for order-api's `http` port and one for order-worker's `http-metrics`. Under STRICT mTLS ([§9.6](#96-the-metrics-problem-you-just-created)) both of those scrapes get a connection reset, because Prometheus has no sidecar and no certificate. The merged endpoint lives on the *pod*, on the sidecar's own port, and is not fronted by a Service — so a `PodMonitor` is the only monitor kind that can reach it. `http-envoy-prom` is the port name Istio gives 15090 on every injected pod; `/stats/prometheus` there serves Envoy's metrics with the application's merged in.
+> **Why a PodMonitor and not a ServiceMonitor.** A `ServiceMonitor` selects *Services* and scrapes their endpoints by port name — which is exactly what the file above it does, with one entry for order-api's `http` port and one for order-worker's `http-metrics`. Under STRICT mTLS ([§9.6](#96-the-metrics-problem-you-just-created)) both of those scrapes get a connection reset, because Prometheus has no sidecar and no certificate. The merged endpoint lives on the *pod*, on 15020, and is not fronted by any Service — so a `PodMonitor` is the only monitor kind that can reach it.
+
+> **And it cannot be addressed by port, which is the part that costs an afternoon.** `port:` and `portNumber:` on a `PodMonitor` are **filters over the container ports a pod declares**, not a dial. Nothing declares 15020 — istio-proxy declares 15090 (`http-envoy-prom`, Envoy-only) and 15021 (`status`) — so `portNumber: 15020` generates a keep rule that matches no container and every target is dropped during relabeling. The job then shows **nothing at all** in `/targets`: not a failed target, not an error, an absence. The address has to be built from the `prometheus.io/*` annotations the sidecar injector rewrote, which is what the `relabelings` above do ([Istio](https://istio.io/latest/docs/ops/integrations/prometheus/)).
 
 > **The trap in this swap:** if a pod has no sidecar, it has no `http-envoy-prom` port, so the PodMonitor silently matches nothing and that workload vanishes from Prometheus with no error. A workload that leaves the mesh loses its metrics. Worth an alert of its own — `absent(up{job="order-platform"})` — which is precisely the kind of "the monitoring stopped" condition [§13.5](#135-an-alert-that-means-something) argues you should page on.
 
@@ -5138,12 +5214,21 @@ kubectl -n argocd get application order-platform -w   # Synced, then the pods ro
 > on the sidecar's own port, and is not fronted by any Service — so a `ServiceMonitor`, which selects
 > Services, has nothing to select. That is the whole reason the kind changes.
 >
-> And it must be addressed by **number**. Istio's docs: *"forwards requests to the sidecar telemetry
-> port **15020 for merged metrics** or **15090 for Envoy-only metrics**"*. 15090 is the port carrying
-> the name `http-envoy-prom`; **15020 is unnamed in the pod spec**, so `port:` cannot reach it and
-> `portNumber: 15020` is required. Pick 15090 by name and you will get `istio_requests_total` — so
-> Kiali looks perfectly healthy — while your application's own `orders_received_total` never appears
-> again. A half-failure that looks like a success is worse than an outage.
+> And it cannot be addressed by port at all. Istio's docs: *"forwards requests to the sidecar
+> telemetry port **15020 for merged metrics** or **15090 for Envoy-only metrics**"* — but `port:` and
+> `portNumber:` on a `PodMonitor` are **filters over the container ports a pod declares**, not a dial.
+> **Nothing declares 15020.** istio-proxy declares 15090 (`http-envoy-prom`) and 15021 (`status`), so
+> `portNumber: 15020` compiles to a keep rule matching no container, and every target is dropped
+> during relabeling. `/targets` then shows **nothing at all** for the job — not a failed target, not
+> an error, an absence — which is indistinguishable from a monitor whose selectors are wrong. The
+> address is built from the `prometheus.io/*` annotations the injector rewrote onto the pod, which is
+> what the `relabelings` in
+> [§10.1](#101-one-chart-two-workloads)'s `podmonitor.yaml` do.
+>
+> And do not reach for 15090 to make the error go away: it is a real declared port, so the targets
+> come **up**, and you get `istio_requests_total` — Kiali looks perfectly healthy — while your
+> application's own `orders_received_total` never appears again. A half-failure that looks like a
+> success is worse than an outage.
 
 Now confirm you get **both halves** from one scrape:
 
@@ -8754,7 +8839,7 @@ Two version rules worth internalising:
 | Buildkite agent never connects | Wrong token, or wrong cluster | `kubectl -n buildkite logs deploy/agent-stack-k8s`. Token must come from the **cluster's** agent tokens page, and the queue must exist. |
 | Build step Pending forever | Queue tag mismatch | The step's `agents: { queue: kubernetes }` must equal the controller's `config.tags` value. |
 | Buildah `cannot set up namespace` | Not privileged | The `securityContext.privileged: true` in [§12.5](#125-the-pipeline) is required for this approach. |
-| Prometheus target missing | PodMonitor matched nothing | The monitor scrapes `portNumber: 15020`, the sidecar's merged endpoint, so a pod with no sidecar has nothing to scrape. (15020 is unnamed, which is why the monitor uses `portNumber:` and not `port:`; `http-envoy-prom` is 15090 and carries Envoy's own metrics only.) Check `READY 2/2` first, then labels ([§9.6](#96-the-metrics-problem-you-just-created)). |
+| Prometheus target missing — the PodMonitor job shows **no targets at all**, not a failed one | Either the pods have no sidecar, or the monitor asks for a port nothing declares | `kubectl -n shop get pods` — `1/1` means no sidecar and nothing to scrape ([§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones)). `2/2` and still empty: the monitor is filtering every target away. Prove it — `/api/v1/targets?state=any` lists them under `droppedTargets` with their `__meta_kubernetes_pod_container_port_number`. **`port:`/`portNumber:` on a PodMonitor filter declared container ports; 15020 is not one** (istio-proxy declares 15090 and 15021), so the address must come from the `prometheus.io/*` annotations via `relabelings` ([§9.6](#96-the-metrics-problem-you-just-created)). |
 | Grafana dashboard doesn't appear | ConfigMap label wrong | Must be `grafana_dashboard: "1"` and `sidecar.dashboards.searchNamespace: ALL`. |
 | Everything is slow / pods OOMKilled | Docker memory too low | 16 GB minimum with the mesh and portal running ([§1.3](#13-give-docker-enough-room)). Check with `kubectl top nodes`. |
 | Pod stuck `1/2 Running`, app fine | Sidecar can't reach `istiod` | `kubectl -n istio-system logs deploy/istiod`; `istioctl proxy-status` lists proxies and whether they're synced. |
