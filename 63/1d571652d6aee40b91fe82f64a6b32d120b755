@@ -1,0 +1,27 @@
+docs/appendices.md
+  s_513c4510dbcf04::t_c193d5cb77618a 20,58,140-141
+modern-devops-wiki/tools/sonatype-nexus.md
+  s_513c4510dbcf04::t_1980f51ecb4168 104-116,118-137,140-141,144,147,152-155,157,161-166
+docs/phase-0-foundations.md
+  s_513c4510dbcf04::t_40b7b7d7a285dc 449-483
+modern-devops-wiki/log.md
+  s_513c4510dbcf04::t_400158e70c90e0 294-334
+modern-devops-tutorial.md
+  s_513c4510dbcf04::t_400158e70c90e0 577-611,8676,8714,8796-8797
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "631d571652d6aee40b91fe82f64a6b32d120b755",
+  "prompts": {},
+  "sessions": {
+    "s_513c4510dbcf04": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8a40aa2-818d-44cb-b795-8f7ebab27e87",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
