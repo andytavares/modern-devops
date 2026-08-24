@@ -510,3 +510,28 @@ files, a record of what was learned.
   `connection_security_policy="mutual_tls"` with
   `source_principal="spiffe://cluster.local/ns/istio-system/sa/istio-ingressgateway"`, which is
   §9.8's evidence sentence, verified rather than reasoned. Removed from [[open-questions]].
+
+- **2026-08-23** — **§9.10 listed 11 lines of a 71-line manifest and then told the reader to apply
+  it.** `pricing-fault-injection.yaml.disabled` was shown as *"(abridged — the route block is
+  identical to `pricing-traffic.yaml`'s)"*, with `# ... the same 90/10 destinations, timeout and
+  retries` standing in for the routing, and no version of the file's 40 lines of operator notes. Four
+  lines later: `kubectl apply -f deploy/platform/istio/pricing-fault-injection.yaml.disabled`. Paste
+  what is on the page and you have an invalid manifest for a file you were never given.
+
+  Now shown in full, all 71 lines.
+
+  **The same defect as §3.2's `main_test.go` and it recurred, so this time it is a check, not a
+  lesson.** `verify_doc_listings.py` gained `elided_but_applied`: a listing that contains an elision
+  marker, for a path the docs anywhere tell the reader to `-f`, is a **hard failure**. Two forms are
+  caught — a bare `...` line, and a comment whose content *starts* with `...`, which is what an
+  abridgement usually dresses itself as. A comment that merely contains an ellipsis in prose is not,
+  which was the first cut and produced two false positives on
+  `authorization-policy.yaml` and `backstage-secrets.yaml`.
+
+  Verified by reintroducing the original elision and confirming the checker exits 1 naming that line,
+  then restoring. `failures: 0` on the current tree.
+
+  **The rule it encodes:** *a listing the reader is told to apply must be paste-able.* Elide comments
+  if the page needs to breathe; never elide structure. [[progressive-build]] already said a
+  subsequence test proves a listing is not stale and proves nothing about whether it is sufficient —
+  that observation is now enforced for the one case where insufficiency is guaranteed to bite.
