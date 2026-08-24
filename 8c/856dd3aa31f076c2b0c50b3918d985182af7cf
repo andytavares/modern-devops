@@ -1,0 +1,38 @@
+docs/phase-1-the-application.md
+  s_513c4510dbcf04::t_e1a7682d3bb8b3 2521-2571
+  s_513c4510dbcf04::t_43c7bc8c8a4c32 320-327
+docs/phase-5-developer-portal.md
+  s_513c4510dbcf04::t_7e0c9c51d55302 614-632
+modern-devops-tutorial.md
+  s_513c4510dbcf04::t_b0da06308e3db0 8948-9248,11796-11799,11802-11881,11898-11926
+  s_513c4510dbcf04::t_7e0c9c51d55302 1055-1062,3277-3327,6759-6776,10526-10548,10631-11530,11601-11655,11965
+  s_513c4510dbcf04::t_588221f1be4b74 6777
+docs/phase-7-polyglot-monorepo.md
+  s_513c4510dbcf04::t_bfc68592b40efd 894-1194
+  s_513c4510dbcf04::t_e1a7682d3bb8b3 2574-3377,3473,3543-3598
+  s_513c4510dbcf04::t_b0da06308e3db0 3738-3816,3819-3823,3840-3868
+  s_513c4510dbcf04::t_43c7bc8c8a4c32 2470-2492,3378-3472,3907
+checks/verify_doc_listings.py
+  s_513c4510dbcf04::t_7e0c9c51d55302 289
+  s_513c4510dbcf04::t_a1d3d1e750cce2 221-262,275,284-285
+modern-devops-wiki/concepts/progressive-build.md
+  s_513c4510dbcf04::t_cb1f1614eceff6 43-54
+modern-devops-wiki/log.md
+  s_513c4510dbcf04::t_d37aafdbd937cc 710-746
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "8c856dd3aa31f076c2b0c50b3918d985182af7cf",
+  "prompts": {},
+  "sessions": {
+    "s_513c4510dbcf04": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8a40aa2-818d-44cb-b795-8f7ebab27e87",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
