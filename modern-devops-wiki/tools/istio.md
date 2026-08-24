@@ -5,7 +5,7 @@ role: mTLS, identity-based authorization, L7 telemetry, and the edge
 version: 1.30.3 (charts base + istiod + gateway)
 docs: https://istio.io/latest/docs/
 date_added: 2026-08-17
-date_updated: 2026-08-17
+date_updated: 2026-08-23
 status: in-use
 ---
 
@@ -148,6 +148,36 @@ every workload to enroll. Ambient replaces per-pod sidecars with one `ztunnel` p
 of the RAM, at the price of needing an explicit waypoint proxy before any L7 policy works. Sidecars
 are taken here because the mental model matches the documentation you will hit everywhere else — and
 §1.3 says ambient is the better choice if you are RAM-constrained.
+
+## `istioctl analyze` has a non-empty expected baseline, and that is the interesting part
+
+Observed 2026-08-23 at §9.8, on a correct cluster:
+
+```
+Error   [IST0101] (VirtualService shop/frontend) Referenced host not found: "frontend.shop.svc.cluster.local"
+Error   [IST0101] (VirtualService shop/pricing)  Referenced host not found: "pricing.shop.svc.cluster.local"
+Warning [IST0127] (AuthorizationPolicy shop/allow-ingress-to-frontend)   No matching workloads ... name=frontend
+Warning [IST0127] (AuthorizationPolicy shop/allow-order-api-to-pricing)  No matching workloads ... name=pricing
+Warning [IST0174] (DestinationRule shop/pricing) The host ... does not match any services in the mesh
+Error: Analyzers found issues when analyzing namespace: shop.
+```
+
+Nothing is wrong. `frontend` and `pricing` arrive in §17–§19 ([[pants]]/[[grpc]] phase); §9.5's
+`deny-all` and §9.9's canary routing are written for them ahead of time, because a default-deny policy
+has to be complete *before* enrolment rather than retrofitted after. All five clear when Phase 7
+deploys those workloads. Confirmed against the cluster: `shop` held `order-api` and `order-worker`
+only, and neither was reported against.
+
+> [!warning] The tool the docs point at for the hardest failure is pre-poisoned
+> §9.5 argues — correctly — that `istioctl analyze` is what catches a `principals` typo naming a
+> ServiceAccount that does not exist, the failure that denies everything while `kubectl get pods`
+> looks perfectly healthy. But it exits **non-zero with five findings when nothing is wrong**, so a
+> reader who has not been told the baseline learns to skip the output, and the sixth finding — theirs
+> — arrives in a list they have already decided is noise. [[kiali]]'s **Istio Config** tab validates
+> the same objects and shows the same five in red.
+>
+> Record the baseline, alert on the delta. This is the ordinary condition of any linter pointed at a
+> system built in stages, and it is worth more as a habit than as a fact about Istio.
 
 ## Related
 

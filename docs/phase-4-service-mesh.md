@@ -662,6 +662,33 @@ git commit -m "feat(platform): istio with strict mtls and default-deny authz"
 
 §9.4's proof covered Floci. `order-api` and `order-worker` have been running since [§10](phase-1-the-application.md#10-packaging-the-app-with-helm) and are reconciled by Argo CD as of [§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery), but they picked up their sidecars only when [§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones) labelled `shop` and the pods restarted — so the edge path through the gateway and the authorization policies keyed on those two service accounts are verifiable now, on this deployment. If a page load returns `RBAC: access denied`, the policy in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) is what to read first, and `istioctl analyze -n shop` is what to run.
 
+**Run it now, so you know what its noise looks like before you need its signal.** At this point in
+the build it exits **non-zero** with five findings, and every one of them is correct and expected:
+
+```
+$ istioctl analyze -n shop
+Error   [IST0101] (VirtualService shop/frontend) Referenced host not found: "frontend.shop.svc.cluster.local"
+Error   [IST0101] (VirtualService shop/pricing) Referenced host not found: "pricing.shop.svc.cluster.local"
+Warning [IST0127] (AuthorizationPolicy shop/allow-ingress-to-frontend) No matching workloads ... app.kubernetes.io/name=frontend
+Warning [IST0127] (AuthorizationPolicy shop/allow-order-api-to-pricing) No matching workloads ... app.kubernetes.io/name=pricing
+Warning [IST0174] (DestinationRule shop/pricing) The host pricing.shop.svc.cluster.local ... does not match any services in the mesh
+Error: Analyzers found issues when analyzing namespace: shop.
+```
+
+`frontend` and `pricing` are built in [Phase 7](phase-7-polyglot-monorepo.md). You have written the
+policy and the routing for services that do not exist yet — deliberately, because §9.5's `deny-all`
+has to be complete before anything is enrolled, not retrofitted after. **These five clear themselves
+when Phase 7 deploys those two workloads.** Note what is *absent*: nothing is reported against
+`order-api` or `order-worker`, which do exist. That is the signal.
+
+> [!warning] **A diagnostic with a known-noisy baseline is a diagnostic you will learn to ignore.**
+> §9.5 says `istioctl analyze` is what catches a `principals` typo that `kubectl get pods` cannot —
+> and that is true, but only if you know what five findings look like when nothing is wrong. Count
+> them. Six means something you did. The same applies to Kiali's **Istio Config** tab
+> ([§9.7](#97-kiali-the-mesh-you-can-see)), which validates the same objects and will show the same
+> five in red. This is the ordinary condition of every linter pointed at a system built in stages,
+> and the discipline — record the baseline, alert on the delta — is worth more than the finding.
+
 When it is running, do not accept a `200` from the browser as proof that the edge is meshed — a `200`
 only tells you bytes moved, and the first two hops are plaintext by design. Ask the destination
 sidecar which security policy it applied:

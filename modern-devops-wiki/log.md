@@ -451,3 +451,27 @@ files, a record of what was learned.
   `.status.sync.revision` to `git rev-parse HEAD` is, with the hard-refresh escape hatch and an
   explicit "do not go debug the thing you just changed" — the failure mode here is spending the next
   twenty minutes on an object that was never applied.
+
+- **2026-08-23** — **`istioctl analyze -n shop` exits non-zero on a correct cluster, and the tutorial
+  never said so.** Five findings — two `IST0101` on VirtualServices for `frontend` and `pricing`, two
+  `IST0127` on AuthorizationPolicies matching no workloads, one `IST0174` on the `pricing`
+  DestinationRule — plus `Error: Analyzers found issues`.
+
+  All five are correct and expected. Verified: `shop` holds `order-api` and `order-worker` only;
+  `frontend` and `pricing` are built in §17–§19. §9.5's `deny-all` and §9.9's canary routing are
+  deliberately written before those workloads exist, because a default-deny policy has to be complete
+  before enrolment rather than retrofitted after. Nothing was reported against the two services that
+  do exist, which is the part that carries signal.
+
+  **The defect is not the output, it is the silence about it.** §9.5 argues that `istioctl analyze` is
+  what catches a `principals` typo naming a nonexistent ServiceAccount — the failure that denies
+  everything while `kubectl get pods` looks healthy — and Appendix B sends the reader to the same
+  command for `RBAC: access denied`. Pointing someone at a diagnostic without telling them it returns
+  five errors when nothing is wrong teaches them to skip its output, and their finding then arrives
+  inside a list they have already written off. Same failure as any linter with an unmanaged baseline.
+
+  §9.8 now prints the expected output verbatim, says what clears it and when, points out that the two
+  existing workloads are absent from it, and states the rule: **count the findings; six is yours.**
+  Extended to [[kiali]]'s Istio Config tab, which validates the same objects and shows the same five
+  in red. Appendix B's `RBAC: access denied` row now names the baseline before recommending the
+  command. Recorded on [[istio]].
