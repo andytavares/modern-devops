@@ -291,3 +291,44 @@ files, a record of what was learned.
   Not fixed in the cluster: writing the real password into OpenBao and into the bootstrap Secret was
   blocked by the sandbox classifier (it is a credential write), so the commands were handed to the
   human. Docs and wiki are updated; `shop/nexus` still holds the wrong value until they run them.
+
+- **2026-08-23** — **Correction: the previous entry's recovery advice was wrong, and the wrongness is
+  the finding.** It said "wait 60s for the lockout to clear, then retry". Both halves are wrong, and a
+  reader following it would have stayed broken indefinitely.
+
+  Checked against the vendor docs instead of the `Retry-After` header
+  ([Sonatype — authentication attempt rate limiting](https://help.sonatype.com/en/authentication-attempt-rate-limiting.html),
+  introduced in 3.93.0, on by default):
+
+  ```properties
+  nexus.auth.ratelimit.max-attempts=3
+  nexus.auth.ratelimit.base-delay-seconds=30
+  nexus.auth.ratelimit.max-delay-seconds=900
+  ```
+
+  - The delay is **exponential to 900s**, not the 60s the first `Retry-After` advertised.
+  - **Every attempt during the window extends it**, so "wait, then retry" is a loop that never
+    converges while CI is also retrying.
+  - The 429 is returned **regardless of credential validity**, so correcting the password changes
+    nothing visible.
+
+  Confirmed on the cluster: after the human fixed the credential, SHA-256 of the password in OpenBao,
+  in the `buildkite/nexus-push` Secret and in the operator's keychain were **identical** — and
+  `GET /v2/` with it still returned `429`. The credential had been right for twelve minutes while the
+  build kept failing. `docker restart nexus` cleared the in-memory tracker and the same probe returned
+  **`200`** immediately.
+
+  **What this costs a tutorial, which is the real point.** Every reader of §5.4–§5.8 types a password
+  by hand and then runs `docker login`. Three typos — or one stale credential anywhere in the chain —
+  and Nexus stops answering for up to 15 minutes while telling the client `authentication required`,
+  which sends the reader to re-check the password, which extends the lockout. The tutorial had nothing
+  about this and it is exactly the shape of failure that makes someone abandon a tutorial: the
+  instructions look correct, the error names the wrong cause, and every diagnostic step makes it
+  worse.
+
+  Now documented as a `> [!warning]` at §5.8 next to the first `docker login` — the mechanism, the
+  three properties that make it vicious, and the deterministic reset — plus a rewritten Appendix B row
+  (the old one carried the bad advice), the version matrix, Appendix D, and [[sonatype-nexus]].
+  Deliberately **not** disabling the limiter: it is a real brute-force control, and the lesson is that
+  a security feature nobody knew about converted a 30-second credential fix into a 15-minute outage
+  that named the wrong cause.

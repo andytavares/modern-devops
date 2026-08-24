@@ -446,6 +446,41 @@ docker login nexus:8082 -u ci -p 'ci-password-change-me'
 # Login Succeeded
 ```
 
+> [!warning] **Get this password wrong three times and Nexus stops answering you for up to 15 minutes — with the right password.**
+> Nexus 3.93.0 added authentication rate limiting, on by default
+> ([Sonatype](https://help.sonatype.com/en/authentication-attempt-rate-limiting.html)). After
+> **three consecutive failures** it returns `429 Too many authentication attempts` with a
+> `Retry-After`, and the delay grows exponentially with each further attempt — `base-delay-seconds=30`
+> to `max-delay-seconds=900`:
+>
+> ```
+> HTTP/1.1 429 Too many authentication attempts
+> Retry-After: 60
+> ```
+>
+> Three things make this nastier than it sounds, and all three will happen to you:
+>
+> 1. **While the window is open, a correct password is refused too** — Sonatype's wording is "for all
+>    subsequent authentication attempts until the limit expires, **regardless of credential
+>    validity**". So fixing the password does not appear to fix anything.
+> 2. **Every attempt during the window extends it.** Retrying by hand to check whether it is fixed is
+>    the exact thing that keeps it broken, and CI retrying does it automatically.
+> 3. **The client does not say `429`.** Buildah reports `authentication required`, which reads like a
+>    credential problem and sends you back to re-check the password you already fixed.
+>
+> The reset is deterministic — the tracker is in memory, so restarting Nexus clears it immediately:
+>
+> ```bash
+> docker restart nexus
+> # then ONE attempt, not a loop
+> ```
+>
+> A successful authentication also resets the counter for that user, but you cannot get one while the
+> window is open. We do **not** turn the limiter off (`nexus.auth.ratelimit.enabled=false` in
+> `/nexus-data/etc/nexus.properties`, restart required): it is a real brute-force control, and the
+> lesson worth keeping is that a security feature you did not know about turns a 30-second credential
+> fix into a 15-minute outage that names the wrong cause. Appendix B has the recovery.
+
 ### 5.9 Teach containerd (on the kind nodes) about Nexus
 
 `config_path` was set in the cluster config; now we populate it. This must be done on **every** node.

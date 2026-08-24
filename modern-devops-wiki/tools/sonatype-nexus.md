@@ -101,51 +101,69 @@ next to the artifact detects a corrupted transfer and *cannot* detect a compromi
 replaces the artifact replaces the checksum beside it. `.buildkite/pants-ci.Dockerfile` pins both
 architectures' checksums as build args and bakes the result into an image living in Nexus.
 
-## Nexus 429s a wrong password instead of 401ing it
+## Authentication rate limiting: the 429 that outlives the bad password
 
-Observed 2026-08-23, Nexus `3.95.0-07 (COMMUNITY)`. A CI push failed with:
+Nexus **3.93.0** added authentication rate limiting, **on by default**
+([Sonatype](https://help.sonatype.com/en/authentication-attempt-rate-limiting.html)). Defaults, in
+`/nexus-data/etc/nexus.properties`, restart required to change:
+
+```properties
+nexus.auth.ratelimit.enabled=true
+nexus.auth.ratelimit.max-attempts=3
+nexus.auth.ratelimit.base-delay-seconds=30
+nexus.auth.ratelimit.max-delay-seconds=900
+nexus.auth.ratelimit.max-tracked-keys=10000
+```
+
+Three consecutive failures and the account is locked out with `429 Too many authentication attempts`
+and a `Retry-After`, backing off exponentially from 30s toward 900s.
+
+> [!warning] Three properties that turn a 30-second fix into a 15-minute outage
+> 1. **A correct credential is refused while the window is open** — Sonatype: "returns a 429 ... for
+>    all subsequent authentication attempts until the limit expires, **regardless of credential
+>    validity**." Fixing the password appears to change nothing.
+> 2. **Every attempt extends the window.** Checking whether it is fixed is what keeps it broken, and a
+>    CI retry loop escalates it to the cap without anyone touching a keyboard.
+> 3. **The client reports the wrong cause.** Buildah says `authentication required`; `docker login`
+>    says the password is bad. Only `/nexus-data/log/request.log` shows `429`.
+>
+> Reset: `docker restart nexus`. The tracker is in memory (`max-tracked-keys`), so a restart clears it
+> instantly — verified 2026-08-23, `429` → `200` on the first probe after the container came back. A
+> successful authentication also resets the counter for that user, which you cannot obtain while
+> locked out.
+
+Observed 2026-08-23 end to end. [[openbao]]'s `shop/nexus` was re-seeded with the tutorial's
+documented `ci-password-change-me` while this Nexus's `ci` user had a different password. CI's
+`buildah push` failed:
 
 ```
-Error: pushing image "nexus:8082/shop/order-api:3a7e8b7b99e6" ... trying to reuse blob
-  ... at destination: checking whether a blob ... exists in nexus:8082/shop/order-api:
-  authentication required
+Error: pushing image "nexus:8082/shop/order-api:3a7e8b7b99e6" ... checking whether a blob
+  ... exists in nexus:8082/shop/order-api: authentication required
 ```
 
-The request log shows what actually happened: the first authenticated `HEAD`s got **401**, and every
-attempt after that got **429**:
+Request log, which is where the truth was:
 
 ```
-"GET  /repository/docker-hosted/v2/"            401  "Buildah/1.40.1"
+"GET  /repository/docker-hosted/v2/"                                 401  "Buildah/1.40.1"
 "HEAD /repository/docker-hosted/v2/shop/order-api/blobs/sha256:..."  401
 "HEAD /repository/docker-hosted/v2/shop/order-api/blobs/sha256:..."  429
 ```
 
-```
-HTTP/1.1 429 Too many authentication attempts
-Server: Nexus/3.95.0-07 (COMMUNITY)
-Retry-After: 60
-```
+The credential was then corrected in OpenBao *and* in the `nexus-push` Secret — verified by comparing
+SHA-256 of the value in each place against the one in the operator's keychain, never by reading it —
+**and the push still failed**, for another twelve minutes, because the lockout was still open and
+every retry renewed it. That gap between "fixed" and "working" is the whole lesson.
 
-> [!warning] The 429 replaces the diagnosis with a symptom, and a retry loop keeps it there
-> Nexus rate-limits an account after repeated authentication failures, so **the moment you have a
-> wrong password you stop being told that you have a wrong password.** Every subsequent probe — CI
-> retrying, you testing by hand — returns 429 and refreshes the lockout, which reads like a load or
-> throttling problem rather than a credential one. Stop the pipeline, wait out `Retry-After`, and test
-> exactly once.
-
-Two causes produce a 401 on `/v2/` and they are told apart without guessing:
+Two causes produce a 401 on `/v2/`, and they are told apart without guessing:
 
 | Cause | Check |
 |---|---|
-| Docker Bearer Token realm not active (Appendix B, §5.4) | `docker exec nexus grep 'Loaded configuration: RealmConfigurationData' /nexus-data/log/nexus.log` — `DockerToken` must be in `realmNames` |
-| The password is simply wrong | Realm is present ⇒ this one |
+| Docker Bearer Token realm not active (§5.4) | `docker exec nexus grep 'Loaded configuration: RealmConfigurationData' /nexus-data/log/nexus.log` — `DockerToken` must be in `realmNames` |
+| The password is wrong | Realm present ⇒ this one |
 
-In the 2026-08-23 case the realm was active, so the credential was wrong: `shop/nexus` in [[openbao]]
-had been re-seeded from the tutorial's documented `ci-password-change-me` while the `ci` user in this
-Nexus had a different password. **Nexus owns that credential; OpenBao holds a copy, and the
-`openbao-bootstrap` Secret now holds a second copy that re-seeds on every OpenBao restart.** Rotating
-the Nexus password means rotating all three, or the next restart reintroduces the mismatch hours after
-the change that caused it. See [[openbao]] and [[secrets-management]].
+**The credential has three copies and they drift.** Nexus owns it; [[openbao]] holds a copy at
+`shop/nexus`; the `openbao-bootstrap` Secret holds a third that re-seeds on every OpenBao restart.
+Rotate all three or none — see [[openbao]] and [[secrets-management]].
 
 ## Related
 
