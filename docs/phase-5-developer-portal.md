@@ -45,7 +45,12 @@ Both work because of decisions made earlier: CI discovers services from the file
 A Backstage build pulls several thousand npm packages. Every one of them is a supply-chain event, and [§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for) said the whole point of Nexus is that nothing enters this platform unproxied. So npm gets the same treatment PyPI and Go already have:
 
 ```bash
-curl -u admin:admin123 -X POST 'http://localhost:8081/service/rest/v1/repositories/npm/proxy' \
+# -f so a rejected create is an error, and the status code either way. Without
+# both, Nexus answers 401 or 400 with an EMPTY BODY and this command prints
+# nothing at all — identical to success.
+curl -f -sS -o /dev/null -w 'create: %{http_code}\n' \
+  -u admin:"$NEXUS_ADMIN_PASSWORD" \
+  -X POST 'http://localhost:8081/service/rest/v1/repositories/npm/proxy' \
   -H 'Content-Type: application/json' -d '{
     "name": "npm-proxy",
     "online": true,
@@ -55,9 +60,36 @@ curl -u admin:admin123 -X POST 'http://localhost:8081/service/rest/v1/repositori
     "httpClient": { "blocked": false, "autoBlock": true },
     "npm": { "removeNonCataloged": false }
   }'
+# create: 201
 
-curl -s -u admin:admin123 http://localhost:8081/service/rest/v1/repositories | jq -r '.[].name'
+# Assert it exists. Do not eyeball a list of ten repository names.
+curl -sS http://localhost:8081/service/rest/v1/repositories \
+  | jq -e '.[] | select(.name == "npm-proxy")' > /dev/null \
+  && echo "npm-proxy: present" || echo "npm-proxy: MISSING — the create above did not take"
 ```
+
+> [!warning] **A silent failure here surfaces two sections later, as a Yarn error that never mentions Nexus.**
+> `POST /service/rest/v1/repositories/...` returns `201` with an empty body on success — and `401` or
+> `400` with an **equally empty body** on failure. Run it without `-f` and a rejected create looks
+> exactly like a successful one. What you see instead is
+> [§14.3](#143-scaffold-the-portal)'s `yarn add` failing with:
+>
+> ```
+> ➤ YN0035: Package not found
+> ➤ YN0035:   Response Code: 404 (Repository not found)
+> ➤ YN0035:   Request URL: http://nexus:8081/repository/npm-proxy/@backstage%2f...
+> ```
+>
+> **"Repository not found" is Nexus talking about itself, not about the package.** The package name is
+> fine; the *repository* does not exist. Every instinct says to go check the package name and the Yarn
+> config, and both are correct.
+>
+> `$NEXUS_ADMIN_PASSWORD` is whatever you set when you first logged in to Nexus in
+> [§5.2](phase-0-foundations.md#52-nexus-the-thing-everything-else-resolves-through) — **not
+> necessarily the `admin123` this tutorial suggested**, and there is no way to recover it once
+> `/nexus-data/admin.password` is deleted on first login. Get it wrong three times and Nexus locks the
+> account out for up to 900 seconds ([§5.8](phase-0-foundations.md#58-trust-the-plain-http-registry-from-docker)),
+> so export it once and check the `201` rather than guessing.
 
 ### 14.3 Scaffold the portal
 

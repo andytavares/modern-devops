@@ -579,3 +579,33 @@ files, a record of what was learned.
   that was the first cut and it false-positived on `authorization-policy.yaml` and
   `backstage-secrets.yaml`. Verified by reintroducing an elision into `pipeline.sh`: exits 1, names
   the line. Recorded on [[progressive-build]].
+
+- **2026-08-23** — **§14.2's `curl` cannot fail visibly, so its failure arrives as a Yarn 404 two
+  sections later.** Reported: `yarn add @backstage/plugin-scaffolder-backend-module-github` →
+  `YN0035: Package not found / Response Code: 404 (Repository not found)`.
+
+  Checked the registry rather than the package name:
+  `curl -s http://localhost:8081/service/rest/v1/repositories` returned ten repositories and
+  **`npm-proxy` was not among them**. The package name was never the problem — *"Repository not
+  found"* is Nexus talking about **itself**.
+
+  Why nobody noticed at §14.2: `POST /service/rest/v1/repositories/npm/proxy` returns `201` with an
+  **empty body** on success and `401`/`400` with an **equally empty body** on failure, and the
+  tutorial's command carried no `-f`, no `-w '%{http_code}'`, no check. A rejected create prints
+  exactly what a successful one prints: nothing. The verification line that followed dumped all
+  repository names and asked the reader to eyeball a ten-item list for one entry.
+
+  Fixed: `-f` plus `%{http_code}` on the create, and the check is now an assertion —
+  `jq -e '.[] | select(.name == "npm-proxy")'` — not a list to read. The warning states that "Repository
+  not found" is about the repository, since every instinct on seeing it is to go check the package
+  name and the Yarn config, both of which are correct.
+
+  **And the credential is wrong in the docs, again.** Attempting the create with the documented
+  `admin:admin123` returned **401** — this Nexus's admin password is not what the tutorial suggested,
+  `/nexus-data/admin.password` is deleted on first login so it cannot be recovered, and three wrong
+  attempts trip the 900s lockout ([[sonatype-nexus]]). Stopped at one attempt. §14.2 now takes
+  `$NEXUS_ADMIN_PASSWORD` and says outright that it is whatever was set at §5.2, not necessarily
+  `admin123`. Same shape as the `ci` password: **the tutorial printed a value and the platform kept a
+  different one**, and every place the docs hardcode a credential is a place that drifts.
+
+  Appendix B gained the symptom row.
