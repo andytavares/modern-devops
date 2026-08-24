@@ -673,3 +673,37 @@ files, a record of what was learned.
   build cache. §17.3 now shows the whole `.gitignore` before the first Pants `git add`, with the note
   that Pants reads only the **root** one — `--pants-ignore-use-gitignore` does not descend into nested
   ignore files, which is why every ignore in this build lives there.
+
+- **2026-08-23** — **§17 never created a single `BUILD` file, so every command in it failed.**
+  `pants dependencies --transitive services/order-api:bin` →
+  `ResolveError: Directory 'services/order-api' does not contain any BUILD files.`
+
+  Three files the tutorial requires and never lists:
+
+  - **`services/order-api/BUILD`** and **`services/order-worker/BUILD`** — referenced from §19.3
+    (*"Nothing to add to `services/order-api/BUILD`"*) and by §17's own example commands, listed
+    nowhere. `pants tailor ::` is mentioned twice, both times in passing inside a `.gitignore`
+    callout, never as a step. And tailor is not the answer: run against the reader's repo it proposes
+    a **different layout** — one `BUILD` per directory, `python_requirements` inside
+    `services/order-api` because the Phase 1 `pyproject.toml` is still there — with no `deployable`
+    tag, no `output_path`, no `pex_binary`.
+  - **`mypy.ini`** — shown only as a two-line fragment at §19.6, and `git add`ed at §19.7. Without it
+    mypy fails on the first run: `boto3`, `botocore` and `aiokafka` publish no `py.typed` marker and
+    no stubs exist for them.
+
+  And `pants lint check test ::` **cannot pass on its first run** regardless: the Python written in
+  §3.1 was never run through ruff, so `ruff format` fails the lint goal before the type checker or the
+  tests are reached.
+
+  Fixed by splitting §17.5 in two. The new §17.5 lists both `BUILD` files and `mypy.ini` in full;
+  §17.6 runs `pants fmt ::` first and says why, then `pants lint check test ::`.
+
+  **Everything above was verified by running it in the reader's repo, in order.** `pants list ::`
+  after the BUILD files → targets present. `pants dependencies --transitive services/order-api:bin` →
+  resolves. `pants lint check test ::` → gofmt, ruff check, go-compile, mypy and both suites
+  **green**. Committed and pushed there.
+
+  The `mypy.ini` note worth keeping: every exception in it is per-module and carries its reason. A
+  global `ignore_missing_imports = true` clears all three errors and simultaneously silences every
+  typo in your own imports — the entire class of error mypy exists to catch. **An exception you cannot
+  write a sentence to justify is one you should not take.**

@@ -417,9 +417,129 @@ skeleton ([§14.6](phase-5-developer-portal.md#146-paved-path-1--a-new-service))
 directory as `${{ values.name | replace('-', '_') }}` for exactly this reason, so a scaffolded
 `quotes-api` arrives with a `quotes_api/` package and collides with nothing.
 
-### 17.5 One command, and what it actually does
+### 17.5 Targets, and the two files that decide whether the checks pass
+
+Pants needs a `BUILD` file per source directory. `pants tailor ::` will generate skeletons, and they
+are not what this repo runs — tailor writes one `BUILD` per directory and has no way to know which
+binary is deployable or where its artifact should land. Write them:
+
+**`services/order-api/BUILD`**
+
+```python
+python_sources(
+    name="lib",
+    sources=["order_api/**/*.py"],
+)
+
+python_tests(
+    name="tests",
+    # `!tests/__init__.py`: it's a namespace marker, not a test — including it
+    # makes Pants generate a `python_test` target for it that pytest then fails
+    # with "no tests collected".
+    sources=["tests/**/*.py", "!tests/__init__.py"],
+    dependencies=[":lib"],
+)
+
+pex_binary(
+    name="bin",
+    # Declares this target as something CI ships. `pants --tag=deployable
+    # package ::` selects on it, so a service is packaged the moment it says
+    # so itself — no list in the pipeline to keep in sync.
+    tags=["deployable"],
+    entry_point="order_api.main:main",
+    dependencies=[":lib"],
+    # Land in dist/ under a predictable name so dist/ can be used directly as
+    # the Buildah build context and the Dockerfile can COPY by name. Default
+    # would be dist/services.order-api/bin.pex.
+    output_path="order-api.pex",
+)
+```
+
+**`services/order-worker/BUILD`**
+
+```python
+go_binary(
+    name="bin",
+    tags=["deployable"],
+    output_path="order-worker",
+)
+
+go_mod()
+
+go_package(
+    name="order-worker0",
+)
+```
+
+> **`go_package(name="order-worker0")` is tailor's name and it is kept on purpose.** Pants generates
+> it when the module and the package share a directory, and renaming it means renaming it in every
+> reference. The `0` is ugly and it is not a mistake.
+
+Now the type checker. mypy fails on the first run without this, on three of `order-api`'s
+dependencies — `boto3`, `botocore` and `aiokafka` publish no `py.typed` marker and no stubs exist for
+them:
+
+```
+services/order-api/order_api/main.py:11: error: Skipping analyzing "boto3": module is
+  installed, but missing library stubs or py.typed marker  [import-untyped]
+```
+
+**`mypy.ini`**
+
+```ini
+[mypy]
+# Pants discovers this file automatically ([mypy].config_discovery defaults to
+# true). Everything below is a PER-MODULE exception with a stated reason — there
+# is deliberately no global ignore_missing_imports, because that would silence
+# real typos in our own imports as well as third-party gaps.
+
+[mypy-google.protobuf.*]
+# types-protobuf IS in the resolve, but stub packages are never *imported*, so
+# Pants cannot infer them as a dependency of any target and they never land in
+# mypy's sandbox. Pants 2.33's [mypy] exposes only `skip` and `args` — there is
+# no extra_type_stubs lever. The generated .pyi files import google.protobuf,
+# so without this every protobuf-using target fails on generated code we do not
+# write.
+ignore_missing_imports = true
+
+[mypy-aiokafka.*]
+# aiokafka publishes no py.typed marker and no stubs package exists on PyPI.
+# Nothing to install; this is the honest state of the dependency.
+ignore_missing_imports = true
+
+[mypy-boto3.*]
+# boto3/botocore are untyped at runtime. boto3-stubs exists and would be a real
+# improvement, but it is a large dependency and pulling it in is a deliberate
+# decision rather than a side effect of this migration. Tracked, not hidden.
+ignore_missing_imports = true
+
+[mypy-botocore.*]
+ignore_missing_imports = true
+
+[mypy-yaml]
+# pyyaml is a dependency of the CI *image*, not of the Python resolve:
+# checks/verify_chart.py runs as a plain script against a rendered chart, not
+# through Pants, so pyyaml is installed in .buildkite/pants-ci.Dockerfile
+# instead. mypy therefore has nothing to import here.
+ignore_missing_imports = true
+```
+
+> **Every exception is per-module and carries its reason.** A global `ignore_missing_imports = true`
+> at the top would make all three errors disappear — along with every typo in your *own* import
+> statements, which is the entire class of error mypy is here to catch. The rule worth taking from
+> this file: **an exception you cannot write a sentence to justify is an exception you should not
+> take.**
+
+### 17.6 One command, and what it actually does
+
+`ruff` reformats the Python written in [§3.1](phase-1-the-application.md#31-order-api-python--fastapi),
+which was never run through it. So the first thing is a format, not a check — otherwise the command
+below fails on `ruff format` and never reaches the type checker or the tests:
 
 ```bash
+pants fmt ::
+# + ruff format made changes.
+
 pants lint check test ::
 ```
 
