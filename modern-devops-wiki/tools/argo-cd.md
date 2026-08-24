@@ -5,7 +5,7 @@ role: pull-based GitOps — CI never touches the cluster
 version: v3.4.7
 docs: https://argo-cd.readthedocs.io/en/stable/
 date_added: 2026-08-17
-date_updated: 2026-08-17
+date_updated: 2026-08-23
 status: in-use
 ---
 
@@ -79,6 +79,39 @@ every workload in `shop` reported as `Missing`. That is why the chart's `service
 > and `Degraded` appear together and the rendered manifest in git plainly differs from the live object.
 > Fix: `kubectl -n argocd annotate app <name> argocd.argoproj.io/refresh=hard --overwrite`
 > (Appendix B).
+
+## `helm upgrade` by hand stops working the moment Argo owns the release, and the error is the good outcome
+
+Observed 2026-08-23 at §9.6, running the tutorial's own instruction:
+
+```
+Error: UPGRADE FAILED: conflict occurred while applying object shop/order-api
+apps/v1, Kind=Deployment: Apply failed with 3 conflicts: conflicts with "argocd-controller":
+- .spec.template.metadata.annotations.checksum/config
+- .spec.template.spec.containers[name="order-api"].image
+- .spec.template.spec.containers[name="order-api"].env[name="SERVICE_VERSION"].value
+```
+
+The mechanism: this Application syncs with `ServerSideApply=true` (§11.4), so the API server records
+`argocd-controller` in `metadata.managedFields` as the owner of every field Argo sets. Helm 3.18+ also
+applies server-side, so a hand-run `helm upgrade` arrives as a **different field manager claiming
+fields someone else owns**, and [server-side
+apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/#conflicts) refuses rather
+than picking a winner.
+
+> [!warning] Forcing it is wrong twice, and the second reason is the one that hurts
+> `--force-conflicts` (kubectl) or `--take-ownership` (Helm) will push it through. That steals the
+> fields from `argocd-controller` — and then `selfHeal: true` reverts your change on the next
+> reconcile anyway. Net result: a cluster that disagrees with git, a change that disappeared minutes
+> after you made it, and nothing in any log tied to the thing you actually did. **The conflict error
+> is two controllers being stopped from fighting; silence would have been the bug.**
+
+The three conflicting fields are worth reading, because they name exactly what Argo owns and you do
+not: the image tag (rewritten by [[buildkite]] into `deploy/env/local/values.yaml`), `SERVICE_VERSION`
+(same rewrite), and `checksum/config` (the pod-restart annotation the chart computes from values).
+Every one of them is a value the delivery path sets. After §11 the deploy button is `git push`, and
+`argocd app sync <app>` if you will not wait for the poll — that is Argo applying git, not you
+applying your laptop. See [[gitops]].
 
 ## `selfHeal: true` means `kubectl edit` is temporary
 

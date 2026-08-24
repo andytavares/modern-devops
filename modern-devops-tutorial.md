@@ -5093,7 +5093,7 @@ STRICT because Prometheus is now talking to a port the sidecar deliberately expo
 
 Swap the monitors — off with one, on with the other:
 
-```bash
+```yaml
 # deploy/charts/order-platform/values.yaml
 serviceMonitor:
   enabled: false     # plaintext; refused by STRICT mTLS from here on
@@ -5102,10 +5102,37 @@ podMonitor:
   interval: 15s
 ```
 
+**Commit it. Do not run `helm upgrade`.** [§11](#11-argo-cd-pull-based-delivery)
+handed this release to Argo CD, and that was the point of the phase:
+
 ```bash
-helm upgrade --install order-platform deploy/charts/order-platform \
-  --namespace shop --values deploy/env/local/values.yaml --wait
+git add deploy/charts/order-platform/values.yaml
+git commit -m "fix(observability): scrape the sidecar's merged endpoint under strict mtls"
+git push
+
+kubectl -n argocd get application order-platform -w   # Synced, then the pods roll
 ```
+
+> [!warning] **`helm upgrade` cannot work here any more, and this is the first section where you will
+> try it.** Argo CD syncs this Application with `ServerSideApply=true`, so the API server records
+> `argocd-controller` as the field manager for the fields it sets. Helm 3.18+ also applies
+> server-side, and the API server refuses the collision rather than silently picking a winner:
+>
+> ```
+> Error: UPGRADE FAILED: conflict occurred while applying object shop/order-api
+> apps/v1, Kind=Deployment: Apply failed with 3 conflicts: conflicts with "argocd-controller":
+> - .spec.template.metadata.annotations.checksum/config
+> - .spec.template.spec.containers[name="order-api"].image
+> - .spec.template.spec.containers[name="order-api"].env[name="SERVICE_VERSION"].value
+> ```
+>
+> **That error is the system working.** Two controllers wanted the same fields and the API server said
+> so instead of letting them fight. You can force it — `--force-conflicts` on `kubectl`, or Helm's
+> `--take-ownership` — and it is the wrong move twice over: it steals the fields from Argo CD, and
+> `selfHeal: true` reverts your change on the next reconcile anyway, so you get a cluster that
+> disagrees with git and a change that vanishes minutes later with nothing logged against it.
+> **After §11 the deploy button is `git push`.** If you need it now rather than on the next poll,
+> `argocd app sync order-platform` — that is Argo CD applying git, not you applying your laptop.
 
 > **Why a `PodMonitor` and not another `ServiceMonitor`.** The merged endpoint lives on the **pod**,
 > on the sidecar's own port, and is not fronted by any Service — so a `ServiceMonitor`, which selects

@@ -332,3 +332,41 @@ files, a record of what was learned.
   Deliberately **not** disabling the limiter: it is a real brute-force control, and the lesson is that
   a security feature nobody knew about converted a 30-second credential fix into a 15-minute outage
   that named the wrong cause.
+
+- **2026-08-23** — **§9.6 told the reader to run `helm upgrade`, which cannot work by then.** Reported
+  from the live build:
+
+  ```
+  Error: UPGRADE FAILED: conflict occurred while applying object shop/order-api
+  apps/v1, Kind=Deployment: Apply failed with 3 conflicts: conflicts with "argocd-controller":
+  - .spec.template.metadata.annotations.checksum/config
+  - .spec.template.spec.containers[name="order-api"].image
+  - .spec.template.spec.containers[name="order-api"].env[name="SERVICE_VERSION"].value
+  ```
+
+  Verified on the cluster: `Application/order-platform` syncs `deploy/charts/order-platform` from
+  `main` with `syncOptions: [CreateNamespace=true, ServerSideApply=true]` and
+  `automated: {prune: true, selfHeal: true}`. Server-side apply records `argocd-controller` in
+  `managedFields` for every field Argo sets; Helm 3.18+ also applies server-side, so a hand-run
+  upgrade is a second field manager claiming owned fields, and the API server refuses.
+
+  **The same defect class as §9.3 and old §9.8, third instance:** §9 was written when it preceded §11
+  numerically, so its prose assumes a world where nothing else owns the release. In the phased edition
+  Argo CD has owned it since Phase 3. The tutorial was handing the reader a command that fails 100% of
+  the time, one section after telling them the mesh broke their monitoring — so the failure lands
+  exactly where a reader is already unsure whether they broke something.
+
+  Fixed: §9.6 now commits and pushes the values change and watches Argo CD sync it, with a
+  `> [!warning]` carrying the verbatim error, why it is **the system working** rather than a fault, and
+  why forcing it (`--force-conflicts`, `--take-ownership`) is wrong twice — it steals the fields, and
+  `selfHeal` reverts the change on the next reconcile, leaving a cluster that disagrees with git and a
+  change that vanished with nothing logged against it.
+
+  Swept the phases that follow §11 in reading order for the same shape: the only other `helm upgrade`
+  commands are for third-party charts nothing else owns ([[istio]], [[kiali]], [[backstage]]), and
+  §13.3's is in Phase 2, before Argo CD exists. §9.6 was the only one.
+
+  The three conflicting fields are the useful detail and are now on [[argo-cd]]: `image` and
+  `SERVICE_VERSION` are what [[buildkite]] rewrites into `deploy/env/local/values.yaml`, and
+  `checksum/config` is the chart's pod-restart annotation. All three are values the delivery path owns
+  — the conflict list is a precise statement of the boundary.
