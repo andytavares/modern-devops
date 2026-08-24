@@ -317,6 +317,14 @@ Three decisions worth naming:
 - **`acks="all"` + idempotence.** The default is faster and will silently lose writes when a broker restarts. On a 3-broker cluster you want durability; on a benchmark you want speed. Know which one you configured.
 - **Partition key = order id.** Kafka only guarantees ordering *within a partition*. Keying by order id means all events for one order land on one partition, so a later "order cancelled" can never overtake "order created".
 
+Both directories are Python packages, so both need a marker file — empty, and required:
+
+```bash
+touch services/order-api/order_api/__init__.py services/order-api/tests/__init__.py
+```
+
+**`services/order-api/order_api/__init__.py`** and **`services/order-api/tests/__init__.py`** stay empty for the life of this build.
+
 **`services/order-api/tests/test_api.py`**
 
 ```python
@@ -2509,6 +2517,57 @@ Application sync, which would strand every workload in `shop`.
 [§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created) turns it off and the
 `PodMonitor` on, and the reason it has to is the most useful failure in this tutorial. Turning both on
 double-scrapes every target and doubles your counters.
+
+**`deploy/charts/order-platform/templates/configmap-order-api.yaml`**
+
+```yaml
+{{- if .Values.orderApi.enabled }}
+{{/*
+One ConfigMap per service, each in its own template file, so that the
+checksum/config annotation on a Deployment can hash exactly the file that holds
+that service's configuration and nothing else. A single shared config file would
+put every service's values back into every service's hash.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-api-config
+  labels: {{- include "op.labels" (dict "name" "order-api" "root" $) | nindent 4 }}
+data:
+  {{- include "op.commonConfig" . | nindent 2 }}
+  S3_BUCKET: {{ .Values.aws.s3Bucket | quote }}
+  # PEX unpacks its dependency closure here; see the /tmp volumeMount note on the
+  # Deployment.
+  PEX_ROOT: "/tmp/pex"
+{{- end }}
+```
+
+**`deploy/charts/order-platform/templates/configmap-order-worker.yaml`**
+
+```yaml
+{{- if .Values.orderWorker.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-worker-config
+  labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 4 }}
+data:
+  {{- include "op.commonConfig" . | nindent 2 }}
+  DDB_TABLE: {{ .Values.aws.ddbTable | quote }}
+  KAFKA_GROUP: {{ .Values.orderWorker.consumerGroup | quote }}
+{{- end }}
+```
+
+> **Non-secret configuration is a ConfigMap, and the Deployment hashes it.** That `checksum/config`
+> annotation above is what makes a config change roll the pods — Kubernetes does not restart
+> anything when a ConfigMap's contents change, and a process that read its environment at startup
+> never notices.
+
+**`deploy/charts/order-platform/.helmignore`**
+
+```
+BUILD
+```
 
 **`deploy/charts/order-platform/templates/servicemonitor.yaml`**
 

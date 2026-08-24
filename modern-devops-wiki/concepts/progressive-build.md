@@ -40,6 +40,18 @@ That catches staleness. It cannot catch **incompleteness**, and the difference b
 neither block. Every line of it *was* in the repo file, in order, so the check passed while a reader
 following the docs got eleven compile errors (fixed 2026-08-18 — see [[franz-go]]).
 
+## The three checks, and why each one exists
+
+| Check | Question it answers | The defect that created it |
+|---|---|---|
+| `drifted_complete_listings` | Is this listing **current**? | Two hand-maintained editions drifted: 43 of 76 shared sections diverged |
+| `elided_listings` | Is this listing a **whole file**? | §9.10 showed 11 lines of a 71-line manifest, four lines above `kubectl apply -f` of it |
+| `unlisted_files` | Is every required file **listed at all**? | §19 shipped a `frontend/` whose 13 files appeared nowhere, and a `pricing` service missing five of seven |
+
+Each was added because the previous ones passed clean on a phase that could not be followed. A
+subsequence test proves a listing is not stale. It says nothing about whether the listing is enough,
+and nothing at all about a file that has no listing to be stale.
+
 ## The rule, as of 2026-08-23: every listing is a whole file
 
 Snippets are banned outright. A listing under a bolded path must be the **complete file**, pasteable

@@ -891,6 +891,307 @@ if __name__ == "__main__":
     main()
 ```
 
+`main.py` imports its configuration, and the package needs its marker files — Pants infers targets
+from imports, and a package without `__init__.py` is not importable under the `/services/*` source
+root:
+
+**`services/pricing/pricing/settings.py`**
+
+```python
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Config from the environment.
+
+    pydantic-settings does the parsing, casting and validation, and reports
+    every bad or missing variable at once instead of only the first.
+    """
+
+    # Every variable this service reads is prefixed, so the field names stay
+    # short and nothing here can collide with an unprefixed cluster variable.
+    model_config = SettingsConfigDict(env_prefix="PRICING_")
+
+    grpc_port: int = 50051
+    http_port: int = 9090
+    version: str = "v1"
+
+
+settings = Settings()
+```
+
+**`services/pricing/pricing/__init__.py`** is empty, and so is
+**`services/pricing/tests/__init__.py`**:
+
+```bash
+mkdir -p services/pricing/pricing services/pricing/tests
+touch services/pricing/pricing/__init__.py services/pricing/tests/__init__.py
+```
+
+**`services/pricing/tests/test_pricing.py`**
+
+```python
+from collections.abc import Iterator
+
+import grpc
+import pytest
+from grpc_health.v1 import health_pb2, health_pb2_grpc  # type: ignore[import-untyped]
+from grpc_reflection.v1alpha import (  # type: ignore[import-untyped]
+    reflection,
+    reflection_pb2,
+    reflection_pb2_grpc,
+)
+from shop.v1 import pricing_pb2, pricing_pb2_grpc
+
+from pricing.main import (
+    HEALTH_SERVICE_NAME,
+    PRICING_SERVICE_NAME,
+    build_server,
+    calculate_price,
+    validate_request,
+)
+from pricing.settings import Settings
+
+
+class TestCalculatePriceV1:
+    def test_no_discount_regardless_of_quantity(self) -> None:
+        total, discount, rule = calculate_price(
+            quantity=5, unit_amount_cents=1000, version="v1"
+        )
+        assert total == 5000
+        assert discount == 0
+        assert rule == "list-price"
+
+    def test_single_unit(self) -> None:
+        total, discount, rule = calculate_price(
+            quantity=1, unit_amount_cents=250, version="v1"
+        )
+        assert total == 250
+        assert discount == 0
+        assert rule == "list-price"
+
+
+class TestCalculatePriceV2:
+    def test_discounts_at_quantity_three(self) -> None:
+        total, discount, rule = calculate_price(
+            quantity=3, unit_amount_cents=1000, version="v2"
+        )
+        assert discount == 300  # 10% of 3000
+        assert total == 2700
+        assert rule == "bulk-10pct"
+
+    def test_discounts_above_quantity_three(self) -> None:
+        total, discount, rule = calculate_price(
+            quantity=10, unit_amount_cents=999, version="v2"
+        )
+        assert discount == 999  # floor(9990 * 0.10)
+        assert total == 9990 - 999
+        assert rule == "bulk-10pct"
+
+    def test_no_discount_below_quantity_three(self) -> None:
+        total, discount, rule = calculate_price(
+            quantity=2, unit_amount_cents=1000, version="v2"
+        )
+        assert total == 2000
+        assert discount == 0
+        assert rule == "list-price"
+
+    def test_discount_rounds_down(self) -> None:
+        # list_total = 3 * 101 = 303; 10% = 30.3 -> floor to 30
+        total, discount, rule = calculate_price(
+            quantity=3, unit_amount_cents=101, version="v2"
+        )
+        assert discount == 30
+        assert total == 273
+        assert rule == "bulk-10pct"
+
+
+def test_served_by_reflects_version() -> None:
+    # calculate_price itself doesn't set served_by (that's the servicer's job),
+    # but the version argument it's given is what would end up in served_by.
+    _, _, rule_v1 = calculate_price(quantity=3, unit_amount_cents=1000, version="v1")
+    _, _, rule_v2 = calculate_price(quantity=3, unit_amount_cents=1000, version="v2")
+    assert rule_v1 == "list-price"
+    assert rule_v2 == "bulk-10pct"
+
+
+class TestValidateRequest:
+    def test_valid_request_does_not_raise(self) -> None:
+        validate_request(sku="widget-1", quantity=1, unit_amount_cents=1)
+
+    def test_empty_sku_raises(self) -> None:
+        with pytest.raises(ValueError, match="sku"):
+            validate_request(sku="", quantity=1, unit_amount_cents=100)
+
+    def test_zero_quantity_raises(self) -> None:
+        with pytest.raises(ValueError, match="quantity"):
+            validate_request(sku="widget-1", quantity=0, unit_amount_cents=100)
+
+    def test_negative_quantity_raises(self) -> None:
+        with pytest.raises(ValueError, match="quantity"):
+            validate_request(sku="widget-1", quantity=-1, unit_amount_cents=100)
+
+    def test_zero_unit_amount_raises(self) -> None:
+        with pytest.raises(ValueError, match="unit_amount_cents"):
+            validate_request(sku="widget-1", quantity=1, unit_amount_cents=0)
+
+    def test_negative_unit_amount_raises(self) -> None:
+        with pytest.raises(ValueError, match="unit_amount_cents"):
+            validate_request(sku="widget-1", quantity=1, unit_amount_cents=-5)
+
+
+class TestSettings:
+    def test_reads_prefixed_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PRICING_GRPC_PORT", "50999")
+        monkeypatch.setenv("PRICING_HTTP_PORT", "9111")
+        monkeypatch.setenv("PRICING_VERSION", "v2")
+        loaded = Settings()
+        assert loaded.grpc_port == 50999
+        assert loaded.http_port == 9111
+        assert loaded.version == "v2"
+
+    def test_ports_are_coerced_to_int(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PRICING_GRPC_PORT", "50051")
+        assert Settings().grpc_port == 50051
+
+    def test_non_numeric_port_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PRICING_GRPC_PORT", "not-a-port")
+        with pytest.raises(ValueError, match="grpc_port"):
+            Settings()
+
+
+@pytest.fixture
+def channel() -> Iterator[grpc.Channel]:
+    """The real server, on an ephemeral port, over a real channel.
+
+    Health checking and reflection are wire protocols; asserting on them from
+    inside the process would prove nothing about what a kubelet or grpcurl sees.
+    """
+    server, _ = build_server()
+    port = server.add_insecure_port("[::]:0")
+    server.start()
+    with grpc.insecure_channel(f"localhost:{port}") as chan:
+        yield chan
+    server.stop(None).wait()
+
+
+class TestHealthChecking:
+    def test_pricing_service_reports_serving(self, channel: grpc.Channel) -> None:
+        stub = health_pb2_grpc.HealthStub(channel)
+        response = stub.Check(
+            health_pb2.HealthCheckRequest(service="shop.v1.Pricing"), timeout=5
+        )
+        assert response.status == health_pb2.HealthCheckResponse.SERVING
+
+    def test_overall_health_reports_serving(self, channel: grpc.Channel) -> None:
+        # The empty service name is the server's overall status, and it is what
+        # a `grpc:` probe with no `service:` field asks for.
+        stub = health_pb2_grpc.HealthStub(channel)
+        response = stub.Check(health_pb2.HealthCheckRequest(service=""), timeout=5)
+        assert response.status == health_pb2.HealthCheckResponse.SERVING
+
+    def test_unregistered_service_is_not_found(self, channel: grpc.Channel) -> None:
+        stub = health_pb2_grpc.HealthStub(channel)
+        with pytest.raises(grpc.RpcError) as excinfo:
+            stub.Check(health_pb2.HealthCheckRequest(service="shop.v1.Nope"), timeout=5)
+        assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+
+    def test_graceful_shutdown_flips_every_service(self) -> None:
+        server, health_servicer = build_server()
+        port = server.add_insecure_port("[::]:0")
+        server.start()
+        try:
+            with grpc.insecure_channel(f"localhost:{port}") as chan:
+                stub = health_pb2_grpc.HealthStub(chan)
+                health_servicer.enter_graceful_shutdown()
+                for service_name in ("", "shop.v1.Pricing"):
+                    response = stub.Check(
+                        health_pb2.HealthCheckRequest(service=service_name), timeout=5
+                    )
+                    assert response.status == health_pb2.HealthCheckResponse.NOT_SERVING
+        finally:
+            server.stop(None).wait()
+
+
+class TestReflection:
+    def test_lists_pricing_health_and_reflection(self, channel: grpc.Channel) -> None:
+        stub = reflection_pb2_grpc.ServerReflectionStub(channel)
+        responses = stub.ServerReflectionInfo(
+            iter([reflection_pb2.ServerReflectionRequest(list_services="")]),
+            timeout=5,
+        )
+        listed = {
+            service.name
+            for response in responses
+            for service in response.list_services_response.service
+        }
+        assert PRICING_SERVICE_NAME in listed
+        assert HEALTH_SERVICE_NAME in listed
+        assert reflection.SERVICE_NAME in listed
+
+
+class TestPriceOrderRpc:
+    def test_valid_request_is_priced(self, channel: grpc.Channel) -> None:
+        stub = pricing_pb2_grpc.PricingStub(channel)
+        response = stub.PriceOrder(
+            pricing_pb2.PriceOrderRequest(
+                sku="widget-1", quantity=1, unit_amount_cents=250
+            ),
+            timeout=5,
+        )
+        assert response.total_amount_cents == 250
+        assert response.rule_applied == "list-price"
+
+    def test_invalid_request_aborts_with_invalid_argument(
+        self, channel: grpc.Channel
+    ) -> None:
+        # abort() must terminate the RPC. set_code/set_details followed by a
+        # return would arrive here as a successful empty response instead.
+        stub = pricing_pb2_grpc.PricingStub(channel)
+        with pytest.raises(grpc.RpcError) as excinfo:
+            stub.PriceOrder(
+                pricing_pb2.PriceOrderRequest(
+                    sku="", quantity=1, unit_amount_cents=250
+                ),
+                timeout=5,
+            )
+        assert excinfo.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+        details = excinfo.value.details()
+        assert details is not None
+        assert "sku" in details
+```
+
+**`services/pricing/Dockerfile`** — the same shape as the other two services, and the file
+[§19.5](#195-one-ci-step-instead-of-two)'s discovery loop looks for to decide that `pricing` is a
+service CI should build at all:
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+#
+# Build context is `dist/` (the `pants package services/pricing:bin` output),
+# not the source tree: the PEX already bundles the interpreter-independent
+# dependency closure resolved by Pants from locks/python-default.lock, so there
+# is nothing left for this image to resolve or install.
+FROM docker.io/library/python:3.13-slim
+
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
+
+WORKDIR /app
+COPY --chown=10001:10001 pricing.pex /app/pricing.pex
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER 10001
+# 50051 gRPC (application, health checking and reflection), 9090 Prometheus
+# metrics. Probes speak the gRPC health protocol on 50051, not HTTP.
+EXPOSE 50051 9090
+ENTRYPOINT ["python", "/app/pricing.pex"]
+```
+
+
 Three things are load-bearing:
 
 - **Every service name is registered explicitly, including the empty one.** The empty name carries the
@@ -2166,6 +2467,29 @@ read-only. The volume half, from `deploy/charts/order-platform/templates/pricing
         - { name: tmp, emptyDir: {} }
 ```
 
+**`deploy/charts/order-platform/templates/configmap-pricing.yaml`**
+
+```yaml
+{{- if .Values.pricing.enabled }}
+{{/*
+v1 and v2 share one ConfigMap because they share one config; what differs
+between them — PRICING_VERSION and the image tag — stays inline on each
+Deployment, where it belongs to the pod template rather than to the config.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pricing-config
+  labels: {{- include "op.labels" (dict "name" "pricing" "root" $) | nindent 4 }}
+data:
+  PRICING_GRPC_PORT: {{ .Values.pricing.grpcPort | quote }}
+  PRICING_HTTP_PORT: {{ .Values.pricing.httpPort | quote }}
+  # PEX unpacks its dependency closure here; see the /tmp volumeMount note on the
+  # Deployment.
+  PEX_ROOT: "/tmp/pex"
+{{- end }}
+```
+
 The variable half lives in `configmap-pricing.yaml`, the file that Deployment's `checksum/config`
 annotation hashes:
 
@@ -2247,6 +2571,906 @@ It is a demo dashboard, and it earns its place for one reason: **it makes the ca
 rather than a thing you query.** The same information is in Prometheus. Nobody stands at a Prometheus
 console watching a ratio move.
 
+The app itself. A Vite + TypeScript page with no framework, and a pure function in its own
+module so there is something worth unit-testing:
+
+**`frontend/package.json`**
+
+```json
+{
+  "name": "shop-canary-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "node --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.2.1",
+    "@types/node": "26.2.0"
+  }
+}
+```
+
+**`frontend/.npmrc`**
+
+```ini
+registry=http://nexus:8081/repository/npm-proxy/
+```
+
+> **`.npmrc` points npm at Nexus for the same reason everything else does** — the frontend's
+> dependencies are supply-chain events too ([§5.1](phase-0-foundations.md#51-what-nexus-is-actually-for)).
+
+**`frontend/tsconfig.json`**
+
+```json
+{
+  "compilerOptions": {
+    // Required by Pants\' TypeScript backend, which refuses to typecheck
+    // without an explicit outDir. vite ignores it — it writes to its own
+    // build.outDir — so this exists purely so `pants check` can run.
+    "outDir": "./dist",
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "types": ["vite/client", "node"]
+  },
+  "include": ["src"]
+}
+```
+
+**`frontend/vite.config.ts`**
+
+```ts
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  build: {
+    outDir: "dist",
+  },
+});
+```
+
+**`frontend/index.html`**
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Canary Watch — pricing v1/v2</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
+```
+
+**`frontend/src/tally.ts`**
+
+```ts
+// Pure, DOM-free tally logic — kept separate from main.ts so it can be unit
+// tested directly (see tally.test.ts) without a browser.
+//
+// The whole point of this module: `priced_by` is a free-form string on the
+// wire, not a closed v1/v2 union (see api.ts). Tallying must key on
+// whatever string actually came back, so an unexpected value shows up as
+// its own bucket instead of being folded into an existing one.
+
+const PALETTE = ["#4f8cff", "#ff9f43", "#2ecc71", "#e84393", "#a29bfe", "#00cec9"];
+
+/**
+ * Records one occurrence of `key` in `counts`, in place. `key` is whatever
+ * `priced_by` the backend returned — no validation, no fallback bucket.
+ */
+export function recordPriced(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+/** Total occurrences across all keys. */
+export function totalOf(counts: Map<string, number>): number {
+  let sum = 0;
+  for (const n of counts.values()) sum += n;
+  return sum;
+}
+
+/** Percentage (0-100, rounded) of `key` within `counts`. 0 if the total is 0. */
+export function percentOf(counts: Map<string, number>, key: string): number {
+  const total = totalOf(counts);
+  if (total === 0) return 0;
+  return Math.round(((counts.get(key) ?? 0) / total) * 100);
+}
+
+/**
+ * Stable colour per key, assigned from a small palette in first-seen order
+ * and cached in `assigned` so a key never changes colour across renders,
+ * even as new keys appear or the bar re-sorts.
+ */
+export function colorFor(key: string, assigned: Map<string, string>): string {
+  const existing = assigned.get(key);
+  if (existing) return existing;
+  const color = PALETTE[assigned.size % PALETTE.length] as string;
+  assigned.set(key, color);
+  return color;
+}
+```
+
+**`frontend/src/tally.test.ts`**
+
+```ts
+// Exercises the tally logic in isolation from the DOM. Uses Node's built-in
+// test runner and assert module — no new dependencies, matches the "no new
+// deps" constraint on this frontend.
+//
+// Run with: node --test src/tally.test.ts
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { recordPriced, totalOf, percentOf, colorFor } from "./tally.ts";
+
+test("known values (v1/v2) split as expected", () => {
+  const counts = new Map<string, number>();
+  recordPriced(counts, "v1");
+  recordPriced(counts, "v1");
+  recordPriced(counts, "v1");
+  recordPriced(counts, "v2");
+
+  assert.equal(counts.get("v1"), 3);
+  assert.equal(counts.get("v2"), 1);
+  assert.equal(totalOf(counts), 4);
+  assert.equal(percentOf(counts, "v1"), 75);
+  assert.equal(percentOf(counts, "v2"), 25);
+});
+
+test("an unexpected priced_by value gets its own bucket, not folded into an existing one", () => {
+  const counts = new Map<string, number>();
+  recordPriced(counts, "v1");
+  recordPriced(counts, "v1");
+  recordPriced(counts, "pricing-v1"); // e.g. served_by from a different service naming scheme
+
+  // The old bug: anything !== "v1" was counted as v2. Prove that no longer
+  // happens — "pricing-v1" must NOT be added to "v1"'s count, and must NOT
+  // silently create/inflate a "v2" bucket that was never actually seen.
+  assert.equal(counts.get("v1"), 2);
+  assert.equal(counts.get("pricing-v1"), 1);
+  assert.equal(counts.has("v2"), false);
+  assert.equal(counts.size, 2);
+  assert.equal(totalOf(counts), 3);
+});
+
+test("three distinct versions each get their own bucket", () => {
+  const counts = new Map<string, number>();
+  recordPriced(counts, "v1");
+  recordPriced(counts, "v2");
+  recordPriced(counts, "v3-canary");
+
+  assert.equal(counts.size, 3);
+  assert.equal(percentOf(counts, "v1"), 33);
+  assert.equal(percentOf(counts, "v2"), 33);
+  assert.equal(percentOf(counts, "v3-canary"), 33);
+});
+
+test("colorFor is stable per key and does not reassign on repeated calls", () => {
+  const assigned = new Map<string, string>();
+  const first = colorFor("v1", assigned);
+  const second = colorFor("v2", assigned);
+  const firstAgain = colorFor("v1", assigned);
+
+  assert.equal(firstAgain, first);
+  assert.notEqual(first, second);
+});
+
+test("empty counts: total and percent are 0, not NaN or a divide-by-zero error", () => {
+  const counts = new Map<string, number>();
+  assert.equal(totalOf(counts), 0);
+  assert.equal(percentOf(counts, "v1"), 0);
+});
+```
+
+**`frontend/src/api.ts`**
+
+```ts
+// Talks to POST /orders on the order-api service. Base URL is configurable so
+// local dev (vite dev server, different origin) can point at a reachable
+// host, while the in-cluster build defaults to "" (same-origin, proxied by
+// nginx — see frontend/nginx.conf) and needs no CORS handling at all.
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+
+export interface OrderRequest {
+  customer: string;
+  sku: string;
+  quantity: number;
+  amount_cents: number;
+}
+
+export interface OrderResponse {
+  order_id: string;
+  status: string;
+  s3_key: string;
+  total_amount_cents: number;
+  discount_cents: number;
+  // Both are free-form strings on the wire (shop.v1.PriceOrderResponse) —
+  // nothing on this side enforces a two-value union, and treating them as
+  // one is what let an unrecognized value get silently folded into "v2" in
+  // the tally. Display them as whatever the backend actually sent.
+  rule_applied: string;
+  priced_by: string;
+}
+
+export class OrderApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "OrderApiError";
+  }
+}
+
+export async function placeOrder(req: OrderRequest): Promise<OrderResponse> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(req),
+    });
+  } catch (err) {
+    // Network failure (service unreachable, DNS, etc) — no HTTP status at all.
+    throw new OrderApiError(
+      err instanceof Error ? err.message : "network error",
+      0,
+    );
+  }
+
+  if (!res.ok) {
+    throw new OrderApiError(`order-api returned ${res.status}`, res.status);
+  }
+
+  return (await res.json()) as OrderResponse;
+}
+```
+
+**`frontend/src/main.ts`**
+
+```ts
+import { placeOrder, OrderApiError, type OrderResponse } from "./api";
+import { recordPriced, totalOf, percentOf, colorFor } from "./tally";
+
+interface LogEntry {
+  quantity: number;
+  totalCents: number | null;
+  ruleApplied: string;
+  pricedBy: string;
+  ok: boolean;
+  // The HTTP status the request actually failed with, or 0 when the request
+  // never reached order-api. Not every failure is a 502: order-api maps a
+  // pricing deadline to 504, an unavailable pricing to 503, a rejected order
+  // to 400 and throttling to 429, and showing the real one is the difference
+  // between "the canary is broken" and "the canary is slow".
+  status: number;
+}
+
+interface State {
+  counts: Map<string, number>;
+  errors: number;
+  log: LogEntry[];
+}
+
+const MAX_LOG = 20;
+const CONTINUOUS_INTERVAL_MS = 500; // 2/sec
+
+const state: State = { counts: new Map(), errors: 0, log: [] };
+// Colour assignment persists independently of `state` so a version keeps its
+// colour across a render even if it briefly has zero share; reset explicitly
+// clears it alongside the counts so a fresh session reassigns from scratch.
+let colors = new Map<string, string>();
+
+let continuousTimer: ReturnType<typeof setInterval> | null = null;
+
+const app = document.querySelector<HTMLDivElement>("#app");
+if (!app) {
+  throw new Error("#app element not found");
+}
+
+app.innerHTML = `
+  <main>
+    <header>
+      <h1>Canary Watch</h1>
+      <p class="subtitle">Live split of <code>pricing</code> versions, by order.</p>
+    </header>
+
+    <section class="tally" aria-label="live version split">
+      <div class="tally-bar" id="tally-bar"></div>
+      <div class="tally-labels" id="tally-labels"></div>
+      <div class="tally-meta">
+        <span id="version-count-label"></span>
+        <span class="tally-label errors"><strong id="err-count">0</strong> failed</span>
+      </div>
+    </section>
+
+    <section class="controls">
+      <div class="field">
+        <label for="quantity">Quantity</label>
+        <input type="number" id="quantity" min="1" step="1" value="1" />
+      </div>
+      <div class="field">
+        <label for="amount">Unit amount ($)</label>
+        <input type="number" id="amount" min="0" step="0.01" value="19.99" />
+      </div>
+      <div class="buttons">
+        <button id="send-one" type="button">Send order</button>
+        <button id="send-twenty" type="button">Send 20 orders</button>
+        <button id="toggle-continuous" type="button">Start continuous (2/sec)</button>
+        <button id="reset" type="button" class="secondary">Reset counters</button>
+      </div>
+      <p class="hint">Quantity &ge; 3 crosses the bulk-discount boundary that triggers v2's <code>bulk-10pct</code> rule.</p>
+    </section>
+
+    <section class="log-section">
+      <h2>Last ${MAX_LOG} orders</h2>
+      <table class="log">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>qty</th>
+            <th>total</th>
+            <th>rule</th>
+            <th>priced by</th>
+          </tr>
+        </thead>
+        <tbody id="log-body"></tbody>
+      </table>
+    </section>
+  </main>
+`;
+
+const el = <T extends HTMLElement>(id: string): T => {
+  const found = document.getElementById(id);
+  if (!found) throw new Error(`missing #${id}`);
+  return found as T;
+};
+
+const quantityInput = el<HTMLInputElement>("quantity");
+const amountInput = el<HTMLInputElement>("amount");
+const sendOneBtn = el<HTMLButtonElement>("send-one");
+const sendTwentyBtn = el<HTMLButtonElement>("send-twenty");
+const toggleContinuousBtn = el<HTMLButtonElement>("toggle-continuous");
+const resetBtn = el<HTMLButtonElement>("reset");
+
+const tallyBar = el<HTMLDivElement>("tally-bar");
+const tallyLabels = el<HTMLDivElement>("tally-labels");
+const versionCountLabel = el<HTMLElement>("version-count-label");
+const errCountEl = el<HTMLElement>("err-count");
+const logBody = el<HTMLTableSectionElement>("log-body");
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function render(): void {
+  const total = totalOf(state.counts);
+  const keys = [...state.counts.keys()];
+
+  // One bar segment + one label per distinct version actually seen. An
+  // unexpected priced_by value gets its own segment, not a fold into v2.
+  tallyBar.innerHTML = keys
+    .map((key) => {
+      const pct = total === 0 ? 0 : percentOf(state.counts, key);
+      const width = total === 0 ? 100 / Math.max(keys.length, 1) : pct;
+      return `<div class="tally-segment" style="width:${width}%;background:${colorFor(key, colors)}"></div>`;
+    })
+    .join("");
+
+  tallyLabels.innerHTML = keys
+    .map((key) => {
+      const pct = percentOf(state.counts, key);
+      const count = state.counts.get(key) ?? 0;
+      return `<span class="tally-label" style="color:${colorFor(key, colors)}">
+        <strong>${count}</strong> ${escapeHtml(key)} (${pct}%)
+      </span>`;
+    })
+    .join("");
+
+  versionCountLabel.textContent =
+    keys.length === 0 ? "no orders yet" : `${keys.length} version${keys.length === 1 ? "" : "s"} seen`;
+
+  errCountEl.textContent = String(state.errors);
+
+  logBody.innerHTML = state.log
+    .map((entry, i) => {
+      const rowClass = entry.ok ? "" : "row-error";
+      const totalDisplay =
+        entry.totalCents === null ? "—" : `$${(entry.totalCents / 100).toFixed(2)}`;
+      const priced = entry.ok
+        ? `<span class="badge" style="background:${colorFor(entry.pricedBy, colors)}22;color:${colorFor(entry.pricedBy, colors)}">${escapeHtml(entry.pricedBy)}</span>`
+        : `<span class="badge error">${entry.status === 0 ? "net" : entry.status}</span>`;
+      return `<tr class="${rowClass}">
+        <td>${state.log.length - i}</td>
+        <td>${entry.quantity}</td>
+        <td>${totalDisplay}</td>
+        <td>${escapeHtml(entry.ruleApplied)}</td>
+        <td>${priced}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function pushLog(entry: LogEntry): void {
+  state.log.unshift(entry);
+  if (state.log.length > MAX_LOG) {
+    state.log.length = MAX_LOG;
+  }
+}
+
+async function sendOrder(): Promise<void> {
+  const quantity = Math.max(1, Math.trunc(quantityInput.valueAsNumber || 1));
+  const amountDollars = amountInput.valueAsNumber || 0;
+  const amountCents = Math.round(amountDollars * 100);
+
+  try {
+    const res: OrderResponse = await placeOrder({
+      customer: "ada",
+      sku: "WIDGET-1",
+      quantity,
+      amount_cents: amountCents,
+    });
+
+    recordPriced(state.counts, res.priced_by);
+
+    pushLog({
+      quantity,
+      totalCents: res.total_amount_cents,
+      ruleApplied: res.rule_applied,
+      pricedBy: res.priced_by,
+      ok: true,
+      status: 202,
+    });
+  } catch (err) {
+    state.errors += 1;
+    const status = err instanceof OrderApiError ? err.status : 0;
+    pushLog({
+      quantity,
+      totalCents: null,
+      ruleApplied: status === 0 ? "network error" : `HTTP ${status}`,
+      pricedBy: "—",
+      ok: false,
+      status,
+    });
+  } finally {
+    render();
+  }
+}
+
+function sendMany(count: number): void {
+  for (let i = 0; i < count; i++) {
+    void sendOrder();
+  }
+}
+
+function stopContinuous(): void {
+  if (continuousTimer !== null) {
+    clearInterval(continuousTimer);
+    continuousTimer = null;
+  }
+  toggleContinuousBtn.textContent = "Start continuous (2/sec)";
+  toggleContinuousBtn.classList.remove("active");
+}
+
+function startContinuous(): void {
+  toggleContinuousBtn.textContent = "Stop continuous";
+  toggleContinuousBtn.classList.add("active");
+  continuousTimer = setInterval(() => {
+    void sendOrder();
+  }, CONTINUOUS_INTERVAL_MS);
+}
+
+sendOneBtn.addEventListener("click", () => void sendOrder());
+sendTwentyBtn.addEventListener("click", () => sendMany(20));
+toggleContinuousBtn.addEventListener("click", () => {
+  if (continuousTimer === null) {
+    startContinuous();
+  } else {
+    stopContinuous();
+  }
+});
+resetBtn.addEventListener("click", () => {
+  state.counts = new Map();
+  state.errors = 0;
+  state.log = [];
+  colors = new Map();
+  render();
+});
+
+render();
+```
+
+**`frontend/src/style.css`**
+
+```css
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #171a21;
+  --border: #2a2e38;
+  --text: #e6e8ec;
+  --muted: #8b909c;
+  --v1: #4f8cff;
+  --error: #ff5c5c;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.subtitle {
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+
+section {
+  margin-top: 2rem;
+}
+
+.tally {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+.tally-bar {
+  display: flex;
+  height: 2.5rem;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.tally-segment {
+  transition: width 0.3s ease;
+}
+
+.tally-labels {
+  display: flex;
+  gap: 1.5rem;
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
+  font-size: 0.95rem;
+}
+
+.tally-label strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.tally-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.tally-label.errors {
+  color: var(--error);
+}
+
+.controls {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.field label {
+  width: 9rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.field input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 0.4rem 0.6rem;
+  width: 8rem;
+}
+
+.buttons {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
+
+button {
+  background: var(--v1);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 0.55rem 1rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.1);
+}
+
+button.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+button.active {
+  background: var(--error);
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.75rem 0 0;
+}
+
+.log-section h2 {
+  font-size: 1.05rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+table.log {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+table.log th,
+table.log td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+table.log th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+tr.row-error {
+  background: rgba(255, 92, 92, 0.08);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.badge.error {
+  background: rgba(255, 92, 92, 0.18);
+  color: var(--error);
+}
+
+code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+```
+
+**`frontend/src/vite-env.d.ts`**
+
+```ts
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  /** Base URL for the order API. Empty string means same-origin (nginx proxies /orders). */
+  readonly VITE_API_BASE: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+```
+
+**`frontend/Dockerfile`**
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+FROM docker.io/library/node:24-trixie-slim AS builder
+
+WORKDIR /app
+COPY package.json package-lock.json .npmrc ./
+# --no-audit/--no-fund: this resolves through Nexus (.npmrc), not npmjs.org,
+# and the lockfile makes the install reproducible, same as uv.lock elsewhere.
+RUN npm ci --no-audit --no-fund
+
+COPY tsconfig.json vite.config.ts index.html ./
+COPY src ./src
+RUN npm run build
+
+
+# nginx-unprivileged: runs as a non-root user on port 8080 out of the box,
+# matching the runAsNonRoot security context every other workload in this
+# platform runs under (see services/order-api/Dockerfile).
+FROM docker.io/nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+COPY --from=builder /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 8080
+```
+
+**`frontend/.dockerignore`**
+
+```
+node_modules
+dist
+```
+
+And the Pants targets over them:
+
+**`deploy/charts/order-platform/templates/frontend.yaml`**
+
+```yaml
+{{- if .Values.frontend.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frontend
+  labels: {{- include "op.labels" (dict "name" "frontend" "root" $) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels: {{- include "op.labels" (dict "name" "frontend" "root" $) | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      # No checksum/config annotation: the frontend consumes no chart-managed
+      # config, so there is no ConfigMap to hash and nothing that can change
+      # without changing the pod template itself.
+      labels: {{- include "op.labels" (dict "name" "frontend" "root" $) | nindent 8 }}
+    spec:
+      # Kubernetes injects a Docker-link env var per Service in this namespace:
+      # ORDER_API_PORT, ORDER_WORKER_PORT, PRICING_PORT, FRONTEND_PORT — each
+      # set to "tcp://<clusterIP>:<port>". Any app reading a variable of that
+      # name as its own config gets a URL where it expected an integer:
+      #   ValueError: invalid literal for int() with base 10: 'tcp://10.96...'
+      # Env vars outrank every other config source, so the app cannot win.
+      # Service links are a Docker-links relic nothing here uses.
+      enableServiceLinks: false
+      serviceAccountName: frontend
+      imagePullSecrets:
+        - name: {{ include "op.imagePullSecret" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: frontend
+          image: {{ include "op.image" (dict "root" $ "img" .Values.frontend.image) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: {{ .Values.frontend.port }} }
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 5
+            failureThreshold: 2
+          resources: {{- toYaml .Values.frontend.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            # nginx-unprivileged needs to write its pid file, client body temp
+            # files and cache dirs even though the image itself is read-only.
+            - { name: tmp, mountPath: /tmp }
+            - { name: cache, mountPath: /var/cache/nginx }
+            - { name: run, mountPath: /var/run }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: cache, emptyDir: {} }
+        - { name: run, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  labels: {{- include "op.labels" (dict "name" "frontend" "root" $) | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: frontend
+  ports:
+    - { name: http, port: 80, targetPort: http }
+{{- include "op.pdb" (dict "name" "frontend" "root" $ "replicas" .Values.frontend.replicas "selector" (dict "app.kubernetes.io/name" "frontend")) }}
+{{- end }}
+```
+
+> **The chart gains a `frontend` Deployment, Service and VirtualService route.** It is the first
+> workload here that is not a service in the `services/` sense, and it still goes through the same
+> chart — one place that knows what runs in `shop`.
+
 **`frontend/BUILD`**
 
 ```python
@@ -2316,6 +3540,62 @@ ingress-nginx's admission webhook rejects a duplicate host/path outright.
 
 ### 19.5 One CI step instead of two
 
+
+**`pants.ci.toml`**
+
+```toml
+# CI-only Pants configuration. Layered on top of pants.toml, not a replacement
+# for it: the pipeline sets
+#
+#   PANTS_CONFIG_FILES=pants.ci.toml
+#
+# which is the mechanism the "Using Pants in CI" guide documents for exactly
+# this — https://www.pantsbuild.org/stable/docs/using-pants/using-pants-in-ci
+#
+# Everything here is a setting that is right in a pod and wrong on a laptop.
+# Nothing that affects what gets built or how it is built belongs in this file;
+# a CI-only build setting is a CI-only bug waiting to happen.
+
+[GLOBAL]
+# Colors often work in CI, but the shell is usually not a TTY so Pants
+# doesn't attempt to use them by default. Buildkite renders ANSI colour in the
+# log, so turning them back on is free readability.
+colors = true
+
+[stats]
+# Logs cache hit/miss counts and timings at the end of the run. This is the
+# only visibility anyone gets into whether the Pants cache is doing anything in
+# CI — without it, a run that recompiles the world looks identical to one that
+# hits cache on everything, except slower.
+log = true
+
+# Coverage is deliberately NOT enabled here.
+#
+# `[test] use_coverage = true` is in the documented CI template, and on this
+# repo it crashes Pants 2.33.0 outright:
+#
+#   pants/backend/go/util_rules/coverage_output.py, go_render_coverage_report
+#     raw_coverage_profile=digest_contents[0].content
+#   IndexError: tuple index out of range
+#
+# The flag is global, so it turns on Go coverage too, and the Go backend
+# indexes the first element of an empty result when a test target produces no
+# profile. There is no per-language switch.
+#
+# Nothing consumed the report anyway: `artifact_paths: "dist/*"` matches one
+# level deep and the report lands two deep. Turn this on the day something
+# reads it, and scope it to Python when Pants can.
+
+[pytest]
+# -vv names each test in the log, which is what you want when the only record
+# of a failed CI run is its log. --no-header drops the platform/rootdir banner
+# that Buildkite already shows.
+args = ["-vv", "--no-header"]
+```
+
+> **A second config, not a pile of flags.** `PANTS_CONFIG_FILES` layers this over `pants.toml` in CI
+> only, so the local developer experience and the CI one differ in exactly the ways written here and
+> nowhere else.
 The Python step and the Go step are gone. In their place, one step in `.buildkite/pipeline.sh`:
 
 ```yaml
@@ -2455,9 +3735,92 @@ Some facts span two files in two languages with nothing connecting them. Those g
 **The OpenAPI spec is derived, not authored.** Backstage's catalog reads `services/order-api/openapi.json`
 from git, but FastAPI builds that document from route signatures at runtime, so the checked-in copy
 can only ever be a snapshot. `services/order-api/BUILD` makes regenerating it a target, and a test
-fails when the two drift:
+fails when the two drift. The dumper, the test, and the `BUILD` file those two need — which now
+carries four targets it did not at [§17.5](#175-targets-and-the-two-files-that-decide-whether-the-checks-pass):
+
+**`services/order-api/openapi_dump.py`**
 
 ```python
+"""Print order-api's OpenAPI document to stdout.
+
+The Backstage catalog needs a spec file it can read from git (`API/orders` in
+`catalog-info.yaml`). FastAPI builds that document from the route signatures at
+runtime, so the checked-in copy is derived, not authored:
+
+    pants run services/order-api:dump-openapi > services/order-api/openapi.json
+
+`tests/test_openapi_spec.py` fails if the two drift, which is the only thing
+keeping the catalog honest — a hand-maintained API spec is a lie with a
+timestamp on it.
+"""
+
+import json
+import os
+import sys
+
+# Settings are read at import time and fail closed on a missing broker list
+# (§3.1). Nothing here connects to anything — the document is built from the
+# route signatures — so placeholders are enough to get the module imported.
+os.environ.setdefault("KAFKA_BROKERS", "localhost:9092")
+os.environ.setdefault("S3_BUCKET", "unused")
+os.environ.setdefault("ORDER_SIGNING_KEY", "unused")
+
+from order_api.main import app  # noqa: E402
+
+
+def main() -> None:
+    json.dump(app.openapi(), sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+**`services/order-api/tests/test_openapi_spec.py`**
+
+```python
+"""The checked-in OpenAPI document must match what the app actually serves.
+
+`catalog-info.yaml` points Backstage at `services/order-api/openapi.json`. A spec
+that drifts from the code is worse than no spec: the portal keeps rendering it,
+confidently, long after the route changed. This test is the thing that stops
+that, and it is the reason the file is generated rather than written.
+"""
+
+import json
+import os
+from pathlib import Path
+
+os.environ.setdefault("KAFKA_BROKERS", "localhost:9092")
+os.environ.setdefault("S3_BUCKET", "test-bucket")
+os.environ.setdefault("ORDER_SIGNING_KEY", "test-key")
+
+from order_api.main import app  # noqa: E402
+
+# tests/ sits at the source root (`/services/order-api`), so the spec is one
+# level up from this file inside the Pants sandbox.
+SPEC = Path(__file__).parent.parent / "openapi.json"
+
+
+def test_checked_in_spec_matches_the_running_app():
+    assert SPEC.exists(), (
+        f"{SPEC.name} is missing; run `pants run services/order-api:dump-openapi`"
+    )
+    assert json.loads(SPEC.read_text()) == app.openapi(), (
+        "openapi.json is stale. Regenerate it:\n"
+        "  pants run services/order-api:dump-openapi > services/order-api/openapi.json"
+    )
+```
+
+**`services/order-api/BUILD`**
+
+```python
+python_sources(
+    name="lib",
+    sources=["order_api/**/*.py"],
+)
+
 python_sources(
     name="tools",
     sources=["openapi_dump.py"],
@@ -2473,6 +3836,35 @@ pex_binary(
 resource(
     name="openapi-spec",
     source="openapi.json",
+)
+
+python_tests(
+    name="tests",
+    # `!tests/__init__.py`: it's a namespace marker, not a test — including it
+    # makes Pants generate a `python_test` target for it that pytest then fails
+    # with "no tests collected".
+    sources=["tests/**/*.py", "!tests/__init__.py"],
+    # `:openapi-spec` is a resource, not code, so nothing infers it — the drift
+    # test reads it off disk by path.
+    dependencies=[":lib", ":openapi-spec"],
+)
+
+pex_binary(
+    name="bin",
+    # Declares this target as something CI ships. `pants --tag=deployable
+    # package ::` selects on it, so a service is packaged the moment it says
+    # so itself — no list in the pipeline to keep in sync.
+    tags=["deployable"],
+    entry_point="order_api.main:main",
+    dependencies=[":lib"],
+    # The cluster runs linux/aarch64, not this macOS laptop. Without this,
+    # `pants package` resolves macOS wheels for native deps (grpcio,
+    # pydantic-core, uvloop, watchfiles) that import-fail in the container.
+    complete_platforms=["3rdparty/python:linux-platform"],
+    # Land in dist/ under a predictable name so dist/ can be used
+    # directly as the Buildah build context and the Dockerfile can COPY by
+    # name. Default would be dist/services.<name>/bin.pex.
+    output_path="order-api.pex",
 )
 ```
 
@@ -2512,7 +3904,7 @@ tries to resolve the name.
 `verify_chart.py` runs as a plain script rather than through Pants, for the same reason
 `verify_doc_listings.py` does: it reads files a hermetic sandbox would not contain. That has two
 consequences in the repo. It still needs an owning target, or `pants tailor --check` reports the file
-as unowned — hence the glob in **`checks/BUILD`**:
+`checks/` is a Python package, so it needs **`checks/__init__.py`** — an empty file — and its scripts need an owning target, or `pants tailor --check` reports them as unowned. Hence the glob in **`checks/BUILD`**:
 
 ```python
 python_sources(

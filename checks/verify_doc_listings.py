@@ -218,6 +218,48 @@ def elided_listings(repo):
     return out
 
 
+# Files the reader is never meant to type: generated, vendored, produced by a
+# tool the docs invoke, or belonging to the docs' own machinery.
+UNLISTED_OK = re.compile(
+    r"^(\.claude/|checks/(build_single_edition|test_docs_are_current)\.py$"
+    r"|deploy/backstage/templates/|locks/|portal/|frontend/node_modules/"
+    r"|3rdparty/python/linux\.json$|services/order-worker/go\.sum$"
+    r"|frontend/package-lock\.json$|.*/openapi\.json$)"
+)
+
+
+def unlisted_files(repo):
+    """A file the reader must have and is never shown is a wall, not a gap.
+
+    §19 shipped a `pricing` service whose settings, package markers, tests and
+    Dockerfile appeared in no listing, and §17 never listed a single `BUILD`
+    file. Both read as complete prose. The only way to see it is to ask which
+    tracked files the docs never name.
+    """
+    repo = Path(repo)
+    import subprocess
+
+    tracked = subprocess.run(
+        ["git", "-C", str(repo), "ls-files"], capture_output=True, text=True
+    ).stdout.split("\n")
+    docs = " ".join(
+        p.read_text() for p in sorted((repo / "docs").glob("*.md"))
+    )
+    out = []
+    for f in tracked:
+        f = f.strip()
+        if not f or f.startswith(("docs/", "modern-devops-wiki/", "raw/", ".git")):
+            continue
+        if f in ("CLAUDE.md", "README.md", "modern-devops-tutorial.md", ".gitignore"):
+            continue
+        if UNLISTED_OK.match(f):
+            continue
+        if f"`{f}`" in docs:
+            continue
+        out.append(f"{f} — tracked, required, and named in no listing")
+    return out
+
+
 def main():
     """Exit non-zero only on the two rules that are unambiguous.
 
@@ -230,6 +272,7 @@ def main():
     missing = missing_paths(repo)
     incomplete = drifted_complete_listings(repo)
     elided = elided_listings(repo)
+    unlisted = unlisted_files(repo)
     partial = drifted_final_listings(repo)
 
     for x in missing:
@@ -238,10 +281,12 @@ def main():
         print("  STALE     " + x)
     for x in elided:
         print("  FRAGMENT  " + x)
+    for x in unlisted:
+        print("  UNLISTED  " + x)
     for x in partial:
         print("  review    " + x)
 
-    hard = len(missing) + len(incomplete) + len(elided)
+    hard = len(missing) + len(incomplete) + len(elided) + len(unlisted)
     print(f"\nfailures: {hard}    for review (progressive snapshots): {len(partial)}")
     return 1 if hard else 0
 

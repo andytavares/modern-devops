@@ -611,6 +611,25 @@ The `Dockerfile` is the same four-line shape order-api's has, deliberately — a
 
 For the chart to render these files, add one template that reads the directory:
 
+**`deploy/charts/order-platform/templates/configmap-scaffolded.yaml`**
+
+```yaml
+{{- if .Files.Glob "services/*.yaml" }}
+{{/*
+Every scaffolded service takes the same config, so they share one ConfigMap.
+Rendered only when at least one service has been scaffolded, so an install with
+none does not leave an orphan object behind.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scaffolded-config
+  labels: {{- include "op.labels" (dict "name" "scaffolded" "root" $) | nindent 4 }}
+data:
+  {{- include "op.commonConfig" . | nindent 2 }}
+{{- end }}
+```
+
 **`deploy/charts/order-platform/templates/scaffolded.yaml`**
 
 ```yaml

@@ -707,3 +707,40 @@ files, a record of what was learned.
   global `ignore_missing_imports = true` clears all three errors and simultaneously silences every
   typo in your own imports — the entire class of error mypy exists to catch. **An exception you cannot
   write a sentence to justify is one you should not take.**
+
+- **2026-08-23** — **Audited Phase 7 by executing it. 29 files the reader needs were named in no
+  listing, and the audit is now a build gate.**
+
+  The human's verdict on §17–§19 — *"literally NOTHING has worked the first time yet"* — was correct
+  and the reason was structural, not a run of bad luck. The phase reads as complete prose while
+  omitting the files it depends on. Prose review cannot see that. The only test is asking which
+  tracked files the docs never name.
+
+  **What the sweep found**, beyond the `BUILD`/`mypy.ini` gaps fixed an entry earlier:
+
+  - **The entire `frontend/`** — 13 files. §19.4 listed `frontend/BUILD` and `frontend/src/BUILD`,
+    the Pants targets *over* an application that appeared nowhere: no `package.json`, no
+    `vite.config.ts`, no `main.ts`, no `Dockerfile`.
+  - **Five of `pricing`'s seven files** — `__init__.py`, `settings.py`, `tests/__init__.py`,
+    `tests/test_pricing.py`, and the `Dockerfile` that §19.5's own discovery loop
+    (`[ -f "$s/Dockerfile" ]`) requires in order to consider `pricing` a service at all.
+  - **`services/order-api/openapi_dump.py`** and **`tests/test_openapi_spec.py`** — §19.6 runs
+    `pants run services/order-api:dump-openapi` against neither.
+  - **`pants.ci.toml`**, five `configmap-*.yaml` templates, `frontend.yaml`, `.helmignore`,
+    `checks/__init__.py`, and both `order-api` package markers.
+
+  **Executed in the reader's repo, in order, at each step:** `pants export-codegen` → five generated
+  files, `pants check ::` green; pricing added → `pants lint check test ::` green across four suites;
+  `pants package services/pricing:bin` → a PEX with **181 manylinux wheels and zero macosx**, which is
+  the §19.2 assertion verified rather than asserted; `pants run services/order-api:dump-openapi` →
+  a real spec. Committed and pushed there.
+
+  **The gate:** `verify_doc_listings.py` gained `unlisted_files` — every tracked file must be named in
+  a listing, and it is a **hard failure**. The exemption list is explicit and short: generated output,
+  vendored lockfiles, `portal/` (scaffolded by `create-app`), Backstage's own skeleton templates, and
+  the docs' machinery. Anything else that lands in the repo without a listing now fails the build.
+
+  Three checks now stand between the docs and this class of defect, and they are worth naming
+  together, because each one exists because the previous two missed something: listings must be
+  **current** (subsequence), must be **whole files** (no elisions), and must be **complete**
+  (no required file unnamed). See [[progressive-build]].
