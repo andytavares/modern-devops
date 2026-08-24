@@ -641,3 +641,35 @@ files, a record of what was learned.
   `[[kiali]]`. Those render as literal double brackets to a reader of the tutorial, which is not the
   audience for this wiki's link syntax. Replaced with plain names. `[[tool.uv.index]]` stays: that is
   TOML, not a link.
+
+- **2026-08-23** — **§17.3 generated a lockfile ~1,500 lines before it created the requirements.**
+  `pants generate-lockfiles --resolve=python-default` →
+  `ValueError: Cannot generate lockfile with no requirements. Please add some requirements to
+  python-default.`
+
+  `generate-lockfiles` resolves what a `python_requirements` target points at, and there was none:
+  §17.3 ran the command at line 290 while `3rdparty/python/BUILD` was first listed at line **1810**,
+  in §19.2. Its own next line, `git add locks/python-default.lock 3rdparty/python`, referenced a
+  directory the reader had never created. Fourth instance of the pattern — a step whose prerequisite
+  lives in a later section.
+
+  Worse: **`3rdparty/python/requirements.txt` was never listed anywhere in the tutorial.** Four
+  sections say "add X to `3rdparty/python/requirements.txt`" and none of them ever shows the file. The
+  reader is asked to edit something they were never given.
+
+  Fixed: §17.3 now lists `requirements.txt` and `3rdparty/python/BUILD` in full **before** the lock is
+  generated, and the later references change from "add X" to "X is already there, and here is why it
+  needs naming". One resolve, one lock, no re-locking mid-phase — the right workflow on a real repo is
+  re-running `generate-lockfiles`, and pure friction in a tutorial.
+
+  **Verified end to end rather than reasoned:** created both files in the reader's repo and ran the
+  command. It resolved the full closure — fastapi, grpcio, boto3, mypy, the type stubs — and wrote a
+  122,954-byte `locks/python-default.lock`. Committed and pushed.
+
+  **And a defect found by making my own mistake.** `git add -A` in that repo staged `.pants.d/` — pid
+  files and Pants' local cache — because the reader's `.gitignore`, written in Phase 1, has no Pants
+  entries and **the tutorial never lists `.gitignore` at all**, while the reference repo's has
+  `/dist/`, `.pants.d/` and `.pids/`. Anyone reaching this phase and typing `git add -A` commits a
+  build cache. §17.3 now shows the whole `.gitignore` before the first Pants `git add`, with the note
+  that Pants reads only the **root** one — `--pants-ignore-use-gitignore` does not descend into nested
+  ignore files, which is why every ignore in this build lives there.

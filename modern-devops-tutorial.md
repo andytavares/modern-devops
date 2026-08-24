@@ -8251,11 +8251,108 @@ The non-obvious lines:
   service ships only what it imports — one requirements file does not mean one fat artifact.
 - **`generate_type_stubs`** is [§18.3](#183-why-protoc-must-emit-pyi-stubs).
 
-Generate the lockfile and commit it:
+**Declare the third-party Python before you lock it.** `generate-lockfiles` resolves the requirements
+Pants can see, and it can see none until a `python_requirements` target points at a file. Run it now
+and it stops with `ValueError: Cannot generate lockfile with no requirements. Please add some
+requirements to python-default.`
+
+**`3rdparty/python/requirements.txt`**
+
+```
+# Third-party Python for the whole monorepo, resolved once into
+# locks/python-default.lock. Pants computes per-target dependencies from
+# imports, so a service only ships what it actually uses — one requirements
+# file does not mean one fat PEX.
+#
+# Versions are pinned by the lockfile, which is committed. Pinning here as well
+# would mean two places to update and one of them silently winning.
+
+# --- gRPC + protobuf runtime (generated code needs these at run time) ---
+grpcio
+grpcio-tools
+protobuf
+# The health checking protocol and server reflection are first-party gRPC
+# add-ons, shipped as separate packages by design. Health is what Kubernetes'
+# `grpc:` probe and grpc_health_probe speak; reflection is what lets grpcurl
+# talk to a server without a local copy of the .proto.
+grpcio-health-checking
+grpcio-reflection
+
+# --- order-api ---
+fastapi[standard]==0.139.2
+aiokafka==0.12.0
+boto3==1.40.11
+prometheus-client==0.23.1
+pydantic==2.11.7
+# FastAPI documents pydantic-settings for exactly the job settings.py was doing
+# by hand: parse the environment, cast it, validate it, and report every missing
+# variable at once instead of only the first.
+pydantic-settings==2.7.1
+
+# --- test + typecheck ---
+pytest==8.4.1
+httpx==0.28.1
+mypy
+types-protobuf
+# grpcio ships no py.typed marker, so mypy cannot see its types at all. Verified
+# via `pants export --resolve=python-default` that site-packages has no py.typed
+# under grpc/ — mypy's own suggestion to install these stubs is correct.
+types-grpcio
+```
+
+**`3rdparty/python/BUILD`**
+
+```python
+python_requirements(
+    name="reqs",
+    source="requirements.txt",
+)
+```
+
+> **One requirements file for the whole monorepo, and everything is here from the start.** The
+> packages this phase has not explained yet — `pydantic-settings` in
+> [§18.6](#186-order-api-calls-pricing), the two gRPC add-ons in
+> [§19.4](#194-the-grpc-server-health-checking-and-reflection), `types-grpcio` — are in the list now
+> so the lockfile is generated **once**. Adding a requirement later means re-running
+> `generate-lockfiles` and committing a new lock, which is the right workflow on a real repo and pure
+> friction in a tutorial. The comments in the file say what each group is for; the sections below say
+> why.
+
+Pants writes its caches and its build output into the repo, so extend the root `.gitignore` before
+the next `git add`. Without `.pants.d/`, a `git add -A` commits a daemon's pid files and a
+several-hundred-megabyte local cache.
+
+**`.gitignore`**
+
+```
+.venv/
+__pycache__/
+bin/
+*.pyc
+.DS_Store
+
+# Pants build output
+/dist/
+.pants.d/
+.pids/
+__pycache__/
+
+# `go build` inside a service directory drops a binary named after the module,
+# next to the source. A 27MB compiled binary was tracked here for exactly that
+# reason.
+/services/order-worker/order-worker
+```
+
+> **Pants reads only the root `.gitignore`.** `--pants-ignore-use-gitignore` "does not yet support
+> reading nested gitignore files", so a `frontend/.gitignore` never reaches Pants and `tailor` walks
+> into `node_modules` ([§17.4](#174-source-roots-and-the-duplicate-module-trap)). This is the one that
+> matters, which is why every ignore in this build lives here.
+
+Now generate the lockfile and commit it:
 
 ```bash
 pants generate-lockfiles --resolve=python-default
-git add locks/python-default.lock 3rdparty/python
+git add .gitignore locks/python-default.lock 3rdparty/python
 ```
 
 ### 17.4 Source roots, and the duplicate-module trap
@@ -8715,7 +8812,8 @@ downstream ([§19.4](#194-the-frontend-vite-and-a-live-tally),
 **Address and deadlines.** `order-api`'s settings module is now a `pydantic-settings` `BaseSettings`
 subclass. Hand-rolled environment parsing is the job that library exists to do, and it is the approach
 FastAPI documents. Replace [§3.1](#31-order-api-python--fastapi)'s version
-with this, and add `pydantic-settings` to `3rdparty/python/requirements.txt`:
+with this. `pydantic-settings` is already in `3rdparty/python/requirements.txt` and in the lock
+([§17.3](#173-pantstoml)), so there is nothing to re-resolve:
 
 **`services/order-api/order_api/settings.py`**
 
@@ -9107,9 +9205,9 @@ if __name__ == "__main__":
 ```
 
 `grpcio-health-checking` ships no `py.typed` marker, so the ignore goes on the import rather than in a
-global `ignore_missing_imports` — which would silence real typos in every other module too. Add
-`grpcio-health-checking` and `grpcio-reflection` to `3rdparty/python/requirements.txt`; they are
-first-party gRPC add-ons shipped as separate packages.
+global `ignore_missing_imports` — which would silence real typos in every other module too. `grpcio-health-checking` and `grpcio-reflection` are
+already in `3rdparty/python/requirements.txt` ([§17.3](#173-pantstoml)) — they are first-party gRPC
+add-ons shipped as separate packages, which is why they need naming at all.
 
 ```python
 PRICING_CALLS = Counter(
