@@ -1,0 +1,36 @@
+modern-devops-tutorial.md
+  s_513c4510dbcf04::t_f735f6b974658c 3246-3297
+  s_513c4510dbcf04::t_6f141c56a6a3fd 3317-3328,3330-3334,3336-3352,3356-3358,5217-5231,8842
+docs/appendices.md
+  s_513c4510dbcf04::t_6f141c56a6a3fd 74
+deploy/charts/order-platform/templates/podmonitor.yaml
+  s_513c4510dbcf04::t_520e042d6ef4e7 17-20,22-34,36-53
+docs/phase-4-service-mesh.md
+  s_513c4510dbcf04::t_6f141c56a6a3fd 512-526
+modern-devops-wiki/tools/prometheus.md
+  s_513c4510dbcf04::t_d4018bb6805b16 8,96-155
+  s_513c4510dbcf04::t_03c3d782a95ba4 156
+deploy/charts/order-platform/values.yaml
+  s_513c4510dbcf04::t_bae87e3bc2322a 106-107
+docs/phase-1-the-application.md
+  s_513c4510dbcf04::t_6f141c56a6a3fd 2561-2564,2566-2578,2580-2596,2600-2602
+  s_513c4510dbcf04::t_bae87e3bc2322a 2490-2541
+modern-devops-wiki/log.md
+  s_513c4510dbcf04::t_0d4954567b6ece 373-431
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "9a72b0e54a4947c833f35de5410551f12fbb2251",
+  "prompts": {},
+  "sessions": {
+    "s_513c4510dbcf04": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e8a40aa2-818d-44cb-b795-8f7ebab27e87",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Andrew <andrew.tavaes87@gmail.com>"
+    }
+  }
+}
