@@ -574,6 +574,41 @@ docker login nexus:8082 -u ci -p 'ci-password-change-me'
 # Login Succeeded
 ```
 
+> [!warning] **Get this password wrong three times and Nexus stops answering you for up to 15 minutes — with the right password.**
+> Nexus 3.93.0 added authentication rate limiting, on by default
+> ([Sonatype](https://help.sonatype.com/en/authentication-attempt-rate-limiting.html)). After
+> **three consecutive failures** it returns `429 Too many authentication attempts` with a
+> `Retry-After`, and the delay grows exponentially with each further attempt — `base-delay-seconds=30`
+> to `max-delay-seconds=900`:
+>
+> ```
+> HTTP/1.1 429 Too many authentication attempts
+> Retry-After: 60
+> ```
+>
+> Three things make this nastier than it sounds, and all three will happen to you:
+>
+> 1. **While the window is open, a correct password is refused too** — Sonatype's wording is "for all
+>    subsequent authentication attempts until the limit expires, **regardless of credential
+>    validity**". So fixing the password does not appear to fix anything.
+> 2. **Every attempt during the window extends it.** Retrying by hand to check whether it is fixed is
+>    the exact thing that keeps it broken, and CI retrying does it automatically.
+> 3. **The client does not say `429`.** Buildah reports `authentication required`, which reads like a
+>    credential problem and sends you back to re-check the password you already fixed.
+>
+> The reset is deterministic — the tracker is in memory, so restarting Nexus clears it immediately:
+>
+> ```bash
+> docker restart nexus
+> # then ONE attempt, not a loop
+> ```
+>
+> A successful authentication also resets the counter for that user, but you cannot get one while the
+> window is open. We do **not** turn the limiter off (`nexus.auth.ratelimit.enabled=false` in
+> `/nexus-data/etc/nexus.properties`, restart required): it is a real brute-force control, and the
+> lesson worth keeping is that a security feature you did not know about turns a 30-second credential
+> fix into a 15-minute outage that names the wrong cause. Appendix B has the recovery.
+
 ### 5.9 Teach containerd (on the kind nodes) about Nexus
 
 
@@ -1016,6 +1051,14 @@ Three decisions worth naming:
 - **S3 write happens before the Kafka publish.** If the publish fails, we've stored an orphan object — cheap and recoverable. If we published first and the S3 write failed, the worker would consume an event pointing at an object that doesn't exist. Order your side effects so the recoverable failure is the likely one.
 - **`acks="all"` + idempotence.** The default is faster and will silently lose writes when a broker restarts. On a 3-broker cluster you want durability; on a benchmark you want speed. Know which one you configured.
 - **Partition key = order id.** Kafka only guarantees ordering *within a partition*. Keying by order id means all events for one order land on one partition, so a later "order cancelled" can never overtake "order created".
+
+Both directories are Python packages, so both need a marker file — empty, and required:
+
+```bash
+touch services/order-api/order_api/__init__.py services/order-api/tests/__init__.py
+```
+
+**`services/order-api/order_api/__init__.py`** and **`services/order-api/tests/__init__.py`** stay empty for the life of this build.
 
 **`services/order-api/tests/test_api.py`**
 
@@ -1555,6 +1598,47 @@ lose data silently, so it gets tests that fail if anyone reintroduces the naive 
 **`services/order-worker/main_test.go`**
 
 ```go
+package main
+
+import (
+	"context"
+	"errors"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/twmb/franz-go/pkg/kgo"
+)
+
+func TestLoadConfigRequiresBrokers(t *testing.T) {
+	os.Clearenv()
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected an error when KAFKA_BROKERS is unset")
+	}
+}
+
+func TestLoadConfigDefaults(t *testing.T) {
+	os.Clearenv()
+	t.Setenv("KAFKA_BROKERS", "a:9092,b:9092")
+	t.Setenv("DDB_TABLE", "orders")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.brokers) != 2 {
+		t.Fatalf("expected 2 brokers, got %d", len(cfg.brokers))
+	}
+	if cfg.topic != "orders" {
+		t.Fatalf("expected default topic 'orders', got %q", cfg.topic)
+	}
+	if cfg.group != "order-worker" {
+		t.Fatalf("expected default group 'order-worker', got %q", cfg.group)
+	}
+}
+
 var errWriteFailed = errors.New("dynamodb is having a day")
 
 // fakeDDB records every PutItem it is asked to make and fails the ones whose
@@ -1600,7 +1684,32 @@ func partitionOf(orderIDs ...string) kgo.FetchTopicPartition {
 	return p
 }
 
-// ...
+func equalOffsets(got, want []int64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestProcessPartitionMarksEveryRecordThatWasWritten(t *testing.T) {
+	ddb := &fakeDDB{}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("a", "b", "c"))
+
+	if !equalOffsets(m.marked, []int64{0, 1, 2}) {
+		t.Fatalf("expected offsets 0,1,2 to be marked, got %v", m.marked)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("expected no blocked partitions, got %v", blocked)
+	}
+}
 
 // This is the regression test for the commit semantics: a failed DynamoDB write
 // must stop the commit boundary dead. If someone reintroduces marking (and so
@@ -1643,12 +1752,70 @@ func TestProcessPartitionStaysBlockedOnLaterBatches(t *testing.T) {
 		t.Fatalf("a blocked partition must not be written again, got puts %v", ddb.puts)
 	}
 }
+
+// A blocked partition is only cleared by a revoke, which happens outside this
+// function; clearing the entry lets the partition make progress again.
+func TestProcessPartitionResumesOnceUnblocked(t *testing.T) {
+	ddb := &fakeDDB{failOn: map[string]bool{"a": true}}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+	key := partitionKey{topic: "orders", partition: 3}
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("a"))
+	delete(blocked, key)
+
+	ddb.failOn = nil
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("f"))
+
+	if !equalOffsets(m.marked, []int64{0}) {
+		t.Fatalf("expected offset 0 marked after unblocking, got %v", m.marked)
+	}
+}
+
+// A malformed record can never become valid, so handle skips it. It must still
+// be marked, or one bad message would pin the partition's commit forever.
+func TestProcessPartitionMarksMalformedRecords(t *testing.T) {
+	ddb := &fakeDDB{}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+
+	p := partitionOf("a")
+	p.Records[0].Value = []byte("{not json")
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, p)
+
+	if !equalOffsets(m.marked, []int64{0}) {
+		t.Fatalf("expected the malformed record to be marked, got %v", m.marked)
+	}
+	if len(ddb.puts) != 0 {
+		t.Fatalf("expected no write for a malformed record, got puts %v", ddb.puts)
+	}
+}
+
+func TestHandleWrapsPutItemError(t *testing.T) {
+	ddb := &fakeDDB{failOn: map[string]bool{"a": true}}
+	r := partitionOf("a").Records[0]
+
+	err := handle(context.Background(), ddb, "orders", r)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, errWriteFailed) {
+		t.Fatalf("expected the underlying error to be wrapped, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "order_id=a") {
+		t.Fatalf("expected the error to name the order, got %q", err.Error())
+	}
+}
 ```
 
-The repo file carries three more: the happy path (`equalOffsets(m.marked, []int64{0, 1, 2})`), one
+Five tests, and the two in the middle are the ones that matter: a failed write must stop the commit
+boundary dead, and it must *stay* stopped on the next batch. The other three cover the happy path,
 that a malformed record is still marked — otherwise one bad message pins the partition's commit
-forever — and one that `handle` wraps the `PutItem` error with the `order_id`. The imports and the
-`equalOffsets` helper are there too.
+forever — and that `handle` wraps the `PutItem` error with the `order_id`.
+
+This listing replaces the one above rather than appending to it: the import block grows, and Go
+rejects both an undefined identifier and an unused import, so the file only compiles as a whole.
 
 > **At-least-once vs exactly-once.** An offset is marked, and so committed, only *after* the DynamoDB write returns success. A crash in between replays the record. Because `PutItem` with the same `order_id` overwrites rather than duplicates, replay is a no-op — the write is idempotent, so at-least-once delivery gives us effectively-once *results*. Exactly-once across Kafka and DynamoDB would need transactional coordination the two systems don't share. **The general lesson: don't buy exactly-once delivery; make your writes idempotent and buy at-least-once, which is cheap.**
 
@@ -2073,6 +2240,12 @@ echo "policy and role created"
 '
 ```
 
+> **This is in-memory state, and it does not survive a restart.** Dev-mode OpenBao keeps the mount,
+> the secrets, the auth methods, the policies and the roles in RAM. When that pod restarts — and it
+> will — all of it is gone, and the first thing you see is External Secrets getting
+> `403 permission denied` from `/v1/auth/kubernetes/login`. Everything in §7.3 and §7.4 is packaged as
+> a re-runnable Job in [§7.5a](#75a-give-humans-an-auth-method-too); that Job is the recovery.
+
 > **Least privilege, concretely.** The `shop-read` policy grants `read` and nothing else — ESO cannot write, delete, or list secret *values*. The role is bound to one ServiceAccount in one namespace, so a compromised pod in another namespace cannot assume it. `ttl=1h` means a stolen token expires within the hour. Those three constraints — capability, identity binding, lifetime — are the whole of secrets access control. Every vault does it the same way.
 
 ### 7.5 Install External Secrets Operator
@@ -2209,38 +2382,83 @@ That 403 is the point of the section. The operator can rotate every credential o
 
 > **`bao kv patch` needs a separate `patch` capability, and it is deliberately not granted.** Every `kv put` in this tutorial is a full overwrite of the version: `kv put shop/backstage github_token=...` on a path that also holds `postgres_password` destroys the other keys. Write every key of a path in one command, and read the path first if you are unsure what is on it.
 
-The same three steps are packaged as a re-runnable Job, because dev-mode OpenBao loses everything on restart and you will need them again:
+Everything you have typed since [§7.3](#73-put-secrets-in-openbao) — the mount, the secrets on it,
+both auth methods, three policies, a role and a user — lives in memory in a dev-mode OpenBao and is
+gone the moment that pod restarts. It **will** restart. So all of it is packaged as one re-runnable
+Job:
 
-**`deploy/platform/openbao-operator-auth.yaml`**
+**`deploy/platform/openbao-bootstrap.yaml`**
 
 ```yaml
-# The human path into OpenBao.
+# Everything OpenBao forgets when its pod restarts, in one re-runnable Job.
 #
-# The machine path already exists: ESO authenticates with its ServiceAccount
-# through the kubernetes auth method and gets the read-only `shop-read` policy.
-# Humans have had nothing, so every operator write has been made with the root
-# token. The root policy is meant for initial setup and emergencies only and
-# should be revoked once a real auth method exists
-# (https://openbao.org/docs/concepts/tokens). This Job builds that auth method:
-# `userpass`, a scoped `shop-admin` policy, and an `operator` user bound to it.
+# This cluster runs OpenBao in dev mode: storage is in-memory, so a restart
+# takes the KV mount, the secrets in it, both auth methods, every policy and
+# every role with it. What survives is only what lives in the Kubernetes API —
+# the ClusterRoleBinding below, and the stale Secrets ESO last synced.
 #
-# Bootstrapping an auth method is itself a root operation — there is no way to
-# create the first non-root path without a root token. That token is supplied at
-# run time out of a Secret rather than committed here:
+# The symptom is not "OpenBao is empty". It is ESO failing to log in at all:
+#
+#   unable to log in with Kubernetes auth: Code: 403. Errors: * permission denied
+#
+# — because a login against an auth method that no longer exists is refused the
+# same way a login with the wrong role is. The ClusterSecretStore goes
+# InvalidProviderConfig and every ExternalSecret stops refreshing.
+#
+# Three sections' worth of setup, in build order:
+#   §7.3  the `shop` KV v2 mount and the secrets the platform consumes
+#   §7.4  the machine path — kubernetes auth, `shop-read`, the `eso` role
+#   §7.5a the human path — userpass, `shop-admin`, the `operator` user
+#
+# Bootstrapping is a root operation: mounting an engine writes `sys/mounts`,
+# enabling an auth method writes `sys/auth`, and writing a policy writes
+# `sys/policies/acl/*`. None of those are granted by any scoped policy, and an
+# identity that could write policies could grant itself anything. So the root
+# token is supplied at run time out of a Secret rather than committed here:
 #
 #   kubectl -n openbao create secret generic openbao-bootstrap \
 #     --from-literal=root-token=root \
 #     --from-literal=operator-password=<choose one> \
+#     --from-literal=nexus-password=ci-password-change-me \
 #     --dry-run=client -o yaml | kubectl apply -f -
 #
+# `nexus-password` must be the password the `ci` user actually has in Nexus
+# (§5.4), not the one the tutorial printed. Nexus owns that credential; this
+# Secret is a second copy of it, and two copies drift. Change it in Nexus and
+# this key becomes a time bomb: everything keeps working off the value already
+# in OpenBao until the next restart re-seeds the stale one, and the symptom is
+# a CI push failing `authentication required` hours later. Rotate both, or
+# neither.
+#
 # A Job's pod template is immutable once created, so re-running this is
-# `kubectl delete -f` then `kubectl apply -f`. The script itself is idempotent:
-# enabling an already-enabled auth method and rewriting an existing policy or
-# user are all no-ops.
+# `kubectl delete -f` then `kubectl apply -f`. The script is idempotent in the
+# way that matters: enabling an enabled mount or auth method and rewriting a
+# policy, role or user are all no-ops, and **existing secret values are left
+# alone**. Re-running it must never rotate a key that live pods are using.
+---
+# OpenBao verifies a presented ServiceAccount JWT by calling the Kubernetes
+# TokenReview API, which requires `system:auth-delegator` on its own
+# ServiceAccount. §7.4 creates this with `kubectl create clusterrolebinding`;
+# it is declared here too so that one `kubectl apply -f` restores the whole
+# machine path. It is cluster-scoped and survives an OpenBao restart, so on a
+# restart recovery this half is already in place and re-applying is a no-op.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openbao-token-review
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: openbao
+    namespace: openbao
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: openbao-operator-auth
+  name: openbao-bootstrap
   namespace: openbao
 spec:
   backoffLimit: 6
@@ -2264,6 +2482,9 @@ spec:
             - name: OPERATOR_PASSWORD
               valueFrom:
                 secretKeyRef: { name: openbao-bootstrap, key: operator-password }
+            - name: NEXUS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: openbao-bootstrap, key: nexus-password }
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -2272,6 +2493,70 @@ spec:
               echo "waiting for openbao..."
               until bao status >/dev/null 2>&1; do sleep 2; done
 
+              # --- §7.3 the mount, and the secrets on it -------------------
+              # KV v2: versioning and soft-delete. v1 is a flat overwrite with
+              # no history, which is the wrong default for application config.
+              echo "enabling kv v2 at shop/ (idempotent)"
+              bao secrets enable -path=shop -version=2 kv 2>/dev/null || true
+
+              # Only ever create what is missing. `kv put` is a full overwrite
+              # of the version, and a re-run that rotated the signing key would
+              # leave every running order-api pod holding the previous one.
+              if bao kv get -field=signing_key shop/order-api >/dev/null 2>&1; then
+                echo "shop/order-api exists, leaving it alone"
+              else
+                echo "seeding shop/order-api with a new signing key"
+                # No openssl in this image; od+tr over /dev/urandom is the
+                # busybox-safe way to get 32 hex-encoded random bytes.
+                bao kv put shop/order-api \
+                  signing_key="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              fi
+
+              if bao kv get -field=password shop/nexus >/dev/null 2>&1; then
+                echo "shop/nexus exists, leaving it alone"
+              else
+                echo "seeding shop/nexus"
+                bao kv put shop/nexus username=ci password="$NEXUS_PASSWORD"
+              fi
+
+              # --- §7.4 the machine path ----------------------------------
+              echo "enabling kubernetes auth (idempotent)"
+              bao auth enable kubernetes 2>/dev/null || true
+
+              # No token_reviewer_jwt and no kubernetes_ca_cert, deliberately.
+              # Omitting them is the documented configuration for an OpenBao
+              # inside the cluster it authenticates against: it then reads both
+              # from its own ServiceAccount mount on every request. Passing them
+              # freezes a snapshot of a token Kubernetes rotates hourly, and an
+              # hour later every TokenReview fails `permission denied` — the
+              # same 403 this Job exists to fix, with a much worse cause.
+              bao write auth/kubernetes/config \
+                kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+
+              # Read-only, and only on this mount. KV v2 stores data under
+              # <mount>/data/<path>; forgetting the /data/ segment is the
+              # second most common mistake with v2.
+              echo "writing shop-read policy"
+              bao policy write shop-read - <<'POLICY'
+              path "shop/data/*" {
+                capabilities = ["read"]
+              }
+              path "shop/metadata/*" {
+                capabilities = ["read", "list"]
+              }
+              POLICY
+
+              # Capability, identity binding, lifetime — the whole of secrets
+              # access control. One ServiceAccount, in one namespace, for an
+              # hour.
+              echo "binding the eso role to external-secrets"
+              bao write auth/kubernetes/role/eso \
+                bound_service_account_names=external-secrets \
+                bound_service_account_namespaces=external-secrets \
+                policies=shop-read \
+                ttl=1h
+
+              # --- §7.5a the human path -----------------------------------
               echo "enabling userpass (idempotent)"
               bao auth enable userpass 2>/dev/null || true
 
@@ -2299,18 +2584,37 @@ spec:
 
               echo "--- result ---"
               bao auth list
-              bao policy read shop-admin
+              bao secrets list
+              bao kv list shop/
+              bao read auth/kubernetes/role/eso
 ```
 
 ```bash
 kubectl -n openbao create secret generic openbao-bootstrap \
   --from-literal=root-token=root \
   --from-literal=operator-password=change-me \
+  --from-literal=nexus-password=ci-password-change-me \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl apply -f deploy/platform/openbao-operator-auth.yaml
-kubectl -n openbao logs job/openbao-operator-auth -f
+kubectl apply -f deploy/platform/openbao-bootstrap.yaml
+kubectl -n openbao logs job/openbao-bootstrap -f
 ```
+
+> **What a restart actually looks like, and why the error does not mention OpenBao.** In-memory
+> storage means a restarted OpenBao comes back with no `shop` mount, no `kubernetes` auth method, no
+> policies and no roles. What you see is External Secrets failing to log in:
+>
+> ```
+> unable to log in with Kubernetes auth: Error making API request.
+> URL: PUT http://openbao.openbao.svc.cluster.local:8200/v1/auth/kubernetes/login
+> Code: 403. Errors: * permission denied
+> ```
+>
+> **403 on a login is the same answer for "wrong role" and for "that auth method does not exist"**,
+> which sends people to debug their ServiceAccount binding when the mount is simply not there. Check
+> `bao auth list` before anything else. Recovery is `kubectl delete -f` then `kubectl apply -f` on
+> this Job — a Job's pod template is immutable, so it must be deleted and recreated, and the script is
+> written so a re-run never overwrites a secret value that is already present.
 
 > **The root token is not revoked here, and cannot be.** This cluster runs OpenBao in dev mode, where the root token is a fixed value passed at startup and recreated every time the pod restarts — revoking it accomplishes nothing. In a real cluster the last step of this section is `bao token revoke <root-token>`, after which a new root token exists only if you run `bao operator generate-root` with a quorum of unseal-key holders. That quorum requirement is the whole design: root is an event several people have to agree to, not a string in someone's shell history.
 
@@ -2859,6 +3163,9 @@ metadata:
   labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.orderWorker.replicas }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: order-worker
@@ -2872,16 +3179,28 @@ spec:
     metadata:
       labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 8 }}
       annotations:
-        checksum/config: {{ toJson .Values | sha256sum }}
+        # Hashes this service's rendered ConfigMap, which is what reaches the
+        # container through envFrom and therefore never changes the pod template
+        # on its own. Scoping the hash to one file is what keeps an image-tag
+        # rewrite elsewhere in the values tree from rolling this Deployment and
+        # triggering a consumer-group rebalance for no reason.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-order-worker.yaml") . | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ .Values.orderWorker.metricsPort | quote }}
     spec:
-      # Same reason as order-api: no Docker-link env vars in this pod.
+      # Kubernetes injects a Docker-link env var per Service in this namespace:
+      # ORDER_API_PORT, ORDER_WORKER_PORT, PRICING_PORT, FRONTEND_PORT — each
+      # set to "tcp://<clusterIP>:<port>". Any app reading a variable of that
+      # name as its own config gets a URL where it expected an integer:
+      #   ValueError: invalid literal for int() with base 10: 'tcp://10.96...'
+      # Env vars outrank every other config source, so the app cannot win.
+      # Service links are a Docker-links relic nothing here uses.
       enableServiceLinks: false
       serviceAccountName: order-worker
       imagePullSecrets:
-        - name: {{ .Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" . }}
       # Give the worker time to finish the in-flight batch and commit offsets
       # after SIGTERM before Kubernetes SIGKILLs it.
       terminationGracePeriodSeconds: 45
@@ -2893,15 +3212,13 @@ spec:
           image: {{ include "op.image" (dict "root" $ "img" .Values.orderWorker.image) }}
           imagePullPolicy: IfNotPresent
           ports:
-            # http-metrics, not metrics. Istio reads the protocol off the port
-            # name, and a name it does not recognise is treated as plain TCP.
             - { name: http-metrics, containerPort: {{ .Values.orderWorker.metricsPort }} }
+          envFrom:
+            - configMapRef: { name: order-worker-config }
           env:
-            {{- include "op.commonEnv" . | nindent 12 }}
-            - name: DDB_TABLE
-              value: {{ .Values.aws.ddbTable | quote }}
-            - name: KAFKA_GROUP
-              value: {{ .Values.orderWorker.consumerGroup | quote }}
+            {{- include "op.awsCredentialEnv" . | nindent 12 }}
+            # Image identity, not configuration: it tracks the tag, so it belongs
+            # in the pod template rather than in the ConfigMap.
             - name: SERVICE_VERSION
               value: {{ .Values.orderWorker.image.tag | quote }}
           startupProbe:
@@ -2931,6 +3248,7 @@ spec:
     app.kubernetes.io/name: order-worker
   ports:
     - { name: http-metrics, port: 9090, targetPort: http-metrics }
+{{- include "op.pdb" (dict "name" "order-worker" "root" $ "replicas" .Values.orderWorker.replicas "selector" (dict "app.kubernetes.io/name" "order-worker")) }}
 {{- end }}
 ```
 
@@ -2946,6 +3264,109 @@ spec:
 >
 > This bites at [Phase 4](#), not here — which is exactly why it goes in now.
 > Renaming a port later means editing the Service, the probes and every monitor that selects by name.
+
+**Two monitors ship, and exactly one is ever on.** Both start `false`, because
+`monitoring.coreos.com` does not exist until [§13.2](#132-install) installs
+kube-prometheus-stack — and Argo CD does not skip a resource whose CRD is missing, it fails the whole
+Application sync, which would strand every workload in `shop`.
+[§13.3](#133-confirm-your-app-is-being-scraped) turns on the `ServiceMonitor`;
+[§9.6](#96-the-metrics-problem-you-just-created) turns it off and the
+`PodMonitor` on, and the reason it has to is the most useful failure in this tutorial. Turning both on
+double-scrapes every target and doubles your counters.
+
+**`deploy/charts/order-platform/templates/configmap-order-api.yaml`**
+
+```yaml
+{{- if .Values.orderApi.enabled }}
+{{/*
+One ConfigMap per service, each in its own template file, so that the
+checksum/config annotation on a Deployment can hash exactly the file that holds
+that service's configuration and nothing else. A single shared config file would
+put every service's values back into every service's hash.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-api-config
+  labels: {{- include "op.labels" (dict "name" "order-api" "root" $) | nindent 4 }}
+data:
+  {{- include "op.commonConfig" . | nindent 2 }}
+  S3_BUCKET: {{ .Values.aws.s3Bucket | quote }}
+  # PEX unpacks its dependency closure here; see the /tmp volumeMount note on the
+  # Deployment.
+  PEX_ROOT: "/tmp/pex"
+{{- end }}
+```
+
+**`deploy/charts/order-platform/templates/configmap-order-worker.yaml`**
+
+```yaml
+{{- if .Values.orderWorker.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-worker-config
+  labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 4 }}
+data:
+  {{- include "op.commonConfig" . | nindent 2 }}
+  DDB_TABLE: {{ .Values.aws.ddbTable | quote }}
+  KAFKA_GROUP: {{ .Values.orderWorker.consumerGroup | quote }}
+{{- end }}
+```
+
+> **Non-secret configuration is a ConfigMap, and the Deployment hashes it.** That `checksum/config`
+> annotation above is what makes a config change roll the pods — Kubernetes does not restart
+> anything when a ConfigMap's contents change, and a process that read its environment at startup
+> never notices.
+
+**`deploy/charts/order-platform/.helmignore`**
+
+```
+BUILD
+```
+
+**`deploy/charts/order-platform/templates/servicemonitor.yaml`**
+
+```yaml
+{{- if .Values.serviceMonitor.enabled }}
+# The pre-mesh scrape path. Prometheus talks straight to each Service's metrics
+# port over plaintext, which is the obvious thing and works fine — right up
+# until STRICT mTLS (§9.4) starts refusing it, at which point every one of these
+# targets goes down and *nothing logs an error*.
+#
+# §9.6 is that failure. The fix is podmonitor.yaml, which scrapes the sidecar's
+# merged endpoint instead. Exactly one of these two should be enabled:
+#   before Istio -> serviceMonitor.enabled: true
+#   after Istio  -> podMonitor.enabled: true
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: order-platform
+  labels:
+    # kube-prometheus-stack's Prometheus selects monitors by this label in the
+    # default configuration we install in §13.
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames: ["shop"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: order-platform
+  endpoints:
+    # One entry per port name in use, because a ServiceMonitor selects by port
+    # *name* and silently skips a name that does not exist on a given Service.
+    # order-api serves the app and its metrics on `http`; order-worker and
+    # pricing expose `http-metrics` separately. The `http-` prefix is not
+    # decoration — Istio reads the protocol off the port name, and a name it
+    # does not recognise is treated as plain TCP.
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+    - port: http-metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}
+```
 
 **`deploy/charts/order-platform/templates/podmonitor.yaml`**
 
@@ -2966,24 +3387,48 @@ spec:
     matchLabels:
       app.kubernetes.io/part-of: order-platform
   podMetricsEndpoints:
-    # istio-proxy's MERGED endpoint on 15020: our application metrics (scraped
-    # over loopback inside the pod, per the prometheus.io/* annotations above)
-    # plus Envoy's and Istio's. One scrape, all of it, and it survives STRICT.
+    # istio-proxy's MERGED endpoint on 15020: our application metrics (which the
+    # sidecar scrapes over loopback, from the port and path recorded in
+    # ISTIO_PROMETHEUS_ANNOTATIONS at injection time) plus Envoy's and Istio's.
+    # One scrape, all of it, and it survives STRICT mTLS.
     #
-    # It must be 15020 and it must be addressed by number. Istio: "forwards
-    # requests to the sidecar telemetry port 15020 for merged metrics or 15090
-    # for Envoy-only metrics". 15090 is the one carrying the port NAME
-    # `http-envoy-prom`; 15020 is unnamed in the pod spec, so `port:` cannot
-    # reach it and `portNumber:` is required. Selecting http-envoy-prom gets
-    # you istio_requests_total (Kiali works) but never the application's own
-    # metrics, which is a silent half-failure.
-    - portNumber: 15020
-      path: /stats/prometheus
+    # The address CANNOT be written as `portNumber: 15020`. A PodMonitor's
+    # `port`/`portNumber` are filters on the container ports a pod DECLARES, and
+    # 15020 is not declared by anything — istio-proxy declares 15090
+    # (`http-envoy-prom`, Envoy-only) and 15021 (`status`). Ask for 15020 by
+    # number and the operator emits a keep rule that matches no container, so
+    # every target is dropped during relabeling and the job goes silently empty:
+    # `/targets` shows nothing at all rather than a failure.
+    #
+    # Build the address from the annotations instead. With metrics merging on
+    # (the Istio default) the injector rewrites the pod's prometheus.io/* to
+    # point at the merged endpoint, so `prometheus.io/port` is already 15020.
+    # https://istio.io/latest/docs/ops/integrations/prometheus/
+    - path: /stats/prometheus
       interval: {{ .Values.podMonitor.interval }}
+      relabelings:
+        # One target per pod, not one per container: without this, every
+        # container in the pod produces a target and all of them get rewritten
+        # to the same address, tripling the scrape.
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_container_name]
+          regex: istio-proxy
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          regex: "true"
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_annotation_prometheus_io_port
+            - __meta_kubernetes_pod_ip
+          regex: (\d+);((([0-9]+?)(\.|$)){4})
+          replacement: $2:$1
+          targetLabel: __address__
 {{- end }}
 ```
 
-> **Why a PodMonitor and not a ServiceMonitor.** A `ServiceMonitor` selects *Services* and scrapes their endpoints by port name — which is exactly what we did before Istio, with one entry for order-api's `http` port and one for order-worker's `http-metrics`. Under STRICT mTLS ([§9.6](#96-the-metrics-problem-you-just-created)) both of those scrapes get a connection reset, because Prometheus has no sidecar and no certificate. The merged endpoint lives on the *pod*, on the sidecar's own port, and is not fronted by a Service — so a `PodMonitor` is the only monitor kind that can reach it. `http-envoy-prom` is the port name Istio gives 15090 on every injected pod; `/stats/prometheus` there serves Envoy's metrics with the application's merged in.
+> **Why a PodMonitor and not a ServiceMonitor.** A `ServiceMonitor` selects *Services* and scrapes their endpoints by port name — which is exactly what the file above it does, with one entry for order-api's `http` port and one for order-worker's `http-metrics`. Under STRICT mTLS ([§9.6](#96-the-metrics-problem-you-just-created)) both of those scrapes get a connection reset, because Prometheus has no sidecar and no certificate. The merged endpoint lives on the *pod*, on 15020, and is not fronted by any Service — so a `PodMonitor` is the only monitor kind that can reach it.
+
+> **And it cannot be addressed by port, which is the part that costs an afternoon.** `port:` and `portNumber:` on a `PodMonitor` are **filters over the container ports a pod declares**, not a dial. Nothing declares 15020 — istio-proxy declares 15090 (`http-envoy-prom`, Envoy-only) and 15021 (`status`) — so `portNumber: 15020` generates a keep rule that matches no container and every target is dropped during relabeling. The job then shows **nothing at all** in `/targets`: not a failed target, not an error, an absence. The address has to be built from the `prometheus.io/*` annotations the sidecar injector rewrote, which is what the `relabelings` above do ([Istio](https://istio.io/latest/docs/ops/integrations/prometheus/)).
 
 > **The trap in this swap:** if a pod has no sidecar, it has no `http-envoy-prom` port, so the PodMonitor silently matches nothing and that workload vanishes from Prometheus with no error. A workload that leaves the mesh loses its metrics. Worth an alert of its own — `absent(up{job="order-platform"})` — which is precisely the kind of "the monitoring stopped" condition [§13.5](#135-an-alert-that-means-something) argues you should page on.
 
@@ -3029,15 +3474,47 @@ Nothing has built your services yet. CI does that from [Phase 3](#) onward; righ
 now you are the CI.
 
 ```bash
+set -e     # a failed build must not fall through to the push, or to the next service
+
 SHA="$(git rev-parse --short=12 HEAD)"
+NEXUS_IP=172.18.255.10      # the address §5.3 pinned with `docker run --ip`
 
 for svc in order-api order-worker; do
-  docker build -f "services/$svc/Dockerfile" -t "nexus:8082/shop/$svc:$SHA" "services/$svc"
+  docker build --add-host "nexus:$NEXUS_IP" \
+    -f "services/$svc/Dockerfile" -t "nexus:8082/shop/$svc:$SHA" "services/$svc"
   docker push "nexus:8082/shop/$svc:$SHA"
 done
 
 echo "$SHA"
 ```
+
+> **`--add-host` is what lets the build reach Nexus, and without it `order-api` cannot build.**
+> [§3.1](#31-order-api-python--fastapi) pinned the index to `http://nexus:8081/...` inside
+> `pyproject.toml` so that `uv.lock` records the registry — and warned that this "pins `nexus:8081`
+> into the project, which is only resolvable in this environment". A `docker build` is *not* this
+> environment. [§5.7](#57-make-nexus-resolve-from-your-laptop) mapped `nexus` to
+> `127.0.0.1` in your **laptop's** `/etc/hosts`, and inside the build container `127.0.0.1` is the
+> build container, so `uv sync` fails on every wheel with:
+>
+> ```
+> × Failed to download `certifi==2026.7.22`
+> ╰─▶ tcp connect error … Connection refused (os error 111)
+> ```
+>
+> `--add-host` points the name at the address Nexus actually holds on the `kind` network. Note that
+> `order-worker` builds fine **without** this, which is exactly what makes the failure confusing: its
+> Dockerfile resolves Go modules from the public proxy and never touches Nexus at all. One service
+> breaks, the other does not, and the difference is which registry each toolchain was told to use.
+>
+> This is also why `set -e` is on the first line. Without it a failed `docker build` falls straight
+> through to a `docker push` that has nothing to push, and then to the *next* service, which succeeds
+> — so the loop ends on a success message having built half of what you asked for. You find out at
+> [§10.5](#105-install-it), as `ImagePullBackOff` on an image that was never pushed and a Service with
+> no endpoints behind it.
+>
+> CI does not need any of this ([§12.5](#125-the-pipeline)): the Buildah pod runs
+> *inside* the cluster, where CoreDNS resolves `nexus` from the entry
+> [§5.10](#510-teach-pods-about-nexus-coredns) added.
 
 > **Use the commit SHA, not `latest`, even by hand.** It costs nothing here and it is the habit the
 > whole delivery story depends on later ([§10.3](#103-render-it-before-you-trust-it)). A tag that can
@@ -3427,92 +3904,6 @@ git commit -m "feat(observability): prometheus, grafana dashboard and alerts"
 git push
 ```
 
-### 13.6 Kiali: the mesh you can see
-
-
-Everything in [§9](#9-istio-the-service-mesh) is invisible. mTLS either works or it doesn't; an `AuthorizationPolicy` either matches or it doesn't; and when it doesn't, the symptom is a 403 in a log somewhere. Kiali reads the same Prometheus you just installed plus Istio's configuration, and draws the answer.
-
-It is documented here, next to Prometheus, because **without Prometheus there is no graph**: Kiali's
-topology is derived entirely from `istio_requests_total`, and it reads that metric out of the
-Prometheus you just installed.
-
-**Run this section after [Phase 4](#), not now.** Kiali installs into
-`istio-system` and needs that namespace, the mesh, and the merged-metrics scrape from
-[§9.6](#96-the-metrics-problem-you-just-created) to exist first. Come back to
-it when [§9.6](#96-the-metrics-problem-you-just-created) is done.
-
-```bash
-helm repo add kiali https://kiali.org/helm-charts
-helm repo update
-
-helm upgrade --install kiali-server kiali/kiali-server \
-  --namespace istio-system --version 2.30.0 \
-  --set auth.strategy=anonymous \
-  --set external_services.prometheus.url=http://monitoring-kube-prometheus-prometheus.monitoring:9090 \
-  --set external_services.grafana.enabled=true \
-  --set external_services.grafana.internal_url=http://monitoring-grafana.monitoring \
-  --set external_services.grafana.external_url=http://grafana.localtest.me \
-  --wait
-```
-
-> **`auth.strategy=anonymous` means anyone who can reach the URL is an admin.** Kiali can *change* Istio configuration from the UI, so on a real cluster this is a privilege-escalation path with a web interface. It is acceptable here because the only route to it is `localhost` on your laptop. The production settings are `openid` or `header`; the default is `token`, which makes you paste a ServiceAccount token at every login and is the right friction outside a lab.
-
-Give it an Ingress, consistent with everything else:
-
-**`deploy/platform/kiali-ingress.yaml`**
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: kiali
-  namespace: istio-system
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: kiali.localtest.me
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: kiali
-                port: { number: 20001 }
-```
-
-```bash
-kubectl apply -f deploy/platform/kiali-ingress.yaml
-```
-
-Open <http://kiali.localtest.me>. Generate traffic first — an idle mesh draws an empty graph, which looks identical to a broken install:
-
-```bash
-for i in $(seq 1 50); do
-  curl -sS -o /dev/null -X POST http://shop.localtest.me/orders \
-    -H 'content-type: application/json' \
-    -d '{"customer":"ada","sku":"WIDGET-1","quantity":1,"amount_cents":100}'
-done
-```
-
-Then, in **Graph**, select the `shop` and `floci` namespaces and turn on the **Security** display option. What you are looking for, in order:
-
-| What you see | What it means |
-|---|---|
-| A padlock on the `order-api → floci` edge | mTLS is actually in use on that hop — not just configured, *observed*. |
-| `ingress-nginx → order-api` present | The edge is enrolled and its traffic is being reported. If nginx is missing from the graph, it never got a sidecar. |
-| No edge between `order-api` and `order-worker` | Correct, and worth staring at. They are joined by Kafka, which is outside the mesh, so the mesh cannot draw that relationship. **A service graph is not an architecture diagram** — it shows synchronous calls the proxies saw, and it is blind to your entire async path. |
-| Red edges into `floci` | The `deny-all` in §9.5 is doing its job to something. Click the edge → **Traffic** to see which principal was refused. |
-
-The other tab worth your time is **Istio Config**, which validates every `PeerAuthentication`, `AuthorizationPolicy` and `DestinationRule` in the cluster and flags the ones that reference workloads or service accounts that don't exist. That is the exact failure mode §9.5 warned about — a policy whose `principals` have a typo denies everything and looks, from `kubectl get pods`, like a perfectly healthy cluster.
-
-```bash
-git add deploy/platform/kiali-ingress.yaml
-git commit -m "feat(observability): kiali"
-```
-
-> **Kiali is a read-mostly tool, and that's the discipline.** It will happily let you edit Istio config through the UI. Don't: every object it manages is in git, and a change made in the console is a change Argo CD will revert on its next sync — or worse, won't, because you edited something Argo doesn't track. Use it to see and to validate; make changes in the repo.
-
 ---
 
 ## Where you are
@@ -3679,7 +4070,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    repoURL: https://github.com/andytavares/modern-devops.git
     targetRevision: main
     path: deploy/argocd/apps
   destination:
@@ -3706,7 +4097,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    repoURL: https://github.com/andytavares/modern-devops.git
     targetRevision: main
     path: deploy/charts/order-platform
     helm:
@@ -3727,7 +4118,7 @@ spec:
       backoff: { duration: 10s, factor: 2, maxDuration: 3m }
 ```
 
-**`deploy/argocd/apps/platform.yaml`** — the infrastructure we applied by hand, now under GitOps:
+**`deploy/argocd/apps/platform.yaml`**
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -3750,7 +4141,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    repoURL: https://github.com/andytavares/modern-devops.git
     targetRevision: main
     path: deploy/platform
     directory:
@@ -4440,7 +4831,7 @@ So the honest pitch: the mesh gives you **identity-based mTLS on every HTTP hop 
 > (`cluster.local/ns/istio-system/sa/istio-ingressgateway`) — that is the principal the
 > authorization policies in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist)
 > key on. Routing into the mesh is written as `Gateway` + `VirtualService`, the same objects and the
-> same language as the canary in [§9.8](#98-canary-two-versions-of-pricing-behind-one-service),
+> same language as the canary in [§9.9](#99-canary-two-versions-of-pricing-behind-one-service),
 > rather than split between an Ingress controller's annotations and Istio's config.
 >
 > Argo CD, Grafana, Kiali, Backstage and Nexus are not in the mesh and keep their own Ingresses.
@@ -4528,12 +4919,20 @@ Sidecars are injected at pod **creation**, so existing pods need a restart:
 
 ```bash
 kubectl -n floci rollout restart deployment/floci
+kubectl -n shop  rollout restart deployment/order-api deployment/order-worker
 
-# order-api / order-worker don't exist yet — they'll be born with sidecars in §11.
 kubectl -n floci get pods          # READY should be 2/2
+kubectl -n shop  get pods          # READY should be 2/2
 ```
 
 `2/2` is the whole verification: your container plus `istio-proxy`.
+
+> **`shop` is restarted here, not left to the next Argo CD sync.** Argo CD reconciles *manifests*, and
+> the chart's manifests did not change — adding a label to the namespace does not make the Deployment
+> drift, so nothing triggers a rollout and the pods keep running without sidecars indefinitely. The
+> restart is the injection. Skip it and [§9.6](#96-the-metrics-problem-you-just-created)'s broken
+> scrape never happens, [§9.7](#97-kiali-the-mesh-you-can-see)'s graph is empty, and the mesh looks
+> installed while carrying no traffic.
 
 One thing in the `floci` namespace must **not** be injected — the bootstrap Job from [§6.3](#63-bootstrap-the-s3-bucket-and-dynamodb-table). That's why its pod template already carries the opt-out:
 
@@ -4580,15 +4979,26 @@ Before you apply it, build the edge, because STRICT is what makes the edge's sha
 That is `istio-ingressgateway`, and it needs two objects — a `Gateway` declaring which ports and
 hostnames the proxy accepts, and a `VirtualService` per hostname declaring where it goes.
 
-**`deploy/platform/istio/edge-gateway.yaml`** (comments stripped here; the file carries them)
+**`deploy/platform/istio/edge-gateway.yaml`**
 
 ```yaml
+# The mesh's own entry point, which is what Istio documents for north-south
+# traffic. A Gateway describes the port and hostnames the edge proxy accepts;
+# the VirtualServices below describe where those hostnames go. Routing lives in
+# the same objects and the same language as the canary in §9.8, rather than
+# being split between an Ingress controller's annotations and Istio's config.
+#
+# ingress-nginx still owns hostPort 80/443 on the kind node and forwards these
+# two hostnames here (see edge-ingress.yaml). That is the same shape as the
+# production topology Istio documents: an external load balancer in front of
+# istio-ingressgateway.
 apiVersion: networking.istio.io/v1
 kind: Gateway
 metadata:
   name: edge
   namespace: istio-system
 spec:
+  # Matches the pod labels the istio/gateway chart applies.
   selector:
     istio: ingressgateway
   servers:
@@ -4596,9 +5006,16 @@ spec:
         number: 80
         name: http
         protocol: HTTP
+      # Wildcard, so a service the paved path (§14.6) adds needs only a
+      # VirtualService — no edit to this file and no edit to the nginx Ingress
+      # in front of it. A hostname with no VirtualService gets a 404 from the
+      # gateway, which is the correct answer for a route nobody declared.
       hosts:
         - "*.localtest.me"
 ---
+# A VirtualService binds a hostname to the Gateway and routes it to a Service.
+# `gateways` names the Gateway in namespace/name form because the Gateway lives
+# in istio-system and these route to workloads in shop.
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
@@ -4648,9 +5065,25 @@ is the correct answer for a route nobody declared.
 Then the hop in front of it. nginx owns `hostPort` 80/443 on the kind node and hands the meshed
 hostnames to the gateway's Service:
 
-**`deploy/platform/istio/edge-ingress.yaml`** (comments stripped here; the file carries them)
+**`deploy/platform/istio/edge-ingress.yaml`**
 
 ```yaml
+# ingress-nginx owns hostPort 80/443 on the kind control-plane node and is the
+# edge for everything that is not in the mesh — Argo CD, Grafana, Kiali,
+# Backstage, Nexus. It keeps that job. This Ingress hands the two meshed
+# hostnames straight to istio-ingressgateway and does nothing else with them:
+# no rewriting, no per-service annotations, no knowledge of what is behind it.
+#
+# That split is the point. Each proxy does the job its own documentation
+# describes — nginx routes a hostname to a Service, Istio owns everything from
+# the mesh boundary inward — and neither is asked to understand the other. It is
+# also the shape of the production topology Istio documents, with nginx standing
+# in for the cloud load balancer that would forward to the gateway there.
+#
+# Nothing here needs `service-upstream` or `upstream-vhost`. istio-system has no
+# STRICT PeerAuthentication, so the gateway accepts this plaintext hop exactly as
+# it would from a cloud load balancer; mTLS begins at the gateway, which is
+# in the mesh and calls shop workloads with a real workload identity.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -4659,6 +5092,10 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
+    # A wildcard host, so a scaffolded service reaches the mesh without anyone
+    # editing this file. The platform's own UIs — Argo CD, Grafana, Kiali,
+    # Backstage — keep their exact-host Ingresses, and an exact host always wins
+    # over a wildcard, so they never come through here.
     - host: "*.localtest.me"
       http:
         paths:
@@ -4691,15 +5128,39 @@ kubectl apply -f deploy/platform/istio/peer-authentication.yaml
 ```
 
 The two `Ingress` resources written in [§10.1](#101-one-chart-two-workloads)
-are now dead, and they will fight this one: two Ingresses claiming the same host and path is a
-conflict the nginx admission webhook rejects outright. Delete them from the chart — the whole
-`{{- if .Values.orderApi.ingress.enabled }}` block at the end of `order-api.yaml`, and the matching
-block in `frontend.yaml` — along with the now-unused `ingress:` keys in `values.yaml`. Routing for
-these two services lives in the VirtualServices above from here on.
+are now dead, and leaving them is not harmless — **it breaks the site completely.** Delete them from
+the chart: the whole `{{- if .Values.orderApi.ingress.enabled }}` block at the end of
+`order-api.yaml`, the matching block in `frontend.yaml`, and the now-unused `ingress:` keys under
+`orderApi` and `frontend` in `values.yaml`. Routing for these two services lives in the
+VirtualServices above from here on.
+
+This is a chart change, so it goes through git — Argo CD owns this release
+([§11](#11-argo-cd-pull-based-delivery)) and will recreate anything you delete
+with `kubectl`:
 
 ```bash
-kubectl -n shop delete ingress order-api frontend --ignore-not-found
+git add deploy/charts/order-platform
+git commit -m "fix(mesh): drop the dead ingresses; routing lives in the VirtualService"
+git push
+
+kubectl -n argocd annotate app order-platform argocd.argoproj.io/refresh=hard --overwrite
+kubectl -n shop get ingress          # No resources found — that is the check
 ```
+
+> [!warning] **Skip this and every request to `shop.localtest.me` returns `502 Bad Gateway`, with
+> nothing in the mesh reporting a fault.**
+> Not an admission conflict — the two Ingresses declare *different* hosts (`shop.localtest.me` and
+> `*.localtest.me`), so nginx admits both without complaint. The exact host then wins, exactly as the
+> callout above says it does, and nginx forwards straight to `order-api`'s Service **in plaintext,
+> from outside the mesh**. STRICT mTLS refuses it, nginx has no upstream response to return, and you
+> get a 502.
+>
+> Everything you would check looks correct: pods `2/2`, `istioctl analyze` clean apart from its
+> [expected baseline](#98-commit-and-a-word-on-what-you-cannot-verify-yet), the `Gateway` and
+> `VirtualService` applied, the gateway pod healthy. `kubectl -n shop get ingress` is the one command
+> that names it, and it is the last place anyone looks — the object is a leftover from Phase 1 that
+> nothing in Phase 4 draws your attention to. **The route you deleted is not the route that is
+> serving.**
 
 That is the trade the Gateway asks for, stated plainly: one more component to install, and routing
 that no longer lives in a second proxy's annotations.
@@ -4760,6 +5221,13 @@ spec:
               - "cluster.local/ns/shop/sa/order-api"
               - "cluster.local/ns/shop/sa/order-worker"
 ---
+# 3. The same deny-all, for shop. Without this, Istio's default applies: a
+# workload that no ALLOW policy selects accepts traffic from anything in the
+# mesh. Policies 4 and 5 below select order-api and pricing, so those two were
+# already covered -- but frontend and order-worker were selected by nothing,
+# and were therefore reachable from every workload in the cluster. Deny-by-
+# default is a property of the namespace, not of the workloads you remembered
+# to write a policy for.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -4768,6 +5236,11 @@ metadata:
 spec:
   {}
 ---
+# 4. The frontend is a browser-facing page. It is reachable from the mesh's
+# ingress gateway and from nowhere else -- it has no callers inside the mesh.
+# The principal is the gateway's own workload identity: traffic entering
+# through it is authenticated as istio-ingressgateway, not as whatever sits in
+# front of it.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -4784,6 +5257,14 @@ spec:
             principals:
               - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
 ---
+# 5. order-worker takes no inbound traffic at all. It consumes from Kafka and
+# writes to Floci; nothing calls it. The one exception is Prometheus scraping
+# its metrics port, which reaches the sidecar's merged endpoint rather than the
+# application, so it needs no allow rule here. An empty rules list would deny
+# everything including that, so the policy allows precisely one thing: nothing
+# inbound to the application ports.
+#
+# 6. order-api is reachable from the edge, and from the frontend -- nowhere else.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -4799,6 +5280,32 @@ spec:
         - source:
             principals:
               - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/shop/sa/frontend"
+---
+# 4. pricing is the canary target (v1/v2, one Service). It is called
+# synchronously on the order path with no fallback on failure (see
+# services/order-api/order_api/main.py: `_price_order` raises HTTP 502 on any
+# grpc.RpcError, it never guesses a price) -- so its blast radius must be as
+# small as possible. order-api is the only workload with any business calling
+# it. Not order-worker, not frontend, not anything in floci.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-order-api-to-pricing
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pricing
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/shop/sa/order-api"
 ```
 
 ```bash
@@ -4843,7 +5350,7 @@ STRICT because Prometheus is now talking to a port the sidecar deliberately expo
 
 Swap the monitors — off with one, on with the other:
 
-```bash
+```yaml
 # deploy/charts/order-platform/values.yaml
 serviceMonitor:
   enabled: false     # plaintext; refused by STRICT mTLS from here on
@@ -4852,21 +5359,74 @@ podMonitor:
   interval: 15s
 ```
 
+**Commit it. Do not run `helm upgrade`.** [§11](#11-argo-cd-pull-based-delivery)
+handed this release to Argo CD, and that was the point of the phase:
+
 ```bash
-helm upgrade --install order-platform deploy/charts/order-platform \
-  --namespace shop --values deploy/env/local/values.yaml --wait
+git add deploy/charts/order-platform/values.yaml
+git commit -m "fix(observability): scrape the sidecar's merged endpoint under strict mtls"
+git push
+
+# `Synced` alone is not the check — compare the revision Argo applied to the one you pushed.
+kubectl -n argocd get application order-platform \
+  -o jsonpath='{.status.sync.status} {.status.sync.revision}{"\n"}'
+git rev-parse HEAD
 ```
+
+> [!warning] **Argo CD reports `Synced` against a revision it has not fetched yet.**
+> It polls, and until it does it is truthfully synced — to the *previous* commit. The two SHAs above
+> disagree, `kubectl -n shop get podmonitor order-platform -o yaml` still shows the old spec, and
+> nothing anywhere says "stale": the Application is `Synced`, `Healthy`, and `reconciledAt` is
+> seconds old. This is the same stale-cache behaviour as the `Synced`+`Degraded` case in Appendix B,
+> and it is worth meeting here, where the only cost is confusion. Force it:
+>
+> ```bash
+> kubectl -n argocd annotate app order-platform argocd.argoproj.io/refresh=hard --overwrite
+> ```
+>
+> **Do not skip to debugging the thing you just changed.** Every minute spent on a PodMonitor that
+> was never applied is spent on the wrong object.
+
+> [!warning] **`helm upgrade` cannot work here any more, and this is the first section where you will
+> try it.** Argo CD syncs this Application with `ServerSideApply=true`, so the API server records
+> `argocd-controller` as the field manager for the fields it sets. Helm 3.18+ also applies
+> server-side, and the API server refuses the collision rather than silently picking a winner:
+>
+> ```
+> Error: UPGRADE FAILED: conflict occurred while applying object shop/order-api
+> apps/v1, Kind=Deployment: Apply failed with 3 conflicts: conflicts with "argocd-controller":
+> - .spec.template.metadata.annotations.checksum/config
+> - .spec.template.spec.containers[name="order-api"].image
+> - .spec.template.spec.containers[name="order-api"].env[name="SERVICE_VERSION"].value
+> ```
+>
+> **That error is the system working.** Two controllers wanted the same fields and the API server said
+> so instead of letting them fight. You can force it — `--force-conflicts` on `kubectl`, or Helm's
+> `--take-ownership` — and it is the wrong move twice over: it steals the fields from Argo CD, and
+> `selfHeal: true` reverts your change on the next reconcile anyway, so you get a cluster that
+> disagrees with git and a change that vanishes minutes later with nothing logged against it.
+> **After §11 the deploy button is `git push`.** If you need it now rather than on the next poll,
+> `argocd app sync order-platform` — that is Argo CD applying git, not you applying your laptop.
 
 > **Why a `PodMonitor` and not another `ServiceMonitor`.** The merged endpoint lives on the **pod**,
 > on the sidecar's own port, and is not fronted by any Service — so a `ServiceMonitor`, which selects
 > Services, has nothing to select. That is the whole reason the kind changes.
 >
-> And it must be addressed by **number**. Istio's docs: *"forwards requests to the sidecar telemetry
-> port **15020 for merged metrics** or **15090 for Envoy-only metrics**"*. 15090 is the port carrying
-> the name `http-envoy-prom`; **15020 is unnamed in the pod spec**, so `port:` cannot reach it and
-> `portNumber: 15020` is required. Pick 15090 by name and you will get `istio_requests_total` — so
-> Kiali looks perfectly healthy — while your application's own `orders_received_total` never appears
-> again. A half-failure that looks like a success is worse than an outage.
+> And it cannot be addressed by port at all. Istio's docs: *"forwards requests to the sidecar
+> telemetry port **15020 for merged metrics** or **15090 for Envoy-only metrics**"* — but `port:` and
+> `portNumber:` on a `PodMonitor` are **filters over the container ports a pod declares**, not a dial.
+> **Nothing declares 15020.** istio-proxy declares 15090 (`http-envoy-prom`) and 15021 (`status`), so
+> `portNumber: 15020` compiles to a keep rule matching no container, and every target is dropped
+> during relabeling. `/targets` then shows **nothing at all** for the job — not a failed target, not
+> an error, an absence — which is indistinguishable from a monitor whose selectors are wrong. The
+> address is built from the `prometheus.io/*` annotations the injector rewrote onto the pod, which is
+> what the `relabelings` in
+> [§10.1](#101-one-chart-two-workloads)'s `podmonitor.yaml` do.
+>
+> And do not reach for 15090 to make the error go away: it is a real declared port, so the targets
+> come **up**, and you get `istio_requests_total` — Kiali looks perfectly healthy — while your
+> application's own `orders_received_total` never appears again. A half-failure that looks like a
+> success is worse than an outage.
 
 Now confirm you get **both halves** from one scrape:
 
@@ -4891,7 +5451,96 @@ scraping the application port rather than `15020`. If yours is empty but Istio's
 > condition [§13.5](#135-an-alert-that-means-something) argues you should page
 > on.
 
-### 9.7 Commit, and a word on what you cannot verify yet
+### 9.7 Kiali: the mesh you can see
+
+
+Everything the last five sections built is invisible. mTLS either works or it doesn't; an
+`AuthorizationPolicy` either matches or it doesn't; and when it doesn't, the symptom is a 403 in a log
+somewhere. Kiali reads the Prometheus from [§13.2](#132-install) plus Istio's
+configuration, and draws the answer.
+
+**This is the earliest point in the build where it can be installed, and the earliest where it would
+have anything to draw.** It needs two things that did not both exist until the previous section: the
+`istio-system` namespace from [§9.2](#92-install-the-control-plane) — Kiali installs into it, and
+Helm does not create a namespace for you — and `istio_requests_total` in Prometheus, which is what
+the monitor swap in [§9.6](#96-the-metrics-problem-you-just-created) started collecting. Run it any
+earlier and Helm stops with `namespaces "istio-system" not found`; create that namespace by hand to
+get past it and the chart installs cleanly against no control plane, drawing an empty graph
+indistinguishable from a broken one.
+
+```bash
+helm repo add kiali https://kiali.org/helm-charts
+helm repo update
+
+helm upgrade --install kiali-server kiali/kiali-server \
+  --namespace istio-system --version 2.30.0 \
+  --set auth.strategy=anonymous \
+  --set external_services.prometheus.url=http://monitoring-kube-prometheus-prometheus.monitoring:9090 \
+  --set external_services.grafana.enabled=true \
+  --set external_services.grafana.internal_url=http://monitoring-grafana.monitoring \
+  --set external_services.grafana.external_url=http://grafana.localtest.me \
+  --wait
+```
+
+> **`auth.strategy=anonymous` means anyone who can reach the URL is an admin.** Kiali can *change* Istio configuration from the UI, so on a real cluster this is a privilege-escalation path with a web interface. It is acceptable here because the only route to it is `localhost` on your laptop. The production settings are `openid` or `header`; the default is `token`, which makes you paste a ServiceAccount token at every login and is the right friction outside a lab.
+
+Give it an Ingress, consistent with everything else:
+
+**`deploy/platform/kiali-ingress.yaml`**
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kiali
+  namespace: istio-system
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: kiali.localtest.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kiali
+                port: { number: 20001 }
+```
+
+```bash
+kubectl apply -f deploy/platform/kiali-ingress.yaml
+```
+
+Open <http://kiali.localtest.me>. Generate traffic first — an idle mesh draws an empty graph, which looks identical to a broken install:
+
+```bash
+for i in $(seq 1 50); do
+  curl -sS -o /dev/null -X POST http://shop.localtest.me/orders \
+    -H 'content-type: application/json' \
+    -d '{"customer":"ada","sku":"WIDGET-1","quantity":1,"amount_cents":100}'
+done
+```
+
+Then, in **Graph**, select the `shop` and `floci` namespaces and turn on the **Security** display option. What you are looking for, in order:
+
+| What you see | What it means |
+|---|---|
+| A padlock on the `order-api → floci` edge | mTLS is actually in use on that hop — not just configured, *observed*. |
+| `istio-ingressgateway → order-api` present | The edge is meshed and reporting. It is the **gateway**, not `ingress-nginx`, that appears here — nginx is deliberately outside the mesh ([§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones)), so it never draws an edge and its absence is not a fault. |
+| No edge between `order-api` and `order-worker` | Correct, and worth staring at. They are joined by Kafka, which is outside the mesh, so the mesh cannot draw that relationship. **A service graph is not an architecture diagram** — it shows synchronous calls the proxies saw, and it is blind to your entire async path. |
+| Red edges into `floci` | The `deny-all` in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) is doing its job to something. Click the edge → **Traffic** to see which principal was refused. |
+
+The other tab worth your time is **Istio Config**, which validates every `PeerAuthentication`, `AuthorizationPolicy` and `DestinationRule` in the cluster and flags the ones that reference workloads or service accounts that don't exist. That is the exact failure mode [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) warned about — a policy whose `principals` have a typo denies everything and looks, from `kubectl get pods`, like a perfectly healthy cluster.
+
+```bash
+git add deploy/platform/kiali-ingress.yaml
+git commit -m "feat(observability): kiali"
+```
+
+> **Kiali is a read-mostly tool, and that's the discipline.** It will happily let you edit Istio config through the UI. Don't: every object it manages is in git, and a change made in the console is a change Argo CD will revert on its next sync — or worse, won't, because you edited something Argo doesn't track. Use it to see and to validate; make changes in the repo.
+
+### 9.8 Commit, and a word on what you cannot verify yet
 
 
 ```bash
@@ -4899,7 +5548,34 @@ git add deploy/platform/istio deploy/platform/floci-bootstrap.yaml
 git commit -m "feat(platform): istio with strict mtls and default-deny authz"
 ```
 
-`order-api` and `order-worker` don't exist yet, so §9.4's proof covers Floci only. The rest of the mesh — the edge path through the gateway, the authorization policies keyed on those two service accounts — becomes verifiable in [§11](#11-argo-cd-pull-based-delivery), when Argo CD deploys the chart into the now-enrolled `shop` namespace. If a page load returns `RBAC: access denied` at that point, the policy in §9.5 is what to read first, and `istioctl analyze -n shop` is what to run.
+§9.4's proof covered Floci. `order-api` and `order-worker` have been running since [§10](#10-packaging-the-app-with-helm) and are reconciled by Argo CD as of [§11](#11-argo-cd-pull-based-delivery), but they picked up their sidecars only when [§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones) labelled `shop` and the pods restarted — so the edge path through the gateway and the authorization policies keyed on those two service accounts are verifiable now, on this deployment. If a page load returns `RBAC: access denied`, the policy in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) is what to read first, and `istioctl analyze -n shop` is what to run.
+
+**Run it now, so you know what its noise looks like before you need its signal.** At this point in
+the build it exits **non-zero** with five findings, and every one of them is correct and expected:
+
+```
+$ istioctl analyze -n shop
+Error   [IST0101] (VirtualService shop/frontend) Referenced host not found: "frontend.shop.svc.cluster.local"
+Error   [IST0101] (VirtualService shop/pricing) Referenced host not found: "pricing.shop.svc.cluster.local"
+Warning [IST0127] (AuthorizationPolicy shop/allow-ingress-to-frontend) No matching workloads ... app.kubernetes.io/name=frontend
+Warning [IST0127] (AuthorizationPolicy shop/allow-order-api-to-pricing) No matching workloads ... app.kubernetes.io/name=pricing
+Warning [IST0174] (DestinationRule shop/pricing) The host pricing.shop.svc.cluster.local ... does not match any services in the mesh
+Error: Analyzers found issues when analyzing namespace: shop.
+```
+
+`frontend` and `pricing` are built in [Phase 7](#). You have written the
+policy and the routing for services that do not exist yet — deliberately, because §9.5's `deny-all`
+has to be complete before anything is enrolled, not retrofitted after. **These five clear themselves
+when Phase 7 deploys those two workloads.** Note what is *absent*: nothing is reported against
+`order-api` or `order-worker`, which do exist. That is the signal.
+
+> [!warning] **A diagnostic with a known-noisy baseline is a diagnostic you will learn to ignore.**
+> §9.5 says `istioctl analyze` is what catches a `principals` typo that `kubectl get pods` cannot —
+> and that is true, but only if you know what five findings look like when nothing is wrong. Count
+> them. Six means something you did. The same applies to Kiali's **Istio Config** tab
+> ([§9.7](#97-kiali-the-mesh-you-can-see)), which validates the same objects and will show the same
+> five in red. This is the ordinary condition of every linter pointed at a system built in stages,
+> and the discipline — record the baseline, alert on the delta — is worth more than the finding.
 
 When it is running, do not accept a `200` from the browser as proof that the edge is meshed — a `200`
 only tells you bytes moved, and the first two hops are plaintext by design. Ask the destination
@@ -4922,7 +5598,7 @@ The working state is `app.localtest.me` returning 200, `shop.localtest.me/health
 the platform UIs still answering on their own exact hostnames — Argo CD 200, Grafana 302, Kiali 302,
 Backstage 200, none of them through the gateway.
 
-### 9.8 Canary: two versions of `pricing` behind one Service
+### 9.9 Canary: two versions of `pricing` behind one Service
 
 
 Everything above secures traffic. This section *steers* it — and it is the half of a service mesh that
@@ -5008,9 +5684,26 @@ Confirm with `kubectl -n shop get svc pricing -o jsonpath='{.spec.ports[*].name}
 
 #### `DestinationRule` — subsets, and the pool policy
 
-**`deploy/platform/istio/pricing-traffic.yaml`** (the file itself carries all of the arithmetic below as inline comments; stripped here so the prose can do the work)
+**`deploy/platform/istio/pricing-traffic.yaml`**
 
 ```yaml
+# Canary routing and resilience for shop.v1.Pricing (services/pricing), consumed
+# by order-api's PricingClient over gRPC with a 2s client-side deadline
+# (order_api/main.py: `self._stub.PriceOrder(request, timeout=self._timeout_seconds)`).
+# order-api never falls back to a local price on failure — it returns HTTP 502 —
+# so every value below is chosen against that 2s budget, worked out explicitly
+# in the comments rather than left as Istio defaults.
+#
+# gRPC-over-HTTP/2 note: Istio does NOT have a separate "grpc:" route stanza.
+# gRPC rides HTTP/2, so it is routed with the ordinary `http:` block below.
+# What makes Istio treat this Service's traffic as HTTP/2-aware in the first
+# place (rather than opaque TCP) is the Service port *name* -- `grpc` (see the
+# Service manifest: ports named `grpc` and `metrics`). Istio's port-name
+# protocol sniffing maps the `grpc` / `grpc-*` prefix to HTTP/2 with gRPC
+# semantics, which is what makes header-based routing, retries and
+# gRPC-status-aware outlier detection possible at all. Get the port name
+# wrong (e.g. call it `pricing` or `tcp-grpc`) and Istio falls back to plain
+# TCP passthrough -- this whole file would silently stop doing anything.
 apiVersion: networking.istio.io/v1
 kind: DestinationRule
 metadata:
@@ -5026,17 +5719,121 @@ spec:
       labels:
         version: v2
   trafficPolicy:
+    # Applies to both subsets (v1 and v2 each get their own Envoy cluster, but
+    # both inherit this trafficPolicy since neither subset overrides it).
     connectionPool:
+      # Modest limits for a 2-3 replica internal service taking gRPC calls from
+      # order-api (and order-worker). HTTP/2 multiplexes many requests over one
+      # connection, so we don't need -- and don't want -- a large connection count.
       tcp:
         maxConnections: 20
       http:
+        # Concurrent in-flight requests across the whole pool. 100 is generous
+        # headroom over expected order volume for a demo service while still
+        # bounding worst-case fan-out from a client bug.
         http2MaxRequests: 100
+        # 0 = unlimited requests per HTTP/2 connection. HTTP/2 is designed for
+        # long-lived multiplexed connections; forcing periodic reconnects (a
+        # nonzero cap) only adds handshake latency to a service already living
+        # inside a 2s client deadline, for no gRPC-specific benefit.
         maxRequestsPerConnection: 0
     outlierDetection:
+      # Eject a pod after 3 consecutive gateway/5xx errors. Justification for a
+      # 2-3 replica subset: with `consecutive5xxErrors` left at its default of
+      # 5, a single bad replica in a pool that small could account for a large
+      # share of total request volume before ejection ever kicks in -- the
+      # blast radius is too big to wait for 5. 3 is fast enough to react to a
+      # genuinely broken pod within a handful of requests, without being so
+      # low (e.g. 1-2) that ordinary transient errors trip it.
       consecutive5xxErrors: 3
+      # How often Envoy sweeps for ejection candidates.
       interval: 15s
+      # Minimum time a pod stays ejected once flagged. Kept at the 30s
+      # default: long enough that the ejected pod isn't immediately
+      # reconsidered on the next 15s sweep, short enough that a transient
+      # blip (e.g. a fault-injection drill, see pricing-fault-injection.yaml.disabled)
+      # self-heals without operator intervention.
       baseEjectionTime: 30s
+      # Cap ejections at 50%, not the 10% default. Rationale: with only 2-3
+      # replicas per subset, 10% of the pool rounds down to zero ejectable
+      # hosts -- outlier detection would be configured but functionally
+      # inert. 50% guarantees room to eject at least one bad replica out of
+      # two while always leaving at least one healthy replica standing, so a
+      # single failing pod can never take the whole subset out of rotation.
       maxEjectionPercent: 50
+---
+# 90/10 canary split between pricing-v1 and pricing-v2, with a request-level
+# timeout and retry policy sized against order-api's 2s client-side gRPC
+# deadline (order_api/main.py PricingClient, settings.pricing_timeout_seconds).
+#
+# The arithmetic, in order:
+#
+#   1. route `timeout: 1800ms` -- deliberately LESS than the client's 2000ms
+#      deadline, never more. A route timeout longer than 2s is pointless:
+#      order-api's own grpc timeout fires at 2s regardless of what Envoy is
+#      still doing, so anything Envoy does past that point is wasted work the
+#      caller has already given up on. Setting it a bit *under* 2s (200ms of
+#      slack) means Envoy is the one that gives up and returns a clean
+#      "upstream request timeout" to order-api's stub, rather than the two
+#      timers racing to fire at effectively the same instant, which would
+#      make the failure mode nondeterministic (sometimes a proxy-side error,
+#      sometimes a bare DEADLINE_EXCEEDED from the grpc lib itself).
+#
+#   2. retries: attempts=2, perTryTimeout=500ms -- worst case this is the
+#      initial try plus 2 retries = 3 attempts * 500ms = 1500ms of pure
+#      per-try time. Add Istio's exponential backoff between attempts
+#      (minimum ~25ms per gap, 2 gaps = ~50ms) and the worst-case total is
+#      ~1550ms. That leaves ~250ms of slack under the 1800ms route timeout,
+#      and ~450ms of slack under order-api's 2000ms client deadline. Retries
+#      that could exceed the caller's own deadline are worse than useless --
+#      they burn the time budget on attempts the caller will never see the
+#      result of -- so every number here is chosen to keep the full retry
+#      envelope inside both ceilings, not just the outer one.
+#
+#   3. retryOn -- gRPC-over-HTTP/2 conditions, deliberately narrow:
+#        - unavailable, cancelled: transient / connection-level failures
+#          (matches Istio's own cluster-wide default retry set) -- exactly
+#          the class of error a retry against a *different* pod is likely to
+#          fix.
+#        - connect-failure, refused-stream: HTTP/2-level conditions (TCP
+#          connect failure, stream reset before headers) -- the request
+#          never reached an application handler, so retrying is safe and
+#          cheap.
+#      Deliberately NOT retried:
+#        - deadline-exceeded: the request already burned its per-try time
+#          budget once; retrying just spends more of the same 2s budget on
+#          the same failure mode.
+#        - resource-exhausted / internal: these usually mean the instance is
+#          already overloaded or broken. Retrying hammers a struggling pod
+#          instead of giving it room to recover -- that's what
+#          outlierDetection above is for (eject it), not what retries are for.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: pricing
+  namespace: shop
+spec:
+  hosts:
+    - pricing.shop.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v1
+            port:
+              number: 50051
+          weight: 90
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v2
+            port:
+              number: 50051
+          weight: 10
+      timeout: 1800ms
+      retries:
+        attempts: 2
+        perTryTimeout: 500ms
+        retryOn: cancelled,unavailable,connect-failure,refused-stream
 ```
 
 A `DestinationRule` names subsets; it does not route to them. Routing is the `VirtualService`, below.
@@ -5199,7 +5996,7 @@ interval, and because v2 discounts 10% at `quantity >= 3` the totals visibly cha
 between two identical builds proves the routing works; a canary between two *different behaviours*
 proves you would have noticed if the new one were wrong.
 
-### 9.9 Break it on purpose: fault injection
+### 9.10 Break it on purpose: fault injection
 
 
 A canary tells you the routing works. It tells you nothing about what happens when `pricing` is slow —
@@ -5208,9 +6005,56 @@ rather than failing fast.
 
 Istio can inject the failure for you, with no change to any application:
 
-**`deploy/platform/istio/pricing-fault-injection.yaml.disabled`** (abridged — the route block is identical to `pricing-traffic.yaml`'s)
+**`deploy/platform/istio/pricing-fault-injection.yaml.disabled`**
 
 ```yaml
+# FAILURE DRILL -- NOT applied by Argo CD (the .disabled suffix excludes it
+# from the app's manifest glob). This is an operator tool, applied by hand.
+#
+# What it does: injects a 3s fixed delay into 50% of gRPC calls to pricing.
+# 3s is deliberately LONGER than order-api's 2s client-side gRPC deadline
+# (services/order-api/order_api/main.py PricingClient timeout) and longer
+# than pricing-traffic.yaml's own 1800ms route timeout, so neither of those
+# will save the call -- the point is to force a real, visible failure, not a
+# near-miss.
+#
+# How to apply:
+#   kubectl apply -f deploy/platform/istio/pricing-fault-injection.yaml.disabled
+#
+# What to watch while it's applied:
+#   - order-api: `pricing_calls_total{result="timeout"}` climbing (Prometheus
+#     metric emitted from _price_order's grpc.RpcError handler), and its logs
+#     showing `pricing call failed ... code=DEADLINE_EXCEEDED`.
+#   - order-api: HTTP 502s on POST /orders for the affected fraction of
+#     requests -- there is no fallback path, a failed pricing call IS a
+#     failed order (see the docstring on _price_order).
+#   - frontend: its error counter for order submission climbing in lockstep
+#     with the 50% fault percentage below.
+#   - Kiali / the mesh: pricing's traffic graph should show an elevated error
+#     rate on the subset(s) this fault applies to, and (after enough
+#     consecutive 5xx/gateway errors -- see pricing-traffic.yaml's
+#     outlierDetection: consecutive5xxErrors: 3) pods may start showing as
+#     ejected from the pool. Note that a client-side injected delay is
+#     observed by order-api's Envoy sidecar as a gateway timeout against the
+#     pricing cluster, so it counts toward that ejection threshold too.
+#
+# How to revert:
+#   kubectl delete -f deploy/platform/istio/pricing-fault-injection.yaml.disabled
+#   (this VirtualService is additive/separate from pricing-traffic.yaml's
+#   VirtualService for the same host -- Istio does not allow two
+#   VirtualServices to independently define routes for the same host, so
+#   applying this file means deleting or not simultaneously running
+#   pricing-traffic.yaml's VirtualService for `pricing`. In practice: delete
+#   this fault manifest to go back to the canary-only routing in
+#   pricing-traffic.yaml.)
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: pricing
+  namespace: shop
+spec:
+  hosts:
+    - pricing.shop.svc.cluster.local
   http:
     - fault:
         delay:
@@ -5218,7 +6062,23 @@ Istio can inject the failure for you, with no change to any application:
             value: 50
           fixedDelay: 3s
       route:
-        # ... the same 90/10 destinations, timeout and retries as pricing-traffic.yaml
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v1
+            port:
+              number: 50051
+          weight: 90
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v2
+            port:
+              number: 50051
+          weight: 10
+      timeout: 1800ms
+      retries:
+        attempts: 2
+        perTryTimeout: 500ms
+        retryOn: cancelled,unavailable,connect-failure,refused-stream
 ```
 
 **3 seconds is chosen to beat every timer in the chain.** It is longer than the 1800 ms route timeout
@@ -5242,7 +6102,7 @@ What to watch, in the order it becomes visible:
 | `order-api` logs | `pricing call failed ... code=DEADLINE_EXCEEDED` |
 | `POST /orders` | HTTP **502** on the affected fraction — no fallback, a failed pricing call *is* a failed order |
 | the frontend | its error counter climbing in lockstep with the 50% fault rate |
-| [[kiali]] | elevated error rate on `pricing`, and pods being **ejected** from the pool |
+| Kiali | elevated error rate on `pricing`, and pods being **ejected** from the pool |
 
 That last row is the subtle one and the reason this drill is worth running. A client-side injected
 delay registers in `order-api`'s **own sidecar** as a gateway timeout against the `pricing` cluster
@@ -5284,8 +6144,8 @@ nginx keeps ports 80/443 and the platform's own UIs, and knows nothing about any
 Your monitoring survived, because you fixed it when it broke.
 
 You have also written the routing, retry and outlier-detection policy for a canary
-([§9.8](#98-canary-two-versions-of-pricing-behind-one-service)) and the drill that breaks it
-([§9.9](#99-break-it-on-purpose-fault-injection)) — neither of which you can run until
+([§9.9](#99-canary-two-versions-of-pricing-behind-one-service)) and the drill that breaks it
+([§9.10](#910-break-it-on-purpose-fault-injection)) — neither of which you can run until
 [Phase 7](#) builds the `pricing` service they steer. Come back for them.
 
 **Next: [Phase 5 — Making it someone else's platform](#).**
@@ -5326,7 +6186,12 @@ Both work because of decisions made earlier: CI discovers services from the file
 A Backstage build pulls several thousand npm packages. Every one of them is a supply-chain event, and [§5.1](#51-what-nexus-is-actually-for) said the whole point of Nexus is that nothing enters this platform unproxied. So npm gets the same treatment PyPI and Go already have:
 
 ```bash
-curl -u admin:admin123 -X POST 'http://localhost:8081/service/rest/v1/repositories/npm/proxy' \
+# -f so a rejected create is an error, and the status code either way. Without
+# both, Nexus answers 401 or 400 with an EMPTY BODY and this command prints
+# nothing at all — identical to success.
+curl -f -sS -o /dev/null -w 'create: %{http_code}\n' \
+  -u admin:"$NEXUS_ADMIN_PASSWORD" \
+  -X POST 'http://localhost:8081/service/rest/v1/repositories/npm/proxy' \
   -H 'Content-Type: application/json' -d '{
     "name": "npm-proxy",
     "online": true,
@@ -5336,9 +6201,36 @@ curl -u admin:admin123 -X POST 'http://localhost:8081/service/rest/v1/repositori
     "httpClient": { "blocked": false, "autoBlock": true },
     "npm": { "removeNonCataloged": false }
   }'
+# create: 201
 
-curl -s -u admin:admin123 http://localhost:8081/service/rest/v1/repositories | jq -r '.[].name'
+# Assert it exists. Do not eyeball a list of ten repository names.
+curl -sS http://localhost:8081/service/rest/v1/repositories \
+  | jq -e '.[] | select(.name == "npm-proxy")' > /dev/null \
+  && echo "npm-proxy: present" || echo "npm-proxy: MISSING — the create above did not take"
 ```
+
+> [!warning] **A silent failure here surfaces two sections later, as a Yarn error that never mentions Nexus.**
+> `POST /service/rest/v1/repositories/...` returns `201` with an empty body on success — and `401` or
+> `400` with an **equally empty body** on failure. Run it without `-f` and a rejected create looks
+> exactly like a successful one. What you see instead is
+> [§14.3](#143-scaffold-the-portal)'s `yarn add` failing with:
+>
+> ```
+> ➤ YN0035: Package not found
+> ➤ YN0035:   Response Code: 404 (Repository not found)
+> ➤ YN0035:   Request URL: http://nexus:8081/repository/npm-proxy/@backstage%2f...
+> ```
+>
+> **"Repository not found" is Nexus talking about itself, not about the package.** The package name is
+> fine; the *repository* does not exist. Every instinct says to go check the package name and the Yarn
+> config, and both are correct.
+>
+> `$NEXUS_ADMIN_PASSWORD` is whatever you set when you first logged in to Nexus in
+> [§5.2](#52-nexus-the-thing-everything-else-resolves-through) — **not
+> necessarily the `admin123` this tutorial suggested**, and there is no way to recover it once
+> `/nexus-data/admin.password` is deleted on first login. Get it wrong three times and Nexus locks the
+> account out for up to 900 seconds ([§5.8](#58-trust-the-plain-http-registry-from-docker)),
+> so export it once and check the `201` rather than guessing.
 
 ### 14.3 Scaffold the portal
 
@@ -5368,12 +6260,22 @@ release.
 
 Point it at Nexus rather than the public registry — the same choke point the services use:
 
-**`portal/.yarnrc.yml`** (add to what `create-app` generated)
+**`portal/.yarnrc.yml`**
 
 ```yaml
+nodeLinker: node-modules
+
 npmRegistryServer: "http://nexus:8081/repository/npm-proxy/"
+
 unsafeHttpWhitelist:
   - nexus
+
+npmMinimalAgeGate: 3d
+
+npmPreapprovedPackages:
+  - "@backstage/*"
+
+yarnPath: .yarn/releases/yarn-4.18.0.cjs
 ```
 
 Add the scaffolder's GitHub actions. In the new backend system every provider's actions ship as their own module and none are on by default:
@@ -5382,12 +6284,81 @@ Add the scaffolder's GitHub actions. In the new backend system every provider's 
 yarn --cwd packages/backend add @backstage/plugin-scaffolder-backend-module-github
 ```
 
-**`portal/packages/backend/src/index.ts`** — add one line next to the other `backend.add(...)` calls:
+**`portal/packages/backend/src/index.ts`**
 
 ```typescript
-// Without this, `publish:github:pull-request` does not exist and every template
-// run fails at the last step with "action not found" — after doing all the work.
+/*
+ * Hi!
+ *
+ * Note that this is an EXAMPLE Backstage backend. Please check the README.
+ *
+ * Happy hacking!
+ */
+
+import { createBackend } from '@backstage/backend-defaults';
+
+const backend = createBackend();
+
+backend.add(import('@backstage/plugin-app-backend'));
+backend.add(import('@backstage/plugin-proxy-backend'));
+
+// scaffolder plugin
+backend.add(import('@backstage/plugin-scaffolder-backend'));
 backend.add(import('@backstage/plugin-scaffolder-backend-module-github'));
+backend.add(
+  import('@backstage/plugin-scaffolder-backend-module-notifications'),
+);
+
+// techdocs plugin
+backend.add(import('@backstage/plugin-techdocs-backend'));
+
+// auth plugin
+backend.add(import('@backstage/plugin-auth-backend'));
+// See https://backstage.io/docs/backend-system/building-backends/migrating#the-auth-plugin
+backend.add(import('@backstage/plugin-auth-backend-module-guest-provider'));
+// See https://backstage.io/docs/auth/guest/provider
+
+// catalog plugin
+backend.add(import('@backstage/plugin-catalog-backend'));
+backend.add(
+  import('@backstage/plugin-catalog-backend-module-scaffolder-entity-model'),
+);
+
+// See https://backstage.io/docs/features/software-catalog/configuration#subscribing-to-catalog-errors
+backend.add(import('@backstage/plugin-catalog-backend-module-logs'));
+
+// permission plugin
+backend.add(import('@backstage/plugin-permission-backend'));
+// See https://backstage.io/docs/permissions/getting-started for how to create your own permission policy
+backend.add(
+  import('@backstage/plugin-permission-backend-module-allow-all-policy'),
+);
+
+// search plugin
+backend.add(import('@backstage/plugin-search-backend'));
+
+// search engine
+// See https://backstage.io/docs/features/search/search-engines
+backend.add(import('@backstage/plugin-search-backend-module-pg'));
+
+// search collators
+backend.add(import('@backstage/plugin-search-backend-module-catalog'));
+backend.add(import('@backstage/plugin-search-backend-module-techdocs'));
+
+// kubernetes plugin
+backend.add(import('@backstage/plugin-kubernetes-backend'));
+
+// user settings plugin
+backend.add(import('@backstage/plugin-user-settings-backend'));
+
+// notifications and signals plugins
+backend.add(import('@backstage/plugin-notifications-backend'));
+backend.add(import('@backstage/plugin-signals-backend'));
+
+// mcp actions plugin
+backend.add(import('@backstage/plugin-mcp-actions-backend'));
+
+backend.start();
 ```
 
 Check it boots locally before you think about containers:
@@ -5409,6 +6380,11 @@ TLS at the edge and every URL it knows about itself has to agree ([§14.8](#148-
 
 ```yaml
 app:
+  # https, not http. The UI calls crypto.randomUUID, which the browser only
+  # exposes in a secure context — over plain http Backstage renders a blank
+  # page. And once the page is served over https, a backend baseUrl on http
+  # gets every API call blocked as mixed content, so all three URLs here have
+  # to agree.
   baseUrl: https://backstage.localtest.me
 
 backend:
@@ -5448,12 +6424,12 @@ catalog:
     - allow: [Component, System, API, Resource, Location, Template, Group, User]
   locations:
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/catalog-info.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/catalog-info.yaml
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/deploy/backstage/templates/new-service/template.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/deploy/backstage/templates/new-service/template.yaml
       rules: [{ allow: [Template] }]
     - type: url
-      target: https://github.com/<your-github-user>/modern-devops/blob/main/deploy/backstage/templates/new-bucket/template.yaml
+      target: https://github.com/andytavares/modern-devops/blob/main/deploy/backstage/templates/new-bucket/template.yaml
       rules: [{ allow: [Template] }]
 ```
 
@@ -5464,7 +6440,7 @@ catalog:
 
 The catalog is only as useful as it is complete, and it goes stale the moment it lives somewhere other than the code.
 
-**`catalog-info.yaml`** (repo root)
+**`catalog-info.yaml`**
 
 ```yaml
 apiVersion: backstage.io/v1alpha1
@@ -5481,7 +6457,7 @@ metadata:
   name: order-api
   description: FastAPI order intake; prices every order over gRPC before accepting it
   annotations:
-    github.com/project-slug: <your-github-user>/modern-devops
+    github.com/project-slug: andytavares/modern-devops
 spec:
   type: service
   lifecycle: production
@@ -5513,7 +6489,7 @@ metadata:
     Istio can shift traffic between them; the version that answered is returned
     to the caller as `served_by` (§18).
   annotations:
-    github.com/project-slug: <your-github-user>/modern-devops
+    github.com/project-slug: andytavares/modern-devops
 spec:
   type: service
   lifecycle: production
@@ -5530,7 +6506,7 @@ metadata:
     orders, so a traffic shift is something you watch rather than something you
     read out of a metric (§19).
   annotations:
-    github.com/project-slug: <your-github-user>/modern-devops
+    github.com/project-slug: andytavares/modern-devops
 spec:
   type: website
   lifecycle: production
@@ -5780,6 +6756,25 @@ The `Dockerfile` is the same four-line shape order-api's has, deliberately — a
 
 For the chart to render these files, add one template that reads the directory:
 
+**`deploy/charts/order-platform/templates/configmap-scaffolded.yaml`**
+
+```yaml
+{{- if .Files.Glob "services/*.yaml" }}
+{{/*
+Every scaffolded service takes the same config, so they share one ConfigMap.
+Rendered only when at least one service has been scaffolded, so an install with
+none does not leave an orphan object behind.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scaffolded-config
+  labels: {{- include "op.labels" (dict "name" "scaffolded" "root" $) | nindent 4 }}
+data:
+  {{- include "op.commonConfig" . | nindent 2 }}
+{{- end }}
+```
+
 **`deploy/charts/order-platform/templates/scaffolded.yaml`**
 
 ```yaml
@@ -5799,6 +6794,9 @@ metadata:
   labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 4 }}
 spec:
   replicas: {{ $svc.replicas | default 1 }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ $svc.name }}
@@ -5806,6 +6804,10 @@ spec:
     metadata:
       labels: {{- include "op.labels" (dict "name" $svc.name "root" $) | nindent 8 }}
       annotations:
+        # Scaffolded services read their config from the shared ConfigMap through
+        # envFrom, so nothing in the pod template changes when that config does.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-scaffolded.yaml") $ | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ $svc.port | quote }}
@@ -5820,7 +6822,7 @@ spec:
       enableServiceLinks: false
       serviceAccountName: {{ $svc.name }}
       imagePullSecrets:
-        - name: {{ $.Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" $ }}
       securityContext:
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
@@ -5828,11 +6830,14 @@ spec:
         - name: {{ $svc.name }}
           # Every scaffolded service is built from the same commit, so they all
           # carry the same tag. CI writes it once, in deploy/env/local/values.yaml.
-          image: "{{ $.Values.global.registry }}/shop/{{ $svc.name }}:{{ $.Values.scaffolded.tag }}"
+          image: {{ include "op.image" (dict "root" $ "img" (dict "repository" (printf "shop/%s" $svc.name) "tag" $.Values.scaffolded.tag)) }}
           ports:
             - { name: http, containerPort: {{ $svc.port }} }
-          env:
-            {{- include "op.commonEnv" $ | nindent 12 }}
+          envFrom:
+            - configMapRef: { name: scaffolded-config }
+          {{- with include "op.awsCredentialEnv" $ }}
+          env: {{- . | nindent 12 }}
+          {{- end }}
           readinessProbe:
             httpGet: { path: /readyz, port: http }
           resources:
@@ -5863,6 +6868,7 @@ spec:
     app.kubernetes.io/name: {{ $svc.name }}
   ports:
     - { name: http, port: 80, targetPort: http }
+{{- include "op.pdb" (dict "name" $svc.name "root" $ "replicas" ($svc.replicas | default 1) "selector" (dict "app.kubernetes.io/name" $svc.name)) }}
 {{- if $svc.ingress.enabled }}
 ---
 apiVersion: networking.istio.io/v1
@@ -6163,9 +7169,224 @@ plugins
 
 > **Leave `packages/*/src` commented out.** `create-app` writes that exclusion for a host build, where `dist/` is already compiled; our multi-stage build compiles *from* those sources, and excluding them fails `yarn tsc` with `error TS18003: No inputs were found in config file '/app/tsconfig.json'` — an error that names `tsconfig.json` and never mentions Docker. `plugins` stays excluded, because the `COPY plugins plugins` line is commented out above.
 
-**`.buildkite/pipeline.sh`** — after the services loop, before the deploy step:
+**`.buildkite/pipeline.sh`** — the whole file, with the portal build inserted after the
+services loop and before the CD handoff. The only change from
+[§12.5](#125-the-pipeline) is the `:backstage: build portal` block:
 
 ```sh
+#!/bin/sh
+# Emits this build's pipeline as YAML on stdout. It talks to nothing and
+# changes nothing - run it locally and read what it prints.
+#
+# POSIX sh, deliberately: this runs in the default agent image, whose only
+# guaranteed shell is /bin/sh.
+set -eu
+
+REGISTRY="nexus:8082"
+# A build triggered by hand in the UI sets BUILDKITE_COMMIT to the literal
+# string "HEAD" rather than a SHA, which would tag images `:HEAD` — a mutable
+# tag that means a different image on every build, and the exact thing §10.3
+# says a tag must never be. Resolve it to a real SHA before it reaches a tag.
+if [ "$BUILDKITE_COMMIT" = "HEAD" ]; then
+  BUILDKITE_COMMIT="$(git rev-parse HEAD)"
+fi
+SHA="$(echo "$BUILDKITE_COMMIT" | cut -c1-12)"
+
+case "$SHA" in
+  *[!0-9a-f]*|"") echo "refusing to build: BUILDKITE_COMMIT is not a SHA ($BUILDKITE_COMMIT)" >&2; exit 1 ;;
+esac
+
+# Services are discovered, not listed. A directory under services/ with a
+# Dockerfile in it is a service, and that is the entire contract. This is what
+# lets the Backstage paved path (§14.6) add a service without touching CI.
+SERVICES="$(cd services && ls -d */ 2>/dev/null | sed 's#/##' | while read -r s; do
+  [ -f "$s/Dockerfile" ] && echo "$s"
+done | sort | tr '\n' ' ')"
+
+if [ -z "$SERVICES" ]; then
+  echo "no services found under services/*/Dockerfile" >&2
+  exit 1
+fi
+
+# ── LOOP GUARD ─────────────────────────────────────────────────────────────
+# The deploy step at the bottom commits into the repo we build from, so
+# without this every deploy triggers a build that makes another deploy,
+# forever. Deciding it here, before any step exists, is the whole reason this
+# is a script.
+if git log -1 --pretty=%s | grep -q '^chore(deploy):'; then
+  cat <<'YAML'
+steps:
+  - label: ":fast_forward: deploy commit, nothing to build"
+    agents: { queue: kubernetes }
+    command: "echo 'HEAD is a deploy commit; skipping'"
+YAML
+  exit 0
+fi
+
+# ── Header ─────────────────────────────────────────────────────────────────
+# Every step runs in its own Kubernetes pod, created by agent-stack-k8s.
+# The `kubernetes` plugin is how a step describes the pod it wants.
+cat <<'YAML'
+env:
+  # Nexus proxies. Builds never talk to pypi.org or proxy.golang.org directly:
+  # that is the supply-chain choke point from §5.1, made real.
+  # pip needs these to install uv itself. uv does NOT get its index from here:
+  # it reads [[tool.uv.index]] in services/order-api/pyproject.toml, so the
+  # registry is recorded in uv.lock and `--locked` validates the same way on a
+  # laptop and in this pod. Setting UV_DEFAULT_INDEX here instead would put the
+  # index in CI only, and the committed lock would never match it.
+  PIP_INDEX_URL: "http://nexus:8081/repository/pypi-proxy/simple"
+  PIP_TRUSTED_HOST: "nexus"
+  GOPROXY: "http://nexus:8081/repository/go-proxy"
+  # Nothing disables checksum verification. go.sum records a hash for every
+  # module in the build list, so the go command verifies against it locally and
+  # never reaches for the checksum database. GOSUMDB=off would not help here —
+  # it would only disarm verification for the next dependency added.
+  GOFLAGS: "-mod=readonly"
+
+steps:
+  # ── 1. Tests, in parallel ────────────────────────────────────────────────
+  - label: ":python: test order-api"
+    key: test-api
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              - image: python:3.13-slim
+                command:
+                  - |
+                    set -euo pipefail
+                    cd services/order-api
+                    pip install --quiet uv
+                    uv sync --locked --dev
+                    uv run ruff check .
+                    uv run pytest -q
+
+  - label: ":go: test order-worker"
+    key: test-worker
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            containers:
+              # Debian, not alpine: `go test -race` needs cgo, and the alpine
+              # image ships CGO_ENABLED=0 with no C toolchain. Adding gcc and
+              # musl-dev to alpine also works; this is one word instead.
+              - image: golang:1.26
+                command:
+                  - |
+                    set -euo pipefail
+                    cd services/order-worker
+                    go vet ./...
+                    go test -race ./...
+
+  - wait
+YAML
+
+# `golang:1.26` and not `golang:1.26-alpine` for the TEST step specifically:
+#
+#   golang:1.26-alpine : CGO_ENABLED=0, no gcc
+#   golang:1.26        : CGO_ENABLED=1, gcc 14.2.0, git 2.47.3
+#
+# `go test -race` is implemented with a C runtime, so on alpine it refuses with
+# `go: -race requires cgo; enable cgo by setting CGO_ENABLED=1` — and setting
+# that variable alone doesn't help, because there is no compiler to use. The
+# Dockerfile in §3.2 still builds FROM golang:1.26-alpine, and should: there we
+# *want* CGO_ENABLED=0 for a static binary in a scratch image. Test and build
+# want opposite things from the same toolchain, which is why they differ.
+
+# ── 2. Build and push images ───────────────────────────────────────────────
+# One template, one step per service. When these were two hand-maintained
+# YAML blocks they differed only in a name, which is exactly the kind of
+# duplication that drifts without anyone noticing.
+for SVC in $SERVICES; do
+  # Only the Go image takes a version stamp (services/order-worker/Dockerfile
+  # declares ARG VERSION); buildah warns about build-args the Dockerfile never
+  # declares, so don't pass it to the Python one.
+  case "$SVC" in
+    order-worker) BUILD_ARGS="--build-arg \"VERSION=$SHA\" " ;;
+    *)            BUILD_ARGS="" ;;
+  esac
+
+  cat <<YAML
+
+  - label: ":docker: build $SVC ($SHA)"
+    key: build-$SVC
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          podSpec:
+            volumes:
+              - name: nexus-auth
+                secret: { secretName: nexus-push }
+            containers:
+              - image: quay.io/buildah/stable:v1.40.1
+                # Not privileged. Buildah documents chroot isolation plus the
+                # vfs storage driver for running inside an unprivileged
+                # container: chroot avoids CLONE_NEWUSER, and vfs avoids the
+                # overlayfs mknod. What remains is the default OCI capability
+                # set, which Buildah hands to each RUN step and therefore has to
+                # hold itself. Naming those capabilities is the point — the pod
+                # cannot load kernel modules, ptrace, or touch host devices, all
+                # of which full privilege grants.
+                securityContext:
+                  privileged: false
+                  allowPrivilegeEscalation: true
+                  capabilities:
+                    drop: ["ALL"]
+                    add:
+                      - SYS_ADMIN          # mount(2) for the build root
+                      - SYS_CHROOT         # chroot isolation
+                      - SETUID
+                      - SETGID
+                      - SETPCAP
+                      - SETFCAP
+                      - CHOWN
+                      - DAC_OVERRIDE
+                      - FOWNER
+                      - FSETID
+                      - MKNOD
+                      - KILL
+                      - NET_RAW
+                      - NET_BIND_SERVICE
+                      - AUDIT_WRITE
+                  seccompProfile:
+                    type: Unconfined
+                env:
+                  - name: STORAGE_DRIVER
+                    value: vfs
+                  - name: BUILDAH_ISOLATION
+                    value: chroot
+                  - name: BUILDAH_FORMAT
+                    value: docker
+                  - name: REGISTRY_AUTH_FILE
+                    value: /auth/config.json
+                volumeMounts:
+                  - name: nexus-auth
+                    mountPath: /auth
+                    readOnly: true
+                command:
+                  - |
+                    set -euo pipefail
+
+                    # --tls-verify=false exists only because §5.8 runs Nexus
+                    # on plain HTTP. It disables certificate verification on a
+                    # connection that carries push credentials. Behind real TLS
+                    # you delete the flag and mount the CA instead — it is not
+                    # a Buildah setting you keep.
+                    buildah bud \\
+                      --tls-verify=false \\
+                      ${BUILD_ARGS}--file services/$SVC/Dockerfile \\
+                      --tag "$REGISTRY/shop/$SVC:$SHA" \\
+                      services/$SVC
+
+                    buildah push --tls-verify=false "$REGISTRY/shop/$SVC:$SHA"
+
+                    echo "pushed $REGISTRY/shop/$SVC:$SHA"
+YAML
+done
+
 # The portal is not a service and does not fit the services template: a
 # different Dockerfile path, a different context, and a build measured in
 # double-digit minutes.
@@ -6207,6 +7428,65 @@ cat <<YAML
                       portal
 
                     buildah push --tls-verify=false "$REGISTRY/shop/portal:$SHA"
+YAML
+
+# ── 3. The handoff to CD: write the tag into git ───────────────────────────
+cat <<YAML
+
+  - wait
+
+  - label: ":git: bump image tags to $SHA"
+    key: deploy
+    branches: "main"
+    agents: { queue: kubernetes }
+    plugins:
+      - kubernetes:
+          checkout:
+            gitCredentialsSecret:
+              secretName: git-https-credentials
+          podSpec:
+            volumes:
+              - name: git-creds
+                secret: { secretName: git-https-credentials }
+            containers:
+              - image: alpine/git:2.47.2
+                volumeMounts:
+                  - name: git-creds
+                    mountPath: /gitcreds
+                    readOnly: true
+                command:
+                  - |
+                    set -eu
+                    git config user.name  "buildkite"
+                    git config user.email "buildkite@localtest.me"
+                    git config credential.helper "store --file=/gitcreds/.git-credentials"
+
+                    # The overlay has exactly one job - carry the two tags - so
+                    # rewriting it wholesale is deterministic and needs no yq.
+                    # The tags are literals: pipeline.sh already resolved them.
+                    cat > deploy/env/local/values.yaml <<'VALUES'
+                    # Generated by Buildkite. Do not edit by hand.
+                    orderApi:
+                      image:
+                        tag: "$SHA"
+                    orderWorker:
+                      image:
+                        tag: "$SHA"
+                    # Every scaffolded service (§14.6) is built from this same
+                    # commit, so one tag covers all of them.
+                    scaffolded:
+                      tag: "$SHA"
+                    VALUES
+
+                    git add deploy/env/local/values.yaml
+                    if git diff --cached --quiet; then
+                      echo "no change; nothing to deploy"
+                      exit 0
+                    fi
+
+                    git commit -m "chore(deploy): order-platform $SHA [skip ci]"
+                    git push origin HEAD:main
+                    echo "pushed deploy commit; Argo CD will sync"
 YAML
 ```
 
@@ -6853,48 +8133,93 @@ reads `pants_version` out of `pants.toml` and fetches the matching Pants itself.
 from its GitHub release, checksum-verified:
 
 ```bash
-curl -fsSL -o /usr/local/bin/pants \
+# Download to a temp path and verify BEFORE it goes on PATH. A checksum
+# checked *after* installation has already installed the thing.
+curl -fsSL -o /tmp/scie-pants \
   https://github.com/pantsbuild/scie-pants/releases/download/v0.13.2/scie-pants-macos-aarch64
-echo "a6f3231413ca1f793caffa621171a4b1a0158e7488cd0b5bb3e742cb99cc72a8  /usr/local/bin/pants" \
+echo "a6f3231413ca1f793caffa621171a4b1a0158e7488cd0b5bb3e742cb99cc72a8  /tmp/scie-pants" \
   | shasum -a 256 -c -
-chmod 755 /usr/local/bin/pants
+# /tmp/scie-pants: OK
+
+# /usr/local/bin is root:wheel on macOS, so this needs sudo — and `install`
+# sets the mode in the same step, so there is no window where the file is on
+# PATH without one.
+sudo install -m 755 /tmp/scie-pants /usr/local/bin/pants
+rm /tmp/scie-pants
+
+command -v pants
 ```
 
+> [!warning] **`curl -o /usr/local/bin/pants` without `sudo` fails, and the error names neither.**
+> `/usr/local/bin` is `root:wheel` on macOS. curl reports
+> `curl: (56) Failure writing output to destination, passed 16375 returned 4294967295` — a libcurl
+> write error with a 32-bit unsigned `-1` in it, which reads like a network fault. The next line then
+> fails on a file that was never created. The whole thing is a permission denied wearing a costume.
+>
+> `pants --version` is deliberately not the check here: `scie-pants` reads `pants_version` out of
+> `pants.toml`, which does not exist until the next command, so it would fail for an unrelated reason.
+> `command -v pants` is what proves the install.
+
 > **This one binary comes from outside the choke point, deliberately and once.** Everything Pants
-> then resolves — Python wheels, Go modules — goes through [[sonatype-nexus]]
+> then resolves — Python wheels, Go modules — goes through Nexus
 > ([§5.1](#51-what-nexus-is-actually-for)), and CI does not repeat this
 > download at all: `.buildkite/pants-ci.Dockerfile` bakes the same checksum-verified launcher into an
 > image that lives in Nexus ([§19.5](#195-one-ci-step-instead-of-two)). A pinned, hashed, one-time
 > fetch is an honest compromise; `curl … | bash` on every build is not.
 
-The configuration, comments stripped:
+**`pants.toml`**
 
 ```toml
 [GLOBAL]
 pants_version = "2.33.0"
 
+# One build system, four languages. The Python and protobuf-Python backends are
+# stable; go, javascript and typescript are still shipped under
+# `pants.backend.experimental.*` upstream. That is a real risk and it is taken
+# knowingly: the value of a polyglot monorepo is precisely that one tool builds,
+# tests and lints everything, and the escape hatch for any of them is the
+# language's own toolchain, one command away.
 backend_packages = [
+  # Python — stable (ruff lives under experimental.* in 2.33, mypy does not)
   "pants.backend.python",
   "pants.backend.experimental.python.lint.ruff.check",
   "pants.backend.experimental.python.lint.ruff.format",
   "pants.backend.python.typecheck.mypy",
   "pants.backend.codegen.protobuf.python",
+
+  # Go — experimental upstream
   "pants.backend.experimental.go",
   "pants.backend.experimental.codegen.protobuf.go",
+
+  # Frontend — experimental upstream
   "pants.backend.experimental.javascript",
   "pants.backend.experimental.typescript",
 ]
 
+# Everything that is not source. dist/ holds `pants package` output — the PEXes
+# and Go binaries that Buildah later copies into images.
 pants_ignore.add = [
+  # Scaffolder templates, not source. Their BUILD files contain nunjucks
+  # placeholders and are not valid Python until Backstage renders them —
+  # Pants would otherwise fail the whole repo with a BuildFileSyntaxError.
   "/deploy/backstage/templates",
-  "/portal",
-  "/wiki",
+  "/portal",          # Backstage owns its own Yarn workspace; not ours to build
+  "/modern-devops-wiki",
   "/raw",
+  # Pants honours only the root .gitignore — `--pants-ignore-use-gitignore`
+  # "does not yet support reading nested gitignore files" — so frontend/.gitignore
+  # does not reach it and `pants tailor` walks into installed packages and build
+  # output.
   "/frontend/node_modules",
   "/frontend/dist",
 ]
+# `/docs` is deliberately NOT ignored: `checks/` reads the phase files to
+# assemble the single-file edition and to verify every listing still matches
+# the file it names, so Pants has to be able to see them.
 
 [source]
+# Import roots. `protos` is listed so generated code is importable as
+# `shop.v1.pricing_pb2` rather than by a path that leaks the directory layout.
 root_patterns = ["/", "/services/*", "/protos"]
 
 [python]
@@ -6906,13 +8231,41 @@ default_resolve = "python-default"
 python-default = "locks/python-default.lock"
 
 [python-bootstrap]
+# Where Pants looks for a CPython matching the interpreter constraints above.
+# <PYENV> and <PATH> are the defaults; the Homebrew path is added because
+# `brew install python@3.13` puts an unversioned `python` in libexec/bin that
+# is not on PATH, and without it Pants reports
+# "No working interpreter compatible with the requested constraints was found"
+# while a perfectly good 3.13 sits on disk.
 search_path = ["<PYENV>", "<PATH>", "/opt/homebrew/opt/python@3.13/libexec/bin"]
 
 [python-repos]
+# The supply-chain choke point (§5.1) applies to the build system too. Pants
+# resolves through Nexus, not pypi.org, exactly like uv did before it.
 indexes = ["http://nexus:8081/repository/pypi-proxy/simple"]
 
 [golang]
+# Pants defaults cgo_enabled to TRUE, which produces a dynamically linked
+# binary needing /lib/ld-linux-aarch64.so.1. gcr.io/distroless/static has no
+# libc and no linker, so the pod dies with:
+#   exec /order-worker: no such file or directory
+# — on a file that is present and executable, which is why it reads as a
+# missing binary rather than a missing loader. The original hand-written
+# Dockerfile set CGO_ENABLED=0 for exactly this reason; moving the build into
+# Pants silently dropped it.
 cgo_enabled = false
+
+# Go modules resolve through Nexus. Nothing else is overridden here, and that
+# is the point: `go.sum` records a hash for every module in the build list, so
+# verification happens locally against it and never needs the checksum
+# database. Turning GOSUMDB off would not speed that up — it would only disarm
+# verification for the next dependency someone adds. If a genuinely private
+# module ever arrives, the documented escape is scoped, not global:
+# `GOPRIVATE=github.com/yourorg/*`.
+#
+# -mod=readonly is already Go's default; it is stated because it is
+# load-bearing. Under -mod=mod a build may rewrite go.mod and succeed against a
+# dependency set nobody committed.
 subprocess_env_vars = [
   "GOPROXY=http://nexus:8081/repository/go-proxy",
   "GOFLAGS=-mod=readonly",
@@ -6921,12 +8274,19 @@ subprocess_env_vars = [
 ]
 
 [python-protobuf]
+# protoc also emits .pyi stubs for each generated file. Without this, mypy sees
+# pricing_pb2.py building its message classes dynamically via
+# _builder.BuildTopDescriptorsAndMessages(...) into globals() and reports
+# "PriceOrderRequest is not defined" — the classes genuinely do not exist
+# statically. Pants' help prefers this over the older mypy_plugin option.
 generate_type_stubs = true
 
 [mypy]
 install_from_resolve = "python-default"
 
 [test]
+# A test that depends on network or wall-clock is a test that fails in CI at
+# 2am for reasons unrelated to the change. Fail loudly instead.
 timeout_default = 60
 
 [anonymous-telemetry]
@@ -6969,11 +8329,108 @@ The non-obvious lines:
   service ships only what it imports — one requirements file does not mean one fat artifact.
 - **`generate_type_stubs`** is [§18.3](#183-why-protoc-must-emit-pyi-stubs).
 
-Generate the lockfile and commit it:
+**Declare the third-party Python before you lock it.** `generate-lockfiles` resolves the requirements
+Pants can see, and it can see none until a `python_requirements` target points at a file. Run it now
+and it stops with `ValueError: Cannot generate lockfile with no requirements. Please add some
+requirements to python-default.`
+
+**`3rdparty/python/requirements.txt`**
+
+```
+# Third-party Python for the whole monorepo, resolved once into
+# locks/python-default.lock. Pants computes per-target dependencies from
+# imports, so a service only ships what it actually uses — one requirements
+# file does not mean one fat PEX.
+#
+# Versions are pinned by the lockfile, which is committed. Pinning here as well
+# would mean two places to update and one of them silently winning.
+
+# --- gRPC + protobuf runtime (generated code needs these at run time) ---
+grpcio
+grpcio-tools
+protobuf
+# The health checking protocol and server reflection are first-party gRPC
+# add-ons, shipped as separate packages by design. Health is what Kubernetes'
+# `grpc:` probe and grpc_health_probe speak; reflection is what lets grpcurl
+# talk to a server without a local copy of the .proto.
+grpcio-health-checking
+grpcio-reflection
+
+# --- order-api ---
+fastapi[standard]==0.139.2
+aiokafka==0.12.0
+boto3==1.40.11
+prometheus-client==0.23.1
+pydantic==2.11.7
+# FastAPI documents pydantic-settings for exactly the job settings.py was doing
+# by hand: parse the environment, cast it, validate it, and report every missing
+# variable at once instead of only the first.
+pydantic-settings==2.7.1
+
+# --- test + typecheck ---
+pytest==8.4.1
+httpx==0.28.1
+mypy
+types-protobuf
+# grpcio ships no py.typed marker, so mypy cannot see its types at all. Verified
+# via `pants export --resolve=python-default` that site-packages has no py.typed
+# under grpc/ — mypy's own suggestion to install these stubs is correct.
+types-grpcio
+```
+
+**`3rdparty/python/BUILD`**
+
+```python
+python_requirements(
+    name="reqs",
+    source="requirements.txt",
+)
+```
+
+> **One requirements file for the whole monorepo, and everything is here from the start.** The
+> packages this phase has not explained yet — `pydantic-settings` in
+> [§18.6](#186-order-api-calls-pricing), the two gRPC add-ons in
+> [§19.4](#194-the-grpc-server-health-checking-and-reflection), `types-grpcio` — are in the list now
+> so the lockfile is generated **once**. Adding a requirement later means re-running
+> `generate-lockfiles` and committing a new lock, which is the right workflow on a real repo and pure
+> friction in a tutorial. The comments in the file say what each group is for; the sections below say
+> why.
+
+Pants writes its caches and its build output into the repo, so extend the root `.gitignore` before
+the next `git add`. Without `.pants.d/`, a `git add -A` commits a daemon's pid files and a
+several-hundred-megabyte local cache.
+
+**`.gitignore`**
+
+```
+.venv/
+__pycache__/
+bin/
+*.pyc
+.DS_Store
+
+# Pants build output
+/dist/
+.pants.d/
+.pids/
+__pycache__/
+
+# `go build` inside a service directory drops a binary named after the module,
+# next to the source. A 27MB compiled binary was tracked here for exactly that
+# reason.
+/services/order-worker/order-worker
+```
+
+> **Pants reads only the root `.gitignore`.** `--pants-ignore-use-gitignore` "does not yet support
+> reading nested gitignore files", so a `frontend/.gitignore` never reaches Pants and `tailor` walks
+> into `node_modules` ([§17.4](#174-source-roots-and-the-duplicate-module-trap)). This is the one that
+> matters, which is why every ignore in this build lives here.
+
+Now generate the lockfile and commit it:
 
 ```bash
 pants generate-lockfiles --resolve=python-default
-git add locks/python-default.lock 3rdparty/python
+git add .gitignore locks/python-default.lock 3rdparty/python
 ```
 
 ### 17.4 Source roots, and the duplicate-module trap
@@ -7006,10 +8463,131 @@ skeleton ([§14.6](#146-paved-path-1--a-new-service)) templates its package
 directory as `${{ values.name | replace('-', '_') }}` for exactly this reason, so a scaffolded
 `quotes-api` arrives with a `quotes_api/` package and collides with nothing.
 
-### 17.5 One command, and what it actually does
+### 17.5 Targets, and the two files that decide whether the checks pass
 
+
+Pants needs a `BUILD` file per source directory. `pants tailor ::` will generate skeletons, and they
+are not what this repo runs — tailor writes one `BUILD` per directory and has no way to know which
+binary is deployable or where its artifact should land. Write them:
+
+**`services/order-api/BUILD`**
+
+```python
+python_sources(
+    name="lib",
+    sources=["order_api/**/*.py"],
+)
+
+python_tests(
+    name="tests",
+    # `!tests/__init__.py`: it's a namespace marker, not a test — including it
+    # makes Pants generate a `python_test` target for it that pytest then fails
+    # with "no tests collected".
+    sources=["tests/**/*.py", "!tests/__init__.py"],
+    dependencies=[":lib"],
+)
+
+pex_binary(
+    name="bin",
+    # Declares this target as something CI ships. `pants --tag=deployable
+    # package ::` selects on it, so a service is packaged the moment it says
+    # so itself — no list in the pipeline to keep in sync.
+    tags=["deployable"],
+    entry_point="order_api.main:main",
+    dependencies=[":lib"],
+    # Land in dist/ under a predictable name so dist/ can be used directly as
+    # the Buildah build context and the Dockerfile can COPY by name. Default
+    # would be dist/services.order-api/bin.pex.
+    output_path="order-api.pex",
+)
+```
+
+**`services/order-worker/BUILD`**
+
+```python
+go_binary(
+    name="bin",
+    tags=["deployable"],
+    output_path="order-worker",
+)
+
+go_mod()
+
+go_package(
+    name="order-worker0",
+)
+```
+
+> **`go_package(name="order-worker0")` is tailor's name and it is kept on purpose.** Pants generates
+> it when the module and the package share a directory, and renaming it means renaming it in every
+> reference. The `0` is ugly and it is not a mistake.
+
+Now the type checker. mypy fails on the first run without this, on three of `order-api`'s
+dependencies — `boto3`, `botocore` and `aiokafka` publish no `py.typed` marker and no stubs exist for
+them:
+
+```
+services/order-api/order_api/main.py:11: error: Skipping analyzing "boto3": module is
+  installed, but missing library stubs or py.typed marker  [import-untyped]
+```
+
+**`mypy.ini`**
+
+```ini
+[mypy]
+# Pants discovers this file automatically ([mypy].config_discovery defaults to
+# true). Everything below is a PER-MODULE exception with a stated reason — there
+# is deliberately no global ignore_missing_imports, because that would silence
+# real typos in our own imports as well as third-party gaps.
+
+[mypy-google.protobuf.*]
+# types-protobuf IS in the resolve, but stub packages are never *imported*, so
+# Pants cannot infer them as a dependency of any target and they never land in
+# mypy's sandbox. Pants 2.33's [mypy] exposes only `skip` and `args` — there is
+# no extra_type_stubs lever. The generated .pyi files import google.protobuf,
+# so without this every protobuf-using target fails on generated code we do not
+# write.
+ignore_missing_imports = true
+
+[mypy-aiokafka.*]
+# aiokafka publishes no py.typed marker and no stubs package exists on PyPI.
+# Nothing to install; this is the honest state of the dependency.
+ignore_missing_imports = true
+
+[mypy-boto3.*]
+# boto3/botocore are untyped at runtime. boto3-stubs exists and would be a real
+# improvement, but it is a large dependency and pulling it in is a deliberate
+# decision rather than a side effect of this migration. Tracked, not hidden.
+ignore_missing_imports = true
+
+[mypy-botocore.*]
+ignore_missing_imports = true
+
+[mypy-yaml]
+# pyyaml is a dependency of the CI *image*, not of the Python resolve:
+# checks/verify_chart.py runs as a plain script against a rendered chart, not
+# through Pants, so pyyaml is installed in .buildkite/pants-ci.Dockerfile
+# instead. mypy therefore has nothing to import here.
+ignore_missing_imports = true
+```
+
+> **Every exception is per-module and carries its reason.** A global `ignore_missing_imports = true`
+> at the top would make all three errors disappear — along with every typo in your *own* import
+> statements, which is the entire class of error mypy is here to catch. The rule worth taking from
+> this file: **an exception you cannot write a sentence to justify is an exception you should not
+> take.**
+
+### 17.6 One command, and what it actually does
+
+
+`ruff` reformats the Python written in [§3.1](#31-order-api-python--fastapi),
+which was never run through it. So the first thing is a format, not a check — otherwise the command
+below fails on `ruff format` and never reaches the type checker or the tests:
 
 ```bash
+pants fmt ::
+# + ruff format made changes.
+
 pants lint check test ::
 ```
 
@@ -7035,16 +8613,24 @@ reading imports.
 ### 18.1 The contract
 
 
-**`protos/shop/v1/pricing.proto`** (comments stripped — the file itself carries the reasoning inline)
+**`protos/shop/v1/pricing.proto`**
 
 ```protobuf
 syntax = "proto3";
 
 package shop.v1;
 
+// One .proto, two languages, one build system. Pants generates Python stubs for
+// order-api and pricing, and Go stubs for order-worker, from this single file —
+// which is the entire argument for a polyglot monorepo. Change a field here and
+// both languages fail to compile in the same `pants check ::`, before anything
+// reaches a cluster.
 option go_package = "github.com/andytavares/modern-devops/protos/shop/v1;shopv1";
 
 service Pricing {
+  // Priced synchronously on the order path, which is what makes it a useful
+  // subject for §9: a timeout here is a user-visible failure, so retries,
+  // outlier detection and traffic shifting all have observable consequences.
   rpc PriceOrder(PriceOrderRequest) returns (PriceOrderResponse);
 }
 
@@ -7059,6 +8645,10 @@ message PriceOrderResponse {
   int32 total_amount_cents = 1;
   int32 discount_cents = 2;
   string rule_applied = 3;
+
+  // Which pricing implementation served this call. The frontend tallies it, so
+  // a VirtualService weight change is visible in a browser within seconds
+  // rather than only in Kiali. This field is the whole canary demo.
   string served_by = 4;
 }
 ```
@@ -7070,9 +8660,12 @@ change something you watch in a browser rather than infer from a metric.
 
 Money is `int32` cents throughout. Floating-point currency is a bug you ship once.
 
-**`protos/shop/v1/BUILD`** (comments stripped)
+**`protos/shop/v1/BUILD`**
 
 ```python
+# grpc=True generates the service stubs, not just the messages. One target feeds
+# both language backends — Python via pants.backend.codegen.protobuf.python and
+# Go via pants.backend.experimental.codegen.protobuf.go.
 protobuf_sources(
     name="protos",
     sources=["*.proto"],
@@ -7168,6 +8761,118 @@ local copy of the `.proto`.
 **`services/pricing/pricing/main.py`**
 
 ```python
+import logging
+import signal
+import sys
+import time
+from concurrent import futures
+from types import FrameType
+
+import grpc
+
+# typeshed publishes types-grpcio-health-checking and types-grpcio-reflection,
+# but neither is in 3rdparty/python/requirements.txt, so mypy has nothing to
+# read. The ignore is per-import and per-error-code: it silences these two
+# packages and nothing else.
+from grpc_health.v1 import (  # type: ignore[import-untyped]
+    health,
+    health_pb2,
+    health_pb2_grpc,
+)
+from grpc_reflection.v1alpha import reflection  # type: ignore[import-untyped]
+from prometheus_client import Counter, Histogram, start_http_server
+from shop.v1 import pricing_pb2, pricing_pb2_grpc
+
+from .settings import settings  # pants: no-infer-dep (already colocated in this target)
+
+# ---------- logging ----------
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format='{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}',
+)
+log = logging.getLogger("pricing")
+
+# ---------- metrics ----------
+PRICING_REQUESTS = Counter(
+    "pricing_requests_total",
+    "Priced orders, by rule and serving version",
+    ["rule", "version"],
+)
+PRICING_DURATION = Histogram(
+    "pricing_request_duration_seconds", "Time to price one order"
+)
+
+# Service names are read off the generated descriptors rather than written out
+# as string literals, so renaming a service in the .proto cannot leave a stale
+# name registered with health checking or reflection.
+PRICING_SERVICE_NAME = pricing_pb2.DESCRIPTOR.services_by_name["Pricing"].full_name
+HEALTH_SERVICE_NAME = health_pb2.DESCRIPTOR.services_by_name["Health"].full_name
+
+# Seconds in-flight RPCs get to finish after SIGTERM before they are aborted.
+SHUTDOWN_GRACE_SECONDS = 5
+
+
+def calculate_price(
+    quantity: int, unit_amount_cents: int, version: str
+) -> tuple[int, int, str]:
+    """Pure pricing logic, version-switched.
+
+    v1: list price, no discount.
+    v2: same, but a 3+ quantity line gets 10% off (integer math, rounded down).
+    """
+    list_total = unit_amount_cents * quantity
+    discount_cents = 0
+    rule_applied = "list-price"
+    if version == "v2" and quantity >= 3:
+        discount_cents = (list_total * 10) // 100
+        rule_applied = "bulk-10pct"
+    return list_total - discount_cents, discount_cents, rule_applied
+
+
+def validate_request(sku: str, quantity: int, unit_amount_cents: int) -> None:
+    """Raises ValueError with a useful message on invalid input."""
+    if not sku:
+        raise ValueError("sku must not be empty")
+    if quantity < 1:
+        raise ValueError(f"quantity must be >= 1, got {quantity}")
+    if unit_amount_cents < 1:
+        raise ValueError(f"unit_amount_cents must be >= 1, got {unit_amount_cents}")
+
+
+class PricingServicer(pricing_pb2_grpc.PricingServicer):
+    def PriceOrder(
+        self, request: pricing_pb2.PriceOrderRequest, context: grpc.ServicerContext
+    ) -> pricing_pb2.PriceOrderResponse:
+        started = time.perf_counter()
+        try:
+            validate_request(request.sku, request.quantity, request.unit_amount_cents)
+        except ValueError as exc:
+            # abort() raises, so it terminates the RPC in one call and cannot be
+            # followed by an accidental successful return.
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+
+        total_amount_cents, discount_cents, rule_applied = calculate_price(
+            request.quantity, request.unit_amount_cents, settings.version
+        )
+
+        PRICING_REQUESTS.labels(rule=rule_applied, version=settings.version).inc()
+        PRICING_DURATION.observe(time.perf_counter() - started)
+        log.info(
+            "priced sku=%s quantity=%d rule=%s served_by=%s",
+            request.sku,
+            request.quantity,
+            rule_applied,
+            settings.version,
+        )
+        return pricing_pb2.PriceOrderResponse(
+            total_amount_cents=total_amount_cents,
+            discount_cents=discount_cents,
+            rule_applied=rule_applied,
+            served_by=settings.version,
+        )
+
+
 def build_server() -> tuple[grpc.Server, health.HealthServicer]:
     """Assemble the gRPC server: pricing, health checking and reflection.
 
@@ -7177,20 +8882,369 @@ def build_server() -> tuple[grpc.Server, health.HealthServicer]:
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     pricing_pb2_grpc.add_PricingServicer_to_server(PricingServicer(), server)
 
+    # The non-blocking servicer answers Watch from its own pool instead of
+    # parking a request thread per watcher, which is what the gRPC health
+    # example uses.
     health_servicer = health.HealthServicer(
         experimental_non_blocking=True,
         experimental_thread_pool=futures.ThreadPoolExecutor(max_workers=10),
     )
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    # The protocol requires the server to register every service explicitly,
+    # including the empty service name that carries overall server health. A
+    # name that is not registered gets NOT_FOUND, not NOT_SERVING, so anything
+    # a probe may ask for has to be set here.
     for service_name in ("", PRICING_SERVICE_NAME):
         health_servicer.set(service_name, health_pb2.HealthCheckResponse.SERVING)
 
+    # Python reflection has no automatic service discovery: every service the
+    # server exposes has to be named, including reflection itself. Without this,
+    # grpcurl needs a local copy of the .proto to call anything.
     reflection.enable_server_reflection(
         (PRICING_SERVICE_NAME, HEALTH_SERVICE_NAME, reflection.SERVICE_NAME),
         server,
     )
     return server, health_servicer
+
+
+def serve() -> None:
+    server, health_servicer = build_server()
+    server.add_insecure_port(f"[::]:{settings.grpc_port}")
+
+    # prometheus_client's own server, in a daemon thread, is the documented way
+    # to expose metrics from a process that is not a web application.
+    start_http_server(settings.http_port)
+    server.start()
+
+    log.info(
+        "pricing started version=%s grpc_port=%d metrics_port=%d",
+        settings.version,
+        settings.grpc_port,
+        settings.http_port,
+    )
+
+    def handle_sigterm(signum: int, frame: FrameType | None) -> None:
+        log.info("received signal %d, shutting down", signum)
+        # Flips every registered service to NOT_SERVING and fails later Check
+        # calls, so readiness probes see the pod leaving before the listener
+        # disappears.
+        health_servicer.enter_graceful_shutdown()
+        server.stop(SHUTDOWN_GRACE_SECONDS)
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
+    server.wait_for_termination()
+    log.info("pricing stopped")
+
+
+def main() -> None:
+    serve()
+
+
+if __name__ == "__main__":
+    main()
 ```
+
+`main.py` imports its configuration, and the package needs its marker files — Pants infers targets
+from imports, and a package without `__init__.py` is not importable under the `/services/*` source
+root:
+
+**`services/pricing/pricing/settings.py`**
+
+```python
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Config from the environment.
+
+    pydantic-settings does the parsing, casting and validation, and reports
+    every bad or missing variable at once instead of only the first.
+    """
+
+    # Every variable this service reads is prefixed, so the field names stay
+    # short and nothing here can collide with an unprefixed cluster variable.
+    model_config = SettingsConfigDict(env_prefix="PRICING_")
+
+    grpc_port: int = 50051
+    http_port: int = 9090
+    version: str = "v1"
+
+
+settings = Settings()
+```
+
+**`services/pricing/pricing/__init__.py`** is empty, and so is
+**`services/pricing/tests/__init__.py`**:
+
+```bash
+mkdir -p services/pricing/pricing services/pricing/tests
+touch services/pricing/pricing/__init__.py services/pricing/tests/__init__.py
+```
+
+**`services/pricing/tests/test_pricing.py`**
+
+```python
+from collections.abc import Iterator
+
+import grpc
+import pytest
+from grpc_health.v1 import health_pb2, health_pb2_grpc  # type: ignore[import-untyped]
+from grpc_reflection.v1alpha import (  # type: ignore[import-untyped]
+    reflection,
+    reflection_pb2,
+    reflection_pb2_grpc,
+)
+from shop.v1 import pricing_pb2, pricing_pb2_grpc
+
+from pricing.main import (
+    HEALTH_SERVICE_NAME,
+    PRICING_SERVICE_NAME,
+    build_server,
+    calculate_price,
+    validate_request,
+)
+from pricing.settings import Settings
+
+
+class TestCalculatePriceV1:
+    def test_no_discount_regardless_of_quantity(self) -> None:
+        total, discount, rule = calculate_price(
+            quantity=5, unit_amount_cents=1000, version="v1"
+        )
+        assert total == 5000
+        assert discount == 0
+        assert rule == "list-price"
+
+    def test_single_unit(self) -> None:
+        total, discount, rule = calculate_price(
+            quantity=1, unit_amount_cents=250, version="v1"
+        )
+        assert total == 250
+        assert discount == 0
+        assert rule == "list-price"
+
+
+class TestCalculatePriceV2:
+    def test_discounts_at_quantity_three(self) -> None:
+        total, discount, rule = calculate_price(
+            quantity=3, unit_amount_cents=1000, version="v2"
+        )
+        assert discount == 300  # 10% of 3000
+        assert total == 2700
+        assert rule == "bulk-10pct"
+
+    def test_discounts_above_quantity_three(self) -> None:
+        total, discount, rule = calculate_price(
+            quantity=10, unit_amount_cents=999, version="v2"
+        )
+        assert discount == 999  # floor(9990 * 0.10)
+        assert total == 9990 - 999
+        assert rule == "bulk-10pct"
+
+    def test_no_discount_below_quantity_three(self) -> None:
+        total, discount, rule = calculate_price(
+            quantity=2, unit_amount_cents=1000, version="v2"
+        )
+        assert total == 2000
+        assert discount == 0
+        assert rule == "list-price"
+
+    def test_discount_rounds_down(self) -> None:
+        # list_total = 3 * 101 = 303; 10% = 30.3 -> floor to 30
+        total, discount, rule = calculate_price(
+            quantity=3, unit_amount_cents=101, version="v2"
+        )
+        assert discount == 30
+        assert total == 273
+        assert rule == "bulk-10pct"
+
+
+def test_served_by_reflects_version() -> None:
+    # calculate_price itself doesn't set served_by (that's the servicer's job),
+    # but the version argument it's given is what would end up in served_by.
+    _, _, rule_v1 = calculate_price(quantity=3, unit_amount_cents=1000, version="v1")
+    _, _, rule_v2 = calculate_price(quantity=3, unit_amount_cents=1000, version="v2")
+    assert rule_v1 == "list-price"
+    assert rule_v2 == "bulk-10pct"
+
+
+class TestValidateRequest:
+    def test_valid_request_does_not_raise(self) -> None:
+        validate_request(sku="widget-1", quantity=1, unit_amount_cents=1)
+
+    def test_empty_sku_raises(self) -> None:
+        with pytest.raises(ValueError, match="sku"):
+            validate_request(sku="", quantity=1, unit_amount_cents=100)
+
+    def test_zero_quantity_raises(self) -> None:
+        with pytest.raises(ValueError, match="quantity"):
+            validate_request(sku="widget-1", quantity=0, unit_amount_cents=100)
+
+    def test_negative_quantity_raises(self) -> None:
+        with pytest.raises(ValueError, match="quantity"):
+            validate_request(sku="widget-1", quantity=-1, unit_amount_cents=100)
+
+    def test_zero_unit_amount_raises(self) -> None:
+        with pytest.raises(ValueError, match="unit_amount_cents"):
+            validate_request(sku="widget-1", quantity=1, unit_amount_cents=0)
+
+    def test_negative_unit_amount_raises(self) -> None:
+        with pytest.raises(ValueError, match="unit_amount_cents"):
+            validate_request(sku="widget-1", quantity=1, unit_amount_cents=-5)
+
+
+class TestSettings:
+    def test_reads_prefixed_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PRICING_GRPC_PORT", "50999")
+        monkeypatch.setenv("PRICING_HTTP_PORT", "9111")
+        monkeypatch.setenv("PRICING_VERSION", "v2")
+        loaded = Settings()
+        assert loaded.grpc_port == 50999
+        assert loaded.http_port == 9111
+        assert loaded.version == "v2"
+
+    def test_ports_are_coerced_to_int(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PRICING_GRPC_PORT", "50051")
+        assert Settings().grpc_port == 50051
+
+    def test_non_numeric_port_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PRICING_GRPC_PORT", "not-a-port")
+        with pytest.raises(ValueError, match="grpc_port"):
+            Settings()
+
+
+@pytest.fixture
+def channel() -> Iterator[grpc.Channel]:
+    """The real server, on an ephemeral port, over a real channel.
+
+    Health checking and reflection are wire protocols; asserting on them from
+    inside the process would prove nothing about what a kubelet or grpcurl sees.
+    """
+    server, _ = build_server()
+    port = server.add_insecure_port("[::]:0")
+    server.start()
+    with grpc.insecure_channel(f"localhost:{port}") as chan:
+        yield chan
+    server.stop(None).wait()
+
+
+class TestHealthChecking:
+    def test_pricing_service_reports_serving(self, channel: grpc.Channel) -> None:
+        stub = health_pb2_grpc.HealthStub(channel)
+        response = stub.Check(
+            health_pb2.HealthCheckRequest(service="shop.v1.Pricing"), timeout=5
+        )
+        assert response.status == health_pb2.HealthCheckResponse.SERVING
+
+    def test_overall_health_reports_serving(self, channel: grpc.Channel) -> None:
+        # The empty service name is the server's overall status, and it is what
+        # a `grpc:` probe with no `service:` field asks for.
+        stub = health_pb2_grpc.HealthStub(channel)
+        response = stub.Check(health_pb2.HealthCheckRequest(service=""), timeout=5)
+        assert response.status == health_pb2.HealthCheckResponse.SERVING
+
+    def test_unregistered_service_is_not_found(self, channel: grpc.Channel) -> None:
+        stub = health_pb2_grpc.HealthStub(channel)
+        with pytest.raises(grpc.RpcError) as excinfo:
+            stub.Check(health_pb2.HealthCheckRequest(service="shop.v1.Nope"), timeout=5)
+        assert excinfo.value.code() == grpc.StatusCode.NOT_FOUND
+
+    def test_graceful_shutdown_flips_every_service(self) -> None:
+        server, health_servicer = build_server()
+        port = server.add_insecure_port("[::]:0")
+        server.start()
+        try:
+            with grpc.insecure_channel(f"localhost:{port}") as chan:
+                stub = health_pb2_grpc.HealthStub(chan)
+                health_servicer.enter_graceful_shutdown()
+                for service_name in ("", "shop.v1.Pricing"):
+                    response = stub.Check(
+                        health_pb2.HealthCheckRequest(service=service_name), timeout=5
+                    )
+                    assert response.status == health_pb2.HealthCheckResponse.NOT_SERVING
+        finally:
+            server.stop(None).wait()
+
+
+class TestReflection:
+    def test_lists_pricing_health_and_reflection(self, channel: grpc.Channel) -> None:
+        stub = reflection_pb2_grpc.ServerReflectionStub(channel)
+        responses = stub.ServerReflectionInfo(
+            iter([reflection_pb2.ServerReflectionRequest(list_services="")]),
+            timeout=5,
+        )
+        listed = {
+            service.name
+            for response in responses
+            for service in response.list_services_response.service
+        }
+        assert PRICING_SERVICE_NAME in listed
+        assert HEALTH_SERVICE_NAME in listed
+        assert reflection.SERVICE_NAME in listed
+
+
+class TestPriceOrderRpc:
+    def test_valid_request_is_priced(self, channel: grpc.Channel) -> None:
+        stub = pricing_pb2_grpc.PricingStub(channel)
+        response = stub.PriceOrder(
+            pricing_pb2.PriceOrderRequest(
+                sku="widget-1", quantity=1, unit_amount_cents=250
+            ),
+            timeout=5,
+        )
+        assert response.total_amount_cents == 250
+        assert response.rule_applied == "list-price"
+
+    def test_invalid_request_aborts_with_invalid_argument(
+        self, channel: grpc.Channel
+    ) -> None:
+        # abort() must terminate the RPC. set_code/set_details followed by a
+        # return would arrive here as a successful empty response instead.
+        stub = pricing_pb2_grpc.PricingStub(channel)
+        with pytest.raises(grpc.RpcError) as excinfo:
+            stub.PriceOrder(
+                pricing_pb2.PriceOrderRequest(
+                    sku="", quantity=1, unit_amount_cents=250
+                ),
+                timeout=5,
+            )
+        assert excinfo.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+        details = excinfo.value.details()
+        assert details is not None
+        assert "sku" in details
+```
+
+**`services/pricing/Dockerfile`** — the same shape as the other two services, and the file
+[§19.5](#195-one-ci-step-instead-of-two)'s discovery loop looks for to decide that `pricing` is a
+service CI should build at all:
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+#
+# Build context is `dist/` (the `pants package services/pricing:bin` output),
+# not the source tree: the PEX already bundles the interpreter-independent
+# dependency closure resolved by Pants from locks/python-default.lock, so there
+# is nothing left for this image to resolve or install.
+FROM docker.io/library/python:3.13-slim
+
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin appuser
+
+WORKDIR /app
+COPY --chown=10001:10001 pricing.pex /app/pricing.pex
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER 10001
+# 50051 gRPC (application, health checking and reflection), 9090 Prometheus
+# metrics. Probes speak the gRPC health protocol on 50051, not HTTP.
+EXPOSE 50051 9090
+ENTRYPOINT ["python", "/app/pricing.pex"]
+```
+
 
 Three things are load-bearing:
 
@@ -7235,7 +9289,7 @@ anything else → 502 — and every outcome increments `pricing_calls_total{resu
 > **It does not fall back to a locally computed price, and that is a deliberate choice you should
 > argue with.** A fallback is the kinder production design: the customer gets an order instead of an
 > error. It is also the thing that would make every experiment in
-> [§9.8](#98-canary-two-versions-of-pricing-behind-one-service) invisible — a
+> [§9.9](#99-canary-two-versions-of-pricing-behind-one-service) invisible — a
 > canary you cannot see fail teaches nothing, and a silent fallback is how a dependency stays broken
 > for a week. **The general rule: a fallback that is not itself alarmed on is a way of not finding
 > out.** If you add one, add `pricing_calls_total{result="fallback"}` and an alert on it in the same
@@ -7253,12 +9307,13 @@ outlier detection mean anything at all.
 A pricing service nothing calls is a pricing service you cannot canary. The rest of this section is
 the caller side: the address, the client, the metric, the call, and the tests. Do it now — everything
 downstream ([§19.4](#194-the-frontend-vite-and-a-live-tally),
-[§9.8](#98-canary-two-versions-of-pricing-behind-one-service)) depends on it.
+[§9.9](#99-canary-two-versions-of-pricing-behind-one-service)) depends on it.
 
 **Address and deadlines.** `order-api`'s settings module is now a `pydantic-settings` `BaseSettings`
 subclass. Hand-rolled environment parsing is the job that library exists to do, and it is the approach
 FastAPI documents. Replace [§3.1](#31-order-api-python--fastapi)'s version
-with this, and add `pydantic-settings` to `3rdparty/python/requirements.txt`:
+with this. `pydantic-settings` is already in `3rdparty/python/requirements.txt` and in the lock
+([§17.3](#173-pantstoml)), so there is nothing to re-resolve:
 
 **`services/order-api/order_api/settings.py`**
 
@@ -7286,9 +9341,14 @@ class Settings(BaseSettings):
     kafka_topic: str = "orders"
 
     s3_bucket: str
+    # boto3 owns the name AWS_DEFAULT_REGION, so the field cannot simply be
+    # called `default_region`; the alias binds the field to the variable boto3
+    # and every AWS tool already expect.
     aws_region: str = Field(default="us-east-1", validation_alias="AWS_DEFAULT_REGION")
     aws_endpoint_url: str | None = None
 
+    # Injected by External Secrets Operator from OpenBao. See §7. The alias keeps
+    # the variable namespaced to this service while the field stays generic.
     signing_key: str = Field(validation_alias="ORDER_SIGNING_KEY")
 
     service_version: str = "dev"
@@ -7296,9 +9356,15 @@ class Settings(BaseSettings):
 
     pricing_addr: str = "pricing.shop.svc.cluster.local:50051"
     pricing_timeout_seconds: float = 2.0
+    # Readiness must answer fast enough that a probe times out on the probe's
+    # terms, not ours. Kept well under the order-path timeout above.
     pricing_health_timeout_seconds: float = 1.0
 
 
+# pydantic's metaclass is a PEP 681 `dataclass_transform`, so mypy synthesises an
+# `__init__` taking every field and reports the three required ones as missing
+# arguments. They are not passed as arguments — BaseSettings reads them from the
+# environment, which is the entire point of the class.
 settings = Settings()  # type: ignore[call-arg]
 ```
 
@@ -7322,7 +9388,7 @@ Three details are not guessable:
 `pricing_addr`'s default matches the `Service` the chart creates in [§19.3](#193-a-pex-needs-somewhere-to-write-and-readonlyrootfilesystem-gives-it-nowhere)
 (`pricing`, namespace `shop`, port 50051), so `order-api.yaml` needs no new env entry. The timeout is
 a setting rather than a constant because it is the number you tune when
-[§9.8](#98-canary-two-versions-of-pricing-behind-one-service) starts injecting
+[§9.9](#99-canary-two-versions-of-pricing-behind-one-service) starts injecting
 delays. `pricing_health_timeout_seconds` is separate and shorter: readiness must answer on the probe's
 schedule, not on the order path's.
 
@@ -7331,17 +9397,317 @@ schedule, not on the order path's.
 **`services/order-api/order_api/main.py`**
 
 ```python
+import hashlib
+import hmac
+import json
+import logging
+import sys
+import time
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
+import boto3
 import grpc
+import uvicorn  # pants: no-infer-dep  (via fastapi[standard])
+from aiokafka import AIOKafkaProducer
+from botocore.config import Config as BotoConfig  # pants: no-infer-dep  (via boto3)
+from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
+
+# grpcio-health-checking ships no py.typed marker, so mypy cannot see the
+# generated health stubs. Declared at the import rather than behind a global
+# ignore_missing_imports, which would silence real typos as well.
 from grpc_health.v1 import health_pb2, health_pb2_grpc  # type: ignore[import-untyped]
 from prometheus_client import Counter, Histogram, make_asgi_app
+from pydantic import BaseModel, Field
+
 from shop.v1 import pricing_pb2, pricing_pb2_grpc
+
+from .settings import settings
+
+# ---------- logging ----------
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format='{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}',
+)
+log = logging.getLogger("order-api")
+
+# ---------- metrics ----------
+ORDERS_RECEIVED = Counter(
+    "orders_received_total", "Orders accepted by the API", ["result"]
+)
+ORDER_LATENCY = Histogram(
+    "order_ingest_duration_seconds", "Time to persist and publish one order"
+)
+PRICING_CALLS = Counter(
+    "pricing_calls_total",
+    "Outcomes of calls to the pricing service",
+    ["result", "served_by"],
+)
+
+# The key pricing registers itself under with the health checking protocol is its
+# fully-qualified proto service name. Read off the descriptor rather than written
+# as a literal, so the two sides cannot drift when the .proto is renamed. An empty
+# string would ask for the server's overall health; we want the one service we
+# depend on. https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+PRICING_SERVICE_NAME = pricing_pb2.DESCRIPTOR.services_by_name["Pricing"].full_name
+
+# The standard gRPC → HTTP status mapping. Collapsing every upstream failure to
+# 502 tells the caller nothing: a deadline, an overload and a malformed order are
+# three different problems with three different correct responses. Anything not
+# listed is a genuine upstream fault, which is what 502 means.
+GRPC_TO_HTTP_STATUS: dict[grpc.StatusCode, int] = {
+    grpc.StatusCode.DEADLINE_EXCEEDED: 504,
+    grpc.StatusCode.UNAVAILABLE: 503,
+    grpc.StatusCode.INVALID_ARGUMENT: 400,
+    grpc.StatusCode.RESOURCE_EXHAUSTED: 429,
+}
+
+# A server that answers Check with one of these is demonstrably reachable and
+# responsive; it simply does not publish health for this service name. gRPC's own
+# documentation requires clients to handle a server without the Health service,
+# so this is "reachable, health unknown" — not a readiness failure.
+HEALTH_NOT_PUBLISHED = (grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED)
+
+
+class PricingClient:
+    """Thin async wrapper around the generated Pricing stub.
+
+    Uses grpc.aio so a slow or unavailable pricing service can't block the
+    event loop. Deliberately has no fallback path: a failed price is a failed
+    order, not a locally guessed one.
+    """
+
+    def __init__(
+        self, address: str, timeout_seconds: float, health_timeout_seconds: float
+    ) -> None:
+        self._channel = grpc.aio.insecure_channel(address)
+        self._stub = pricing_pb2_grpc.PricingStub(self._channel)
+        self._health_stub = health_pb2_grpc.HealthStub(self._channel)
+        self._timeout_seconds = timeout_seconds
+        self._health_timeout_seconds = health_timeout_seconds
+
+    async def price_order(
+        self, *, sku: str, quantity: int, unit_amount_cents: int, customer: str
+    ) -> pricing_pb2.PriceOrderResponse:
+        request = pricing_pb2.PriceOrderRequest(
+            sku=sku,
+            quantity=quantity,
+            unit_amount_cents=unit_amount_cents,
+            customer=customer,
+        )
+        return await self._stub.PriceOrder(request, timeout=self._timeout_seconds)
+
+    async def is_ready(self) -> bool:
+        """Ask pricing whether it is serving, over grpc.health.v1.
+
+        This is a real RPC with a deadline, which is the only thing that proves
+        the dependency is answering. Channel connectivity state does not: a
+        channel that has never reached anything is IDLE or CONNECTING, both of
+        which look fine and neither of which means a call would succeed.
+        https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+        """
+        request = health_pb2.HealthCheckRequest(service=PRICING_SERVICE_NAME)
+        try:
+            response = await self._health_stub.Check(
+                request, timeout=self._health_timeout_seconds
+            )
+        except grpc.aio.AioRpcError as exc:
+            if exc.code() in HEALTH_NOT_PUBLISHED:
+                log.warning(
+                    "pricing does not publish health for %s (code=%s); "
+                    "treating a live response as ready",
+                    PRICING_SERVICE_NAME,
+                    exc.code(),
+                )
+                return True
+            log.warning("pricing health check failed code=%s", exc.code())
+            return False
+        return response.status == health_pb2.HealthCheckResponse.SERVING
+
+    async def close(self) -> None:
+        await self._channel.close()
+
+
+# ---------- state ----------
+state: dict = {"producer": None, "s3": None, "pricing": None, "ready": False}
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Start dependencies before serving; drain them on shutdown."""
+    state["s3"] = boto3.client(
+        "s3",
+        endpoint_url=settings.aws_endpoint_url,
+        region_name=settings.aws_region,
+        # Floci, like S3-compatible stores generally, needs path-style addressing.
+        config=BotoConfig(s3={"addressing_style": "path"}, retries={"max_attempts": 3}),
+    )
+    producer = AIOKafkaProducer(
+        bootstrap_servers=settings.kafka_brokers,
+        acks="all",  # do not consider a write done until all ISRs have it
+        enable_idempotence=True,  # no duplicates on internal retry
+        linger_ms=5,
+    )
+    await producer.start()
+    state["producer"] = producer
+    state["pricing"] = PricingClient(
+        settings.pricing_addr,
+        settings.pricing_timeout_seconds,
+        settings.pricing_health_timeout_seconds,
+    )
+    state["ready"] = True
+    log.info("order-api started version=%s", settings.service_version)
+    try:
+        yield
+    finally:
+        state["ready"] = False
+        await producer.stop()
+        await state["pricing"].close()
+        log.info("order-api stopped")
+
+
+app = FastAPI(title="order-api", version=settings.service_version, lifespan=lifespan)
+
+# prometheus_client ships an ASGI app for this; mounting it is what its docs
+# prescribe. It negotiates content type and compression, and a mount is not a
+# route, so /metrics stays out of the OpenAPI document Backstage renders.
+# https://prometheus.github.io/client_python/exporting/http/fastapi-gunicorn/
+app.mount("/metrics", make_asgi_app())
+
+
+class OrderIn(BaseModel):
+    customer: str = Field(min_length=1, max_length=128)
+    sku: str = Field(min_length=1, max_length=64)
+    quantity: int = Field(ge=1, le=1000)
+    amount_cents: int = Field(ge=1)
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    """Liveness: the process is running. Deliberately checks nothing else."""
+    return {"status": "ok", "version": settings.service_version}
+
+
+@app.get("/readyz")
+async def readyz() -> dict:
+    """Readiness: dependencies are up. Kubernetes pulls us out of the Service if this fails.
+
+    Async because the pricing health check is a real RPC and must be awaited.
+    """
+    if not state["ready"]:
+        raise HTTPException(status_code=503, detail="dependencies not ready")
+    pricing = state["pricing"]
+    if pricing is None or not await pricing.is_ready():
+        raise HTTPException(status_code=503, detail="pricing not serving")
+    return {"status": "ready"}
+
+
+async def _price_order(order: OrderIn) -> pricing_pb2.PriceOrderResponse:
+    """Call shop.v1.Pricing/PriceOrder. Any failure is an HTTPException carrying the
+    gRPC status translated to its HTTP equivalent — never a locally computed price,
+    so a pricing outage is a visible order failure rather than a silently wrong total."""
+    pricing = state["pricing"]
+    try:
+        response = await pricing.price_order(
+            sku=order.sku,
+            quantity=order.quantity,
+            unit_amount_cents=order.amount_cents,
+            customer=order.customer,
+        )
+    except grpc.RpcError as exc:
+        code = exc.code()
+        result = "timeout" if code == grpc.StatusCode.DEADLINE_EXCEEDED else "error"
+        PRICING_CALLS.labels(result=result, served_by="unknown").inc()
+        log.warning("pricing call failed sku=%s code=%s", order.sku, code)
+        raise HTTPException(
+            status_code=GRPC_TO_HTTP_STATUS.get(code, 502),
+            detail=f"pricing call failed: {code.name if code else 'UNKNOWN'}",
+        ) from exc
+    PRICING_CALLS.labels(result="ok", served_by=response.served_by).inc()
+    return response
+
+
+@app.post("/orders", status_code=202)
+async def create_order(order: OrderIn) -> dict:
+    started = time.perf_counter()
+    order_id = str(uuid.uuid4())
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    try:
+        pricing = await _price_order(order)
+
+        payload = order.model_dump() | {
+            "order_id": order_id,
+            "created_at": created_at,
+            "total_amount_cents": pricing.total_amount_cents,
+            "priced_by": pricing.served_by,
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+
+        # Sign the payload with a key that only ever exists in OpenBao.
+        signature = hmac.new(
+            settings.signing_key.encode(), body, hashlib.sha256
+        ).hexdigest()
+
+        key = f"orders/{created_at[:10]}/{order_id}.json"
+        # boto3 is synchronous. Calling it directly from an `async def` path
+        # operation blocks the event loop for the whole S3 round trip, which
+        # stalls every other in-flight request and both probes with it. FastAPI's
+        # answer for blocking I/O inside an async endpoint is to hand it to the
+        # threadpool. https://fastapi.tiangolo.com/async/
+        await run_in_threadpool(
+            state["s3"].put_object,
+            Bucket=settings.s3_bucket,
+            Key=key,
+            Body=body,
+            ContentType="application/json",
+            Metadata={"signature": signature},
+        )
+        event = payload | {"s3_key": key, "signature": signature}
+        await state["producer"].send_and_wait(
+            settings.kafka_topic,
+            value=json.dumps(event, separators=(",", ":")).encode(),
+            key=order_id.encode(),  # partition by order id → per-order ordering
+        )
+    except HTTPException:
+        ORDERS_RECEIVED.labels(result="error").inc()
+        raise
+    except Exception:
+        ORDERS_RECEIVED.labels(result="error").inc()
+        log.exception("failed to ingest order_id=%s", order_id)
+        raise HTTPException(status_code=502, detail="downstream failure")
+    finally:
+        ORDER_LATENCY.observe(time.perf_counter() - started)
+
+    ORDERS_RECEIVED.labels(result="ok").inc()
+    log.info("accepted order_id=%s key=%s", order_id, key)
+    return {
+        "order_id": order_id,
+        "status": "accepted",
+        "s3_key": key,
+        "total_amount_cents": pricing.total_amount_cents,
+        "discount_cents": pricing.discount_cents,
+        "rule_applied": pricing.rule_applied,
+        "priced_by": pricing.served_by,
+    }
+
+
+def main() -> None:
+    """Entry point for the packaged pex_binary: run the ASGI app under uvicorn."""
+    uvicorn.run(app, host="0.0.0.0", port=settings.order_api_port)
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 `grpcio-health-checking` ships no `py.typed` marker, so the ignore goes on the import rather than in a
-global `ignore_missing_imports` — which would silence real typos in every other module too. Add
-`grpcio-health-checking` and `grpcio-reflection` to `3rdparty/python/requirements.txt`; they are
-first-party gRPC add-ons shipped as separate packages.
+global `ignore_missing_imports` — which would silence real typos in every other module too. `grpcio-health-checking` and `grpcio-reflection` are
+already in `3rdparty/python/requirements.txt` ([§17.3](#173-pantstoml)) — they are first-party gRPC
+add-ons shipped as separate packages, which is why they need naming at all.
 
 ```python
 PRICING_CALLS = Counter(
@@ -7624,6 +9990,48 @@ pants dependencies --transitive services/order-api:bin | grep protos
 **`services/order-api/tests/test_api.py`**
 
 ```python
+import asyncio
+import os
+import threading
+
+# Settings are read at import time, so the environment must be set first.
+os.environ.setdefault("KAFKA_BROKERS", "localhost:9092")
+os.environ.setdefault("S3_BUCKET", "test-bucket")
+os.environ.setdefault("ORDER_SIGNING_KEY", "test-key")
+
+import grpc  # noqa: E402
+import pytest  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
+from grpc_health.v1 import health_pb2  # type: ignore[import-untyped]  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
+
+from order_api.main import (  # noqa: E402
+    OrderIn,
+    PricingClient,
+    app,
+    create_order,
+    healthz,
+    readyz,
+    state,
+)
+from shop.v1 import pricing_pb2  # noqa: E402
+
+
+class _FakeS3:
+    """Records the thread `put_object` ran on, because that is the thing under test."""
+
+    def __init__(self) -> None:
+        self.thread_name: str | None = None
+
+    def put_object(self, **kwargs):
+        self.thread_name = threading.current_thread().name
+
+
+class _FakeProducer:
+    async def send_and_wait(self, *args, **kwargs):
+        pass
+
+
 class _FakePricingClient:
     """Stands in for PricingClient so tests never touch the network."""
 
@@ -7663,6 +10071,185 @@ class _FakeHealthStub:
         if self._error is not None:
             raise self._error
         return health_pb2.HealthCheckResponse(status=self._status)
+
+
+def _aio_rpc_error(code: grpc.StatusCode) -> grpc.aio.AioRpcError:
+    return grpc.aio.AioRpcError(code, grpc.aio.Metadata(), grpc.aio.Metadata())
+
+
+def _order() -> OrderIn:
+    return OrderIn(customer="ada", sku="W-1", quantity=3, amount_cents=4999)
+
+
+def _priced_state() -> _FakeS3:
+    s3 = _FakeS3()
+    state["s3"] = s3
+    state["producer"] = _FakeProducer()
+    return s3
+
+
+async def _health_result(**stub_kwargs) -> bool:
+    client = PricingClient(
+        "localhost:1", timeout_seconds=1.0, health_timeout_seconds=1.0
+    )
+    client._health_stub = _FakeHealthStub(**stub_kwargs)
+    try:
+        return await client.is_ready()
+    finally:
+        await client.close()
+
+
+def test_healthz_needs_no_dependencies():
+    """Liveness must answer without Kafka or S3, or a broker outage kills every pod."""
+    assert healthz()["status"] == "ok"
+
+
+def test_readyz_is_not_ready_before_startup():
+    assert state["ready"] is False
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("quantity", 0), ("quantity", 1001), ("amount_cents", 0), ("customer", "")],
+)
+def test_invalid_orders_are_rejected(field, value):
+    payload = {"customer": "ada", "sku": "W-1", "quantity": 1, "amount_cents": 100}
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        OrderIn(**payload)
+
+
+def test_valid_order_is_accepted():
+    order = OrderIn(customer="ada", sku="W-1", quantity=3, amount_cents=4999)
+    assert order.quantity == 3
+
+
+def test_routes_are_registered():
+    paths = {r.path for r in app.routes}
+    assert {"/orders", "/healthz", "/readyz", "/metrics"} <= paths
+
+
+def test_metrics_is_mounted_not_a_route():
+    """prometheus_client's ASGI app is mounted, which keeps /metrics out of the
+    OpenAPI document. A hand-rolled route would put it back in."""
+    assert "/metrics" not in app.openapi()["paths"]
+
+
+def test_order_response_includes_pricing_result():
+    _priced_state()
+    state["pricing"] = _FakePricingClient(
+        response=pricing_pb2.PriceOrderResponse(
+            total_amount_cents=4499,
+            discount_cents=500,
+            rule_applied="volume-discount",
+            served_by="pricing-v1",
+        )
+    )
+
+    result = asyncio.run(create_order(_order()))
+
+    assert result["status"] == "accepted"
+    assert result["total_amount_cents"] == 4499
+    assert result["discount_cents"] == 500
+    assert result["rule_applied"] == "volume-discount"
+    assert result["priced_by"] == "pricing-v1"
+
+
+def test_s3_put_does_not_run_on_the_event_loop_thread():
+    """boto3 is synchronous. Called directly from this `async def` endpoint it
+    would stall the loop — and every other request with it — for the whole S3
+    round trip, so it has to go to the threadpool."""
+    s3 = _priced_state()
+    state["pricing"] = _FakePricingClient(
+        response=pricing_pb2.PriceOrderResponse(total_amount_cents=1)
+    )
+
+    asyncio.run(create_order(_order()))
+
+    assert s3.thread_name is not None
+    assert s3.thread_name != threading.current_thread().name
+
+
+@pytest.mark.parametrize(
+    "code,expected_status",
+    [
+        (grpc.StatusCode.DEADLINE_EXCEEDED, 504),
+        (grpc.StatusCode.UNAVAILABLE, 503),
+        (grpc.StatusCode.INVALID_ARGUMENT, 400),
+        (grpc.StatusCode.RESOURCE_EXHAUSTED, 429),
+        (grpc.StatusCode.INTERNAL, 502),
+        (grpc.StatusCode.UNKNOWN, 502),
+    ],
+)
+def test_pricing_failures_map_to_their_http_equivalent(code, expected_status):
+    """One gRPC status, one HTTP status. Collapsing them all to 502 tells the
+    caller a timeout, an overload and a malformed order are the same thing."""
+    _priced_state()
+    state["pricing"] = _FakePricingClient(error=_FakeRpcError(code))
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(create_order(_order()))
+
+    assert exc_info.value.status_code == expected_status
+
+
+def test_readyz_fails_when_pricing_is_not_serving():
+    state["ready"] = True
+    state["pricing"] = _FakePricingClient(ready=False)
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(readyz())
+    finally:
+        state["ready"] = False
+
+    assert exc_info.value.status_code == 503
+
+
+def test_readyz_passes_when_pricing_is_serving():
+    state["ready"] = True
+    state["pricing"] = _FakePricingClient(ready=True)
+    try:
+        assert asyncio.run(readyz()) == {"status": "ready"}
+    finally:
+        state["ready"] = False
+
+
+def test_health_check_serving_is_ready():
+    assert (
+        asyncio.run(_health_result(status=health_pb2.HealthCheckResponse.SERVING))
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        health_pb2.HealthCheckResponse.NOT_SERVING,
+        health_pb2.HealthCheckResponse.SERVICE_UNKNOWN,
+        health_pb2.HealthCheckResponse.UNKNOWN,
+    ],
+)
+def test_health_check_not_serving_is_not_ready(status):
+    """Only SERVING means ready. Channel connectivity would report every one of
+    these as fine, which is why readiness asks over grpc.health.v1 instead."""
+    assert asyncio.run(_health_result(status=status)) is False
+
+
+def test_unreachable_pricing_is_not_ready():
+    """A pricing backend that has never existed must not report ready."""
+    assert (
+        asyncio.run(_health_result(error=_aio_rpc_error(grpc.StatusCode.UNAVAILABLE)))
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    "code", [grpc.StatusCode.NOT_FOUND, grpc.StatusCode.UNIMPLEMENTED]
+)
+def test_server_without_the_health_service_is_still_ready(code):
+    """gRPC's docs require clients to handle a server that does not publish
+    health. It answered, so it is reachable — health is unknown, not failing."""
+    assert asyncio.run(_health_result(error=_aio_rpc_error(code))) is True
 ```
 
 `grpc.RpcError` is a bare `Exception` subclass with no constructor of its own, so a real one cannot be
@@ -7794,7 +10381,7 @@ docker run --rm python:3.13-slim sh -c \
   'pip install pex && pex3 interpreter inspect --markers --tags' > 3rdparty/python/linux.json
 ```
 
-**`3rdparty/python/BUILD`** (comments stripped):
+**`3rdparty/python/BUILD`**
 
 ```python
 python_requirements(
@@ -7802,21 +10389,59 @@ python_requirements(
     source="requirements.txt",
 )
 
+# The cluster's real platform: linux/aarch64, CPython 3.13. Generated with
+#   docker run --rm python:3.13-slim sh -c 'pip install pex && pex3 interpreter inspect --markers --tags'
+#
+# Every pex_binary MUST reference this via `complete_platforms`. Without it,
+# `pants package` on a macOS laptop resolves macOS wheels — grpcio, pydantic
+# core, uvloop and watchfiles are all native — and produces a PEX that builds
+# cleanly, passes every check, and then dies on import inside a linux
+# container. The failure is at runtime, in the cluster, far from the cause.
 file(
     name="linux-platform",
     source="linux.json",
 )
 ```
 
-**`services/pricing/BUILD`**, the `pex_binary` (comments stripped):
+**`services/pricing/BUILD`**
 
 ```python
+python_sources(
+    name="lib",
+    sources=["pricing/**/*.py"],
+    # Dependency inference resolves the `shop.v1.pricing_pb2*` imports back to the
+    # protobuf_sources target, but it's declared explicitly here too since it's
+    # cross-source-root (protos/ vs services/pricing/) and easy to miss on inference
+    # cache invalidation.
+    dependencies=["protos/shop/v1:protos"],
+)
+
+python_sources(
+    name="tests_pkg",
+    sources=["tests/__init__.py"],
+)
+
+python_tests(
+    name="tests",
+    sources=["tests/test_*.py"],
+    # The `app` top-level package name collides with order-api's own `app` package
+    # under the shared `/services/*` source root, so dependency inference can't
+    # disambiguate `from pricing.main import ...` on its own.
+    dependencies=[":lib"],
+)
+
 pex_binary(
     name="bin",
     tags=["deployable"],
     entry_point="pricing/main.py:main",
     dependencies=[":lib"],
+    # The cluster runs linux/aarch64 CPython 3.13, not this macOS laptop. grpcio
+    # is a native extension; without this, `pants package` resolves macOS wheels
+    # that build and pass every check here, then fail to import in the cluster.
     complete_platforms=["3rdparty/python:linux-platform"],
+    # Land in dist/ under a predictable name so dist/ can be used
+    # directly as the Buildah build context and the Dockerfile can COPY by
+    # name. Default would be dist/services.<name>/bin.pex.
     output_path="pricing.pex",
 )
 ```
@@ -7844,7 +10469,7 @@ context and the Dockerfile `COPY` by name.
 > **One constraint follows from cross-packaging.** Every platform-specific dependency must be
 > available as a **prebuilt wheel** for the target — Pants can only build sdists for the local
 > machine. A dependency that ships source-only for `linux/aarch64` cannot be cross-packaged at all;
-> you would have to build the wheel yourself and host it in [[sonatype-nexus]]. This is not a Pants
+> you would have to build the wheel yourself and host it in Nexus. This is not a Pants
 > quirk. Any tool that resolves wheels on the build host and ships them elsewhere has it, and it is
 > the same class of mistake as building a Go binary with `CGO_ENABLED=1` and putting it in `scratch`.
 
@@ -7896,6 +10521,29 @@ read-only. The volume half, from `deploy/charts/order-platform/templates/pricing
             - { name: tmp, mountPath: /tmp }
       volumes:
         - { name: tmp, emptyDir: {} }
+```
+
+**`deploy/charts/order-platform/templates/configmap-pricing.yaml`**
+
+```yaml
+{{- if .Values.pricing.enabled }}
+{{/*
+v1 and v2 share one ConfigMap because they share one config; what differs
+between them — PRICING_VERSION and the image tag — stays inline on each
+Deployment, where it belongs to the pod template rather than to the config.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pricing-config
+  labels: {{- include "op.labels" (dict "name" "pricing" "root" $) | nindent 4 }}
+data:
+  PRICING_GRPC_PORT: {{ .Values.pricing.grpcPort | quote }}
+  PRICING_HTTP_PORT: {{ .Values.pricing.httpPort | quote }}
+  # PEX unpacks its dependency closure here; see the /tmp volumeMount note on the
+  # Deployment.
+  PEX_ROOT: "/tmp/pex"
+{{- end }}
 ```
 
 The variable half lives in `configmap-pricing.yaml`, the file that Deployment's `checksum/config`
@@ -7972,13 +10620,913 @@ kubectl -n shop get pods -l app.kubernetes.io/name=pricing
 ### 19.4 The frontend: Vite, and a live tally
 
 
-`frontend/` is a [[vite]] + TypeScript page with no framework. It POSTs orders to `order-api`,
+`frontend/` is a Vite + TypeScript page with no framework. It POSTs orders to `order-api`,
 tallies the `priced_by` on each response, and draws a bar. A 90/10 → 50/50 weight change is visible in a
 browser within seconds.
 
 It is a demo dashboard, and it earns its place for one reason: **it makes the canary a thing you watch
 rather than a thing you query.** The same information is in Prometheus. Nobody stands at a Prometheus
 console watching a ratio move.
+
+The app itself. A Vite + TypeScript page with no framework, and a pure function in its own
+module so there is something worth unit-testing:
+
+**`frontend/package.json`**
+
+```json
+{
+  "name": "shop-canary-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "node --test src/*.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.2.1",
+    "@types/node": "26.2.0"
+  }
+}
+```
+
+**`frontend/.npmrc`**
+
+```ini
+registry=http://nexus:8081/repository/npm-proxy/
+```
+
+> **`.npmrc` points npm at Nexus for the same reason everything else does** — the frontend's
+> dependencies are supply-chain events too ([§5.1](#51-what-nexus-is-actually-for)).
+
+**`frontend/tsconfig.json`**
+
+```json
+{
+  "compilerOptions": {
+    // Required by Pants\' TypeScript backend, which refuses to typecheck
+    // without an explicit outDir. vite ignores it — it writes to its own
+    // build.outDir — so this exists purely so `pants check` can run.
+    "outDir": "./dist",
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "types": ["vite/client", "node"]
+  },
+  "include": ["src"]
+}
+```
+
+**`frontend/vite.config.ts`**
+
+```ts
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  build: {
+    outDir: "dist",
+  },
+});
+```
+
+**`frontend/index.html`**
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Canary Watch — pricing v1/v2</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
+```
+
+**`frontend/src/tally.ts`**
+
+```ts
+// Pure, DOM-free tally logic — kept separate from main.ts so it can be unit
+// tested directly (see tally.test.ts) without a browser.
+//
+// The whole point of this module: `priced_by` is a free-form string on the
+// wire, not a closed v1/v2 union (see api.ts). Tallying must key on
+// whatever string actually came back, so an unexpected value shows up as
+// its own bucket instead of being folded into an existing one.
+
+const PALETTE = ["#4f8cff", "#ff9f43", "#2ecc71", "#e84393", "#a29bfe", "#00cec9"];
+
+/**
+ * Records one occurrence of `key` in `counts`, in place. `key` is whatever
+ * `priced_by` the backend returned — no validation, no fallback bucket.
+ */
+export function recordPriced(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+/** Total occurrences across all keys. */
+export function totalOf(counts: Map<string, number>): number {
+  let sum = 0;
+  for (const n of counts.values()) sum += n;
+  return sum;
+}
+
+/** Percentage (0-100, rounded) of `key` within `counts`. 0 if the total is 0. */
+export function percentOf(counts: Map<string, number>, key: string): number {
+  const total = totalOf(counts);
+  if (total === 0) return 0;
+  return Math.round(((counts.get(key) ?? 0) / total) * 100);
+}
+
+/**
+ * Stable colour per key, assigned from a small palette in first-seen order
+ * and cached in `assigned` so a key never changes colour across renders,
+ * even as new keys appear or the bar re-sorts.
+ */
+export function colorFor(key: string, assigned: Map<string, string>): string {
+  const existing = assigned.get(key);
+  if (existing) return existing;
+  const color = PALETTE[assigned.size % PALETTE.length] as string;
+  assigned.set(key, color);
+  return color;
+}
+```
+
+**`frontend/src/tally.test.ts`**
+
+```ts
+// Exercises the tally logic in isolation from the DOM. Uses Node's built-in
+// test runner and assert module — no new dependencies, matches the "no new
+// deps" constraint on this frontend.
+//
+// Run with: node --test src/tally.test.ts
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { recordPriced, totalOf, percentOf, colorFor } from "./tally.ts";
+
+test("known values (v1/v2) split as expected", () => {
+  const counts = new Map<string, number>();
+  recordPriced(counts, "v1");
+  recordPriced(counts, "v1");
+  recordPriced(counts, "v1");
+  recordPriced(counts, "v2");
+
+  assert.equal(counts.get("v1"), 3);
+  assert.equal(counts.get("v2"), 1);
+  assert.equal(totalOf(counts), 4);
+  assert.equal(percentOf(counts, "v1"), 75);
+  assert.equal(percentOf(counts, "v2"), 25);
+});
+
+test("an unexpected priced_by value gets its own bucket, not folded into an existing one", () => {
+  const counts = new Map<string, number>();
+  recordPriced(counts, "v1");
+  recordPriced(counts, "v1");
+  recordPriced(counts, "pricing-v1"); // e.g. served_by from a different service naming scheme
+
+  // The old bug: anything !== "v1" was counted as v2. Prove that no longer
+  // happens — "pricing-v1" must NOT be added to "v1"'s count, and must NOT
+  // silently create/inflate a "v2" bucket that was never actually seen.
+  assert.equal(counts.get("v1"), 2);
+  assert.equal(counts.get("pricing-v1"), 1);
+  assert.equal(counts.has("v2"), false);
+  assert.equal(counts.size, 2);
+  assert.equal(totalOf(counts), 3);
+});
+
+test("three distinct versions each get their own bucket", () => {
+  const counts = new Map<string, number>();
+  recordPriced(counts, "v1");
+  recordPriced(counts, "v2");
+  recordPriced(counts, "v3-canary");
+
+  assert.equal(counts.size, 3);
+  assert.equal(percentOf(counts, "v1"), 33);
+  assert.equal(percentOf(counts, "v2"), 33);
+  assert.equal(percentOf(counts, "v3-canary"), 33);
+});
+
+test("colorFor is stable per key and does not reassign on repeated calls", () => {
+  const assigned = new Map<string, string>();
+  const first = colorFor("v1", assigned);
+  const second = colorFor("v2", assigned);
+  const firstAgain = colorFor("v1", assigned);
+
+  assert.equal(firstAgain, first);
+  assert.notEqual(first, second);
+});
+
+test("empty counts: total and percent are 0, not NaN or a divide-by-zero error", () => {
+  const counts = new Map<string, number>();
+  assert.equal(totalOf(counts), 0);
+  assert.equal(percentOf(counts, "v1"), 0);
+});
+```
+
+**`frontend/src/api.ts`**
+
+```ts
+// Talks to POST /orders on the order-api service. Base URL is configurable so
+// local dev (vite dev server, different origin) can point at a reachable
+// host, while the in-cluster build defaults to "" (same-origin, proxied by
+// nginx — see frontend/nginx.conf) and needs no CORS handling at all.
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
+
+export interface OrderRequest {
+  customer: string;
+  sku: string;
+  quantity: number;
+  amount_cents: number;
+}
+
+export interface OrderResponse {
+  order_id: string;
+  status: string;
+  s3_key: string;
+  total_amount_cents: number;
+  discount_cents: number;
+  // Both are free-form strings on the wire (shop.v1.PriceOrderResponse) —
+  // nothing on this side enforces a two-value union, and treating them as
+  // one is what let an unrecognized value get silently folded into "v2" in
+  // the tally. Display them as whatever the backend actually sent.
+  rule_applied: string;
+  priced_by: string;
+}
+
+export class OrderApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "OrderApiError";
+  }
+}
+
+export async function placeOrder(req: OrderRequest): Promise<OrderResponse> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(req),
+    });
+  } catch (err) {
+    // Network failure (service unreachable, DNS, etc) — no HTTP status at all.
+    throw new OrderApiError(
+      err instanceof Error ? err.message : "network error",
+      0,
+    );
+  }
+
+  if (!res.ok) {
+    throw new OrderApiError(`order-api returned ${res.status}`, res.status);
+  }
+
+  return (await res.json()) as OrderResponse;
+}
+```
+
+**`frontend/src/main.ts`**
+
+```ts
+import { placeOrder, OrderApiError, type OrderResponse } from "./api";
+import { recordPriced, totalOf, percentOf, colorFor } from "./tally";
+
+interface LogEntry {
+  quantity: number;
+  totalCents: number | null;
+  ruleApplied: string;
+  pricedBy: string;
+  ok: boolean;
+  // The HTTP status the request actually failed with, or 0 when the request
+  // never reached order-api. Not every failure is a 502: order-api maps a
+  // pricing deadline to 504, an unavailable pricing to 503, a rejected order
+  // to 400 and throttling to 429, and showing the real one is the difference
+  // between "the canary is broken" and "the canary is slow".
+  status: number;
+}
+
+interface State {
+  counts: Map<string, number>;
+  errors: number;
+  log: LogEntry[];
+}
+
+const MAX_LOG = 20;
+const CONTINUOUS_INTERVAL_MS = 500; // 2/sec
+
+const state: State = { counts: new Map(), errors: 0, log: [] };
+// Colour assignment persists independently of `state` so a version keeps its
+// colour across a render even if it briefly has zero share; reset explicitly
+// clears it alongside the counts so a fresh session reassigns from scratch.
+let colors = new Map<string, string>();
+
+let continuousTimer: ReturnType<typeof setInterval> | null = null;
+
+const app = document.querySelector<HTMLDivElement>("#app");
+if (!app) {
+  throw new Error("#app element not found");
+}
+
+app.innerHTML = `
+  <main>
+    <header>
+      <h1>Canary Watch</h1>
+      <p class="subtitle">Live split of <code>pricing</code> versions, by order.</p>
+    </header>
+
+    <section class="tally" aria-label="live version split">
+      <div class="tally-bar" id="tally-bar"></div>
+      <div class="tally-labels" id="tally-labels"></div>
+      <div class="tally-meta">
+        <span id="version-count-label"></span>
+        <span class="tally-label errors"><strong id="err-count">0</strong> failed</span>
+      </div>
+    </section>
+
+    <section class="controls">
+      <div class="field">
+        <label for="quantity">Quantity</label>
+        <input type="number" id="quantity" min="1" step="1" value="1" />
+      </div>
+      <div class="field">
+        <label for="amount">Unit amount ($)</label>
+        <input type="number" id="amount" min="0" step="0.01" value="19.99" />
+      </div>
+      <div class="buttons">
+        <button id="send-one" type="button">Send order</button>
+        <button id="send-twenty" type="button">Send 20 orders</button>
+        <button id="toggle-continuous" type="button">Start continuous (2/sec)</button>
+        <button id="reset" type="button" class="secondary">Reset counters</button>
+      </div>
+      <p class="hint">Quantity &ge; 3 crosses the bulk-discount boundary that triggers v2's <code>bulk-10pct</code> rule.</p>
+    </section>
+
+    <section class="log-section">
+      <h2>Last ${MAX_LOG} orders</h2>
+      <table class="log">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>qty</th>
+            <th>total</th>
+            <th>rule</th>
+            <th>priced by</th>
+          </tr>
+        </thead>
+        <tbody id="log-body"></tbody>
+      </table>
+    </section>
+  </main>
+`;
+
+const el = <T extends HTMLElement>(id: string): T => {
+  const found = document.getElementById(id);
+  if (!found) throw new Error(`missing #${id}`);
+  return found as T;
+};
+
+const quantityInput = el<HTMLInputElement>("quantity");
+const amountInput = el<HTMLInputElement>("amount");
+const sendOneBtn = el<HTMLButtonElement>("send-one");
+const sendTwentyBtn = el<HTMLButtonElement>("send-twenty");
+const toggleContinuousBtn = el<HTMLButtonElement>("toggle-continuous");
+const resetBtn = el<HTMLButtonElement>("reset");
+
+const tallyBar = el<HTMLDivElement>("tally-bar");
+const tallyLabels = el<HTMLDivElement>("tally-labels");
+const versionCountLabel = el<HTMLElement>("version-count-label");
+const errCountEl = el<HTMLElement>("err-count");
+const logBody = el<HTMLTableSectionElement>("log-body");
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function render(): void {
+  const total = totalOf(state.counts);
+  const keys = [...state.counts.keys()];
+
+  // One bar segment + one label per distinct version actually seen. An
+  // unexpected priced_by value gets its own segment, not a fold into v2.
+  tallyBar.innerHTML = keys
+    .map((key) => {
+      const pct = total === 0 ? 0 : percentOf(state.counts, key);
+      const width = total === 0 ? 100 / Math.max(keys.length, 1) : pct;
+      return `<div class="tally-segment" style="width:${width}%;background:${colorFor(key, colors)}"></div>`;
+    })
+    .join("");
+
+  tallyLabels.innerHTML = keys
+    .map((key) => {
+      const pct = percentOf(state.counts, key);
+      const count = state.counts.get(key) ?? 0;
+      return `<span class="tally-label" style="color:${colorFor(key, colors)}">
+        <strong>${count}</strong> ${escapeHtml(key)} (${pct}%)
+      </span>`;
+    })
+    .join("");
+
+  versionCountLabel.textContent =
+    keys.length === 0 ? "no orders yet" : `${keys.length} version${keys.length === 1 ? "" : "s"} seen`;
+
+  errCountEl.textContent = String(state.errors);
+
+  logBody.innerHTML = state.log
+    .map((entry, i) => {
+      const rowClass = entry.ok ? "" : "row-error";
+      const totalDisplay =
+        entry.totalCents === null ? "—" : `$${(entry.totalCents / 100).toFixed(2)}`;
+      const priced = entry.ok
+        ? `<span class="badge" style="background:${colorFor(entry.pricedBy, colors)}22;color:${colorFor(entry.pricedBy, colors)}">${escapeHtml(entry.pricedBy)}</span>`
+        : `<span class="badge error">${entry.status === 0 ? "net" : entry.status}</span>`;
+      return `<tr class="${rowClass}">
+        <td>${state.log.length - i}</td>
+        <td>${entry.quantity}</td>
+        <td>${totalDisplay}</td>
+        <td>${escapeHtml(entry.ruleApplied)}</td>
+        <td>${priced}</td>
+      </tr>`;
+    })
+    .join("");
+}
+
+function pushLog(entry: LogEntry): void {
+  state.log.unshift(entry);
+  if (state.log.length > MAX_LOG) {
+    state.log.length = MAX_LOG;
+  }
+}
+
+async function sendOrder(): Promise<void> {
+  const quantity = Math.max(1, Math.trunc(quantityInput.valueAsNumber || 1));
+  const amountDollars = amountInput.valueAsNumber || 0;
+  const amountCents = Math.round(amountDollars * 100);
+
+  try {
+    const res: OrderResponse = await placeOrder({
+      customer: "ada",
+      sku: "WIDGET-1",
+      quantity,
+      amount_cents: amountCents,
+    });
+
+    recordPriced(state.counts, res.priced_by);
+
+    pushLog({
+      quantity,
+      totalCents: res.total_amount_cents,
+      ruleApplied: res.rule_applied,
+      pricedBy: res.priced_by,
+      ok: true,
+      status: 202,
+    });
+  } catch (err) {
+    state.errors += 1;
+    const status = err instanceof OrderApiError ? err.status : 0;
+    pushLog({
+      quantity,
+      totalCents: null,
+      ruleApplied: status === 0 ? "network error" : `HTTP ${status}`,
+      pricedBy: "—",
+      ok: false,
+      status,
+    });
+  } finally {
+    render();
+  }
+}
+
+function sendMany(count: number): void {
+  for (let i = 0; i < count; i++) {
+    void sendOrder();
+  }
+}
+
+function stopContinuous(): void {
+  if (continuousTimer !== null) {
+    clearInterval(continuousTimer);
+    continuousTimer = null;
+  }
+  toggleContinuousBtn.textContent = "Start continuous (2/sec)";
+  toggleContinuousBtn.classList.remove("active");
+}
+
+function startContinuous(): void {
+  toggleContinuousBtn.textContent = "Stop continuous";
+  toggleContinuousBtn.classList.add("active");
+  continuousTimer = setInterval(() => {
+    void sendOrder();
+  }, CONTINUOUS_INTERVAL_MS);
+}
+
+sendOneBtn.addEventListener("click", () => void sendOrder());
+sendTwentyBtn.addEventListener("click", () => sendMany(20));
+toggleContinuousBtn.addEventListener("click", () => {
+  if (continuousTimer === null) {
+    startContinuous();
+  } else {
+    stopContinuous();
+  }
+});
+resetBtn.addEventListener("click", () => {
+  state.counts = new Map();
+  state.errors = 0;
+  state.log = [];
+  colors = new Map();
+  render();
+});
+
+render();
+```
+
+**`frontend/src/style.css`**
+
+```css
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #171a21;
+  --border: #2a2e38;
+  --text: #e6e8ec;
+  --muted: #8b909c;
+  --v1: #4f8cff;
+  --error: #ff5c5c;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.subtitle {
+  color: var(--muted);
+  margin-top: 0.25rem;
+}
+
+section {
+  margin-top: 2rem;
+}
+
+.tally {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+.tally-bar {
+  display: flex;
+  height: 2.5rem;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--border);
+}
+
+.tally-segment {
+  transition: width 0.3s ease;
+}
+
+.tally-labels {
+  display: flex;
+  gap: 1.5rem;
+  margin-top: 0.75rem;
+  flex-wrap: wrap;
+  font-size: 0.95rem;
+}
+
+.tally-label strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.tally-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.tally-label.errors {
+  color: var(--error);
+}
+
+.controls {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.field label {
+  width: 9rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.field input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 0.4rem 0.6rem;
+  width: 8rem;
+}
+
+.buttons {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
+
+button {
+  background: var(--v1);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 0.55rem 1rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.1);
+}
+
+button.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+button.active {
+  background: var(--error);
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.75rem 0 0;
+}
+
+.log-section h2 {
+  font-size: 1.05rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+table.log {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+table.log th,
+table.log td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+table.log th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+tr.row-error {
+  background: rgba(255, 92, 92, 0.08);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.badge.error {
+  background: rgba(255, 92, 92, 0.18);
+  color: var(--error);
+}
+
+code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+```
+
+**`frontend/src/vite-env.d.ts`**
+
+```ts
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  /** Base URL for the order API. Empty string means same-origin (nginx proxies /orders). */
+  readonly VITE_API_BASE: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+```
+
+**`frontend/Dockerfile`**
+
+```dockerfile
+# syntax=docker/dockerfile:1.7
+FROM docker.io/library/node:24-trixie-slim AS builder
+
+WORKDIR /app
+COPY package.json package-lock.json .npmrc ./
+# --no-audit/--no-fund: this resolves through Nexus (.npmrc), not npmjs.org,
+# and the lockfile makes the install reproducible, same as uv.lock elsewhere.
+RUN npm ci --no-audit --no-fund
+
+COPY tsconfig.json vite.config.ts index.html ./
+COPY src ./src
+RUN npm run build
+
+
+# nginx-unprivileged: runs as a non-root user on port 8080 out of the box,
+# matching the runAsNonRoot security context every other workload in this
+# platform runs under (see services/order-api/Dockerfile).
+FROM docker.io/nginxinc/nginx-unprivileged:1.27-alpine AS runtime
+COPY --from=builder /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 8080
+```
+
+**`frontend/.dockerignore`**
+
+```
+node_modules
+dist
+```
+
+And the Pants targets over them:
+
+**`deploy/charts/order-platform/templates/frontend.yaml`**
+
+```yaml
+{{- if .Values.frontend.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: frontend
+  labels: {{- include "op.labels" (dict "name" "frontend" "root" $) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels: {{- include "op.labels" (dict "name" "frontend" "root" $) | nindent 4 }}
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      # No checksum/config annotation: the frontend consumes no chart-managed
+      # config, so there is no ConfigMap to hash and nothing that can change
+      # without changing the pod template itself.
+      labels: {{- include "op.labels" (dict "name" "frontend" "root" $) | nindent 8 }}
+    spec:
+      # Kubernetes injects a Docker-link env var per Service in this namespace:
+      # ORDER_API_PORT, ORDER_WORKER_PORT, PRICING_PORT, FRONTEND_PORT — each
+      # set to "tcp://<clusterIP>:<port>". Any app reading a variable of that
+      # name as its own config gets a URL where it expected an integer:
+      #   ValueError: invalid literal for int() with base 10: 'tcp://10.96...'
+      # Env vars outrank every other config source, so the app cannot win.
+      # Service links are a Docker-links relic nothing here uses.
+      enableServiceLinks: false
+      serviceAccountName: frontend
+      imagePullSecrets:
+        - name: {{ include "op.imagePullSecret" . }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: frontend
+          image: {{ include "op.image" (dict "root" $ "img" .Values.frontend.image) }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: {{ .Values.frontend.port }} }
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 5
+            failureThreshold: 2
+          resources: {{- toYaml .Values.frontend.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            # nginx-unprivileged needs to write its pid file, client body temp
+            # files and cache dirs even though the image itself is read-only.
+            - { name: tmp, mountPath: /tmp }
+            - { name: cache, mountPath: /var/cache/nginx }
+            - { name: run, mountPath: /var/run }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: cache, emptyDir: {} }
+        - { name: run, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  labels: {{- include "op.labels" (dict "name" "frontend" "root" $) | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: frontend
+  ports:
+    - { name: http, port: 80, targetPort: http }
+{{- include "op.pdb" (dict "name" "frontend" "root" $ "replicas" .Values.frontend.replicas "selector" (dict "app.kubernetes.io/name" "frontend")) }}
+{{- end }}
+```
+
+> **The chart gains a `frontend` Deployment, Service and VirtualService route.** It is the first
+> workload here that is not a service in the `services/` sense, and it still goes through the same
+> chart — one place that knows what runs in `shop`.
 
 **`frontend/BUILD`**
 
@@ -8050,6 +11598,61 @@ ingress-nginx's admission webhook rejects a duplicate host/path outright.
 ### 19.5 One CI step instead of two
 
 
+**`pants.ci.toml`**
+
+```toml
+# CI-only Pants configuration. Layered on top of pants.toml, not a replacement
+# for it: the pipeline sets
+#
+#   PANTS_CONFIG_FILES=pants.ci.toml
+#
+# which is the mechanism the "Using Pants in CI" guide documents for exactly
+# this — https://www.pantsbuild.org/stable/docs/using-pants/using-pants-in-ci
+#
+# Everything here is a setting that is right in a pod and wrong on a laptop.
+# Nothing that affects what gets built or how it is built belongs in this file;
+# a CI-only build setting is a CI-only bug waiting to happen.
+
+[GLOBAL]
+# Colors often work in CI, but the shell is usually not a TTY so Pants
+# doesn't attempt to use them by default. Buildkite renders ANSI colour in the
+# log, so turning them back on is free readability.
+colors = true
+
+[stats]
+# Logs cache hit/miss counts and timings at the end of the run. This is the
+# only visibility anyone gets into whether the Pants cache is doing anything in
+# CI — without it, a run that recompiles the world looks identical to one that
+# hits cache on everything, except slower.
+log = true
+
+# Coverage is deliberately NOT enabled here.
+#
+# `[test] use_coverage = true` is in the documented CI template, and on this
+# repo it crashes Pants 2.33.0 outright:
+#
+#   pants/backend/go/util_rules/coverage_output.py, go_render_coverage_report
+#     raw_coverage_profile=digest_contents[0].content
+#   IndexError: tuple index out of range
+#
+# The flag is global, so it turns on Go coverage too, and the Go backend
+# indexes the first element of an empty result when a test target produces no
+# profile. There is no per-language switch.
+#
+# Nothing consumed the report anyway: `artifact_paths: "dist/*"` matches one
+# level deep and the report lands two deep. Turn this on the day something
+# reads it, and scope it to Python when Pants can.
+
+[pytest]
+# -vv names each test in the log, which is what you want when the only record
+# of a failed CI run is its log. --no-header drops the platform/rootdir banner
+# that Buildkite already shows.
+args = ["-vv", "--no-header"]
+```
+
+> **A second config, not a pile of flags.** `PANTS_CONFIG_FILES` layers this over `pants.toml` in CI
+> only, so the local developer experience and the CI one differ in exactly the ways written here and
+> nowhere else.
 The Python step and the Go step are gone. In their place, one step in `.buildkite/pipeline.sh`:
 
 ```yaml
@@ -8190,9 +11793,92 @@ Some facts span two files in two languages with nothing connecting them. Those g
 **The OpenAPI spec is derived, not authored.** Backstage's catalog reads `services/order-api/openapi.json`
 from git, but FastAPI builds that document from route signatures at runtime, so the checked-in copy
 can only ever be a snapshot. `services/order-api/BUILD` makes regenerating it a target, and a test
-fails when the two drift:
+fails when the two drift. The dumper, the test, and the `BUILD` file those two need — which now
+carries four targets it did not at [§17.5](#175-targets-and-the-two-files-that-decide-whether-the-checks-pass):
+
+**`services/order-api/openapi_dump.py`**
 
 ```python
+"""Print order-api's OpenAPI document to stdout.
+
+The Backstage catalog needs a spec file it can read from git (`API/orders` in
+`catalog-info.yaml`). FastAPI builds that document from the route signatures at
+runtime, so the checked-in copy is derived, not authored:
+
+    pants run services/order-api:dump-openapi > services/order-api/openapi.json
+
+`tests/test_openapi_spec.py` fails if the two drift, which is the only thing
+keeping the catalog honest — a hand-maintained API spec is a lie with a
+timestamp on it.
+"""
+
+import json
+import os
+import sys
+
+# Settings are read at import time and fail closed on a missing broker list
+# (§3.1). Nothing here connects to anything — the document is built from the
+# route signatures — so placeholders are enough to get the module imported.
+os.environ.setdefault("KAFKA_BROKERS", "localhost:9092")
+os.environ.setdefault("S3_BUCKET", "unused")
+os.environ.setdefault("ORDER_SIGNING_KEY", "unused")
+
+from order_api.main import app  # noqa: E402
+
+
+def main() -> None:
+    json.dump(app.openapi(), sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+**`services/order-api/tests/test_openapi_spec.py`**
+
+```python
+"""The checked-in OpenAPI document must match what the app actually serves.
+
+`catalog-info.yaml` points Backstage at `services/order-api/openapi.json`. A spec
+that drifts from the code is worse than no spec: the portal keeps rendering it,
+confidently, long after the route changed. This test is the thing that stops
+that, and it is the reason the file is generated rather than written.
+"""
+
+import json
+import os
+from pathlib import Path
+
+os.environ.setdefault("KAFKA_BROKERS", "localhost:9092")
+os.environ.setdefault("S3_BUCKET", "test-bucket")
+os.environ.setdefault("ORDER_SIGNING_KEY", "test-key")
+
+from order_api.main import app  # noqa: E402
+
+# tests/ sits at the source root (`/services/order-api`), so the spec is one
+# level up from this file inside the Pants sandbox.
+SPEC = Path(__file__).parent.parent / "openapi.json"
+
+
+def test_checked_in_spec_matches_the_running_app():
+    assert SPEC.exists(), (
+        f"{SPEC.name} is missing; run `pants run services/order-api:dump-openapi`"
+    )
+    assert json.loads(SPEC.read_text()) == app.openapi(), (
+        "openapi.json is stale. Regenerate it:\n"
+        "  pants run services/order-api:dump-openapi > services/order-api/openapi.json"
+    )
+```
+
+**`services/order-api/BUILD`**
+
+```python
+python_sources(
+    name="lib",
+    sources=["order_api/**/*.py"],
+)
+
 python_sources(
     name="tools",
     sources=["openapi_dump.py"],
@@ -8208,6 +11894,35 @@ pex_binary(
 resource(
     name="openapi-spec",
     source="openapi.json",
+)
+
+python_tests(
+    name="tests",
+    # `!tests/__init__.py`: it's a namespace marker, not a test — including it
+    # makes Pants generate a `python_test` target for it that pytest then fails
+    # with "no tests collected".
+    sources=["tests/**/*.py", "!tests/__init__.py"],
+    # `:openapi-spec` is a resource, not code, so nothing infers it — the drift
+    # test reads it off disk by path.
+    dependencies=[":lib", ":openapi-spec"],
+)
+
+pex_binary(
+    name="bin",
+    # Declares this target as something CI ships. `pants --tag=deployable
+    # package ::` selects on it, so a service is packaged the moment it says
+    # so itself — no list in the pipeline to keep in sync.
+    tags=["deployable"],
+    entry_point="order_api.main:main",
+    dependencies=[":lib"],
+    # The cluster runs linux/aarch64, not this macOS laptop. Without this,
+    # `pants package` resolves macOS wheels for native deps (grpcio,
+    # pydantic-core, uvloop, watchfiles) that import-fail in the container.
+    complete_platforms=["3rdparty/python:linux-platform"],
+    # Land in dist/ under a predictable name so dist/ can be used
+    # directly as the Buildah build context and the Dockerfile can COPY by
+    # name. Default would be dist/services.<name>/bin.pex.
+    output_path="order-api.pex",
 )
 ```
 
@@ -8247,17 +11962,22 @@ tries to resolve the name.
 `verify_chart.py` runs as a plain script rather than through Pants, for the same reason
 `verify_doc_listings.py` does: it reads files a hermetic sandbox would not contain. That has two
 consequences in the repo. It still needs an owning target, or `pants tailor --check` reports the file
-as unowned — hence the glob in **`checks/BUILD`** (comments stripped):
+`checks/` is a Python package, so it needs **`checks/__init__.py`** — an empty file — and its scripts need an owning target, or `pants tailor --check` reports them as unowned. Hence the glob in **`checks/BUILD`**:
 
 ```python
 python_sources(
     name="lib",
+    # Everything that is not a test. `verify_chart.py` is not imported by the
+    # test suite — it runs in CI against a rendered chart — but it still needs
+    # an owning target, or `pants tailor --check` reports the file as unowned.
     sources=["*.py", "!test_*.py"],
 )
 
 python_tests(
     name="tests",
     sources=["test_*.py"],
+    # Prose read as plain text. Nothing here is reachable by import, which is
+    # exactly why the two editions of the tutorial were free to drift apart.
     dependencies=[
         ":lib",
         "docs:docs",
@@ -8315,7 +12035,7 @@ laptop rather than in a consumer at 3am. The images are `FROM` plus `COPY`, whic
 Buildah pod no longer resolves anything from a network.
 
 And there is now a synchronous call between two of your services — which is what
-[§9.8](#98-canary-two-versions-of-pricing-behind-one-service) needs to shift
+[§9.9](#99-canary-two-versions-of-pricing-behind-one-service) needs to shift
 traffic between two versions of `pricing` and let you watch the split move in a browser. Go back and
 do that now; it is the part of [Phase 4](#) you could not run yet.
 
@@ -8334,7 +12054,7 @@ Verified 2026-08-16 against a running cluster — every version below was read b
 | kind | v0.32.0 | `kind version` / [releases](https://github.com/kubernetes-sigs/kind/releases) |
 | Helm | ≥ 3.8.0 (OCI required) | `helm version --short` |
 | ingress-nginx | controller-v1.13.0 | [releases](https://github.com/kubernetes/ingress-nginx/releases) — **note:** v1.13.0's kind manifest dropped the `ingress-ready` nodeSelector; [§4.3](#43-install-the-ingress-controller) patches it back |
-| Sonatype Nexus | `sonatype/nexus3:3.95.0` | [Docker Hub tags](https://hub.docker.com/r/sonatype/nexus3/tags) |
+| Sonatype Nexus | `sonatype/nexus3:3.95.0` (≥3.93.0 rate-limits auth — [§5.8](#58-trust-the-plain-http-registry-from-docker)) | [Docker Hub tags](https://hub.docker.com/r/sonatype/nexus3/tags) |
 | Floci | `floci/floci:1.5.11` | [github.com/floci-io/floci](https://github.com/floci-io/floci) |
 | OpenBao Helm chart | 0.29.1 (OpenBao 2.6.1) | `helm search repo openbao/openbao --versions` |
 | External Secrets Operator | chart 2.6.0 | `helm search repo external-secrets/external-secrets --versions` |
@@ -8366,16 +12086,21 @@ Two version rules worth internalising:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `ImagePullBackOff` on `nexus:8082/...` | containerd can't reach or auth to Nexus | `docker exec devops-worker curl -s -o /dev/null -w '%{http_code}' http://nexus:8082/v2/` — expect `401`. Not `401`? Re-run [§5.9](#59-teach-containerd-on-the-kind-nodes-about-nexus). `401` but still failing? The pod is missing `imagePullSecrets` or the ExternalSecret hasn't synced. |
+| `ImagePullBackOff`, and the event says `code = NotFound` | The image was never pushed — not an auth or DNS problem | Check the event text: `NotFound` means the registry answered and does not have that tag, so re-running §5.9 will not help. Confirm with `docker images 'nexus:8082/shop/*'` — if it is missing locally too, the **build** failed. On a laptop the usual cause is a `docker build` with no `--add-host nexus:<ip>`, which only breaks the services that resolve dependencies through Nexus ([§10.4](#104-build-the-images-by-hand-once)). |
+| `502 Bad Gateway` on `shop.localtest.me` after [§9.4](#94-mtls-and-proving-it-is-actually-on), everything else healthy | The Phase 1 `Ingress` for the exact host is still there, so nginx never sends the request to the gateway — it forwards to `order-api` in plaintext, from outside the mesh, and STRICT mTLS refuses it | `kubectl -n shop get ingress` — anything listed is the bug; the wildcard `mesh-edge` Ingress in `istio-system` is the only one that should serve these hosts. An exact host beats a wildcard, so the leftover silently wins. Remove the `ingress:` blocks from the chart and **push** — `kubectl delete ingress` is undone by the next Argo CD sync ([§9.4](#94-mtls-and-proving-it-is-actually-on)). |
 | `curl http://localhost` returns **`000`** | Ingress controller scheduled on a node with no port mappings | `000` = nothing listening, not a 404. `kubectl -n ingress-nginx get pods -o wide` — if `NODE` isn't `devops-control-plane`, apply the `ingress-ready` nodeSelector patch in [§4.3](#43-install-the-ingress-controller). Upstream dropped that selector in controller-v1.13.0. |
 | Ingress Service stuck `EXTERNAL-IP <pending>` | `type: LoadBalancer` with no cloud provider | Harmless on kind — traffic arrives via `hostPort`, not the Service. Don't install MetalLB to "fix" it. |
 | Pods can't resolve `nexus` | The CoreDNS `hosts` entry and the container disagree | The container is pinned to `172.18.255.10` by `--ip` in [§5.3](#53-run-nexus). Confirm with `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nexus`; if it differs, the container was recreated without `--ip`. Re-run [§5.10](#510-teach-pods-about-nexus-coredns), which replaces the block rather than appending. |
 | `docker push` → `http: server gave HTTP response to HTTPS client` | `insecure-registries` not applied | [§5.8](#58-trust-the-plain-http-registry-from-docker), then **restart Docker**. |
 | `docker login nexus:8082` → 401 with correct password | Docker Bearer Token Realm not active | Nexus → ⚙ → Security → Realms → activate it ([§5.4](#54-create-the-docker-hosted-registry)). |
+| CI: `buildah push` → `checking whether a blob ... exists: authentication required`, or `docker login` fails with a password you know is right | Nexus ≥3.93.0 rate-limits authentication: **three consecutive failures** and it returns `429 Too many authentication attempts` for up to **900s**, *regardless of whether the credential is now correct* ([Sonatype](https://help.sonatype.com/en/authentication-attempt-rate-limiting.html)) | **Stop retrying — every attempt extends the window exponentially, and CI does it for you.** Confirm with `docker exec nexus tail /nexus-data/log/request.log` — `429`, not `401`, is the tell, and the client never says so. Then: fix the credential everywhere it is copied (OpenBao `shop/nexus`, and the `nexus-password` key of the `openbao-bootstrap` Secret), `docker restart nexus` to clear the in-memory tracker, and make exactly **one** attempt. If it is a genuine `401`: check the Docker Bearer Token realm is on with `docker exec nexus grep 'Loaded configuration: RealmConfigurationData' /nexus-data/log/nexus.log` — `DockerToken` must be listed ([§5.4](#54-create-the-docker-hosted-registry)). |
+| `yarn add` → `YN0035: Package not found ... 404 (Repository not found)` on `nexus:8081/repository/npm-proxy/...` | The `npm-proxy` repository does not exist — [§14.2](#142-first-an-npm-proxy-in-nexus)'s create was rejected and printed nothing, because Nexus answers that POST with an empty body whether it succeeds or fails | **Nexus is talking about itself, not the package**: "Repository not found" is the *repository*, and the package name is fine. `curl -sS http://localhost:8081/service/rest/v1/repositories | jq -r '.[].name'` — if `npm-proxy` is absent, re-run §14.2 with `-f` and the admin password you actually set, and check for `201`. |
 | CI: `go: ... 401 Unauthorized` from `nexus:8081`, or `uv sync` hangs | Anonymous access disabled in Nexus | Builds pass no credentials to the proxies. Enable global anonymous access ([§5.3](#53-run-nexus)); Docker pull stays authenticated via the per-repository switch. Check with `curl -o /dev/null -w '%{http_code}' http://nexus:8081/repository/pypi-proxy/simple/` — expect `200`. |
 | CI: `uv sync --locked` → "lockfile needs to be updated", but it passes locally | `uv.lock` records a different registry than the build resolves against | Declare the index in `pyproject.toml` via `[[tool.uv.index]]` and re-run `uv lock` ([§3.1](#31-order-api-python--fastapi)). Setting the index only in CI can never match a committed lock. |
 | CI: `go: -race requires cgo` | Test step on an alpine Go image | `golang:1.26-alpine` is `CGO_ENABLED=0` with no gcc. Use `golang:1.26` for the test step ([§12.5](#125-the-pipeline)). |
 | Build fails cloning `buildkite-plugins/kubernetes-buildkite-plugin` | The Buildkite queue is **Hosted**, not Self-hosted | The job ran on Buildkite's machines, which don't understand the `kubernetes` plugin. Queue type can't be changed after creation — delete it and recreate as Self-hosted ([§12.2](#122-create-the-buildkite-side)). |
 | `agent-stack-k8s` logs `job tags do not match expected tags in configuration` | Same as above | A hosted agent adds `namespace-experiments=docker.builder=local`; your controller advertises only `queue=kubernetes`. |
+| ESO: `unable to log in with Kubernetes auth ... /v1/auth/kubernetes/login Code: 403 * permission denied`, `ClusterSecretStore` `InvalidProviderConfig` | The OpenBao pod restarted and dev mode lost the `kubernetes` auth method, the `shop` mount, the policies and the roles | The 403 is the same answer for "wrong role" and "no such auth method", so check `bao auth list` **first** — if `kubernetes/` is missing, nothing about ESO is wrong. Recover with `kubectl delete -f deploy/platform/openbao-bootstrap.yaml && kubectl apply -f deploy/platform/openbao-bootstrap.yaml` ([§7.5a](#75a-give-humans-an-auth-method-too)); the Job re-creates everything and leaves existing secret values alone. `kubectl -n openbao get pod openbao-0` — a non-zero `RESTARTS` is the confirmation. |
 | ClusterSecretStore `Invalid` | A pinned `token_reviewer_jwt` expired, or the OpenBao SA lacks TokenReview, or the role name mismatches | First check `bao read auth/kubernetes/config` — if it shows a `token_reviewer_jwt`, that is the cause: the projected SA token it captured has expired. Re-run the [§7.4](#74-configure-kubernetes-authentication) config **without** that field and without `kubernetes_ca_cert`, so OpenBao reads both from its own mount on every request. Otherwise: `kubectl -n external-secrets logs deploy/external-secrets`, check the `system:auth-delegator` binding, and that the role is `eso` bound to SA `external-secrets` in ns `external-secrets`. |
 | ExternalSecret `SecretSyncedError`, `permission denied` | KV v2 path missing the `/data/` segment | The policy must be `path "shop/data/*"`, not `path "shop/*"` ([§7.4](#74-configure-kubernetes-authentication)). |
 | Kafka pods `Pending` | No PVs / insufficient resources | `kubectl -n kafka describe pod <pod>`. On kind the default local-path provisioner needs disk — check Docker's disk allocation. |
@@ -8385,14 +12110,15 @@ Two version rules worth internalising:
 | Buildkite agent never connects | Wrong token, or wrong cluster | `kubectl -n buildkite logs deploy/agent-stack-k8s`. Token must come from the **cluster's** agent tokens page, and the queue must exist. |
 | Build step Pending forever | Queue tag mismatch | The step's `agents: { queue: kubernetes }` must equal the controller's `config.tags` value. |
 | Buildah `cannot set up namespace` | Not privileged | The `securityContext.privileged: true` in [§12.5](#125-the-pipeline) is required for this approach. |
-| Prometheus target missing | PodMonitor matched nothing | The monitor scrapes `portNumber: 15020`, the sidecar's merged endpoint, so a pod with no sidecar has nothing to scrape. (15020 is unnamed, which is why the monitor uses `portNumber:` and not `port:`; `http-envoy-prom` is 15090 and carries Envoy's own metrics only.) Check `READY 2/2` first, then labels ([§9.6](#96-the-metrics-problem-you-just-created)). |
+| Prometheus target missing — the PodMonitor job shows **no targets at all**, not a failed one | Either the pods have no sidecar, or the monitor asks for a port nothing declares | `kubectl -n shop get pods` — `1/1` means no sidecar and nothing to scrape ([§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones)). `2/2` and still empty: the monitor is filtering every target away. Prove it — `/api/v1/targets?state=any` lists them under `droppedTargets` with their `__meta_kubernetes_pod_container_port_number`. **`port:`/`portNumber:` on a PodMonitor filter declared container ports; 15020 is not one** (istio-proxy declares 15090 and 15021), so the address must come from the `prometheus.io/*` annotations via `relabelings` ([§9.6](#96-the-metrics-problem-you-just-created)). |
 | Grafana dashboard doesn't appear | ConfigMap label wrong | Must be `grafana_dashboard: "1"` and `sidecar.dashboards.searchNamespace: ALL`. |
 | Everything is slow / pods OOMKilled | Docker memory too low | 16 GB minimum with the mesh and portal running ([§1.3](#13-give-docker-enough-room)). Check with `kubectl top nodes`. |
 | Pod stuck `1/2 Running`, app fine | Sidecar can't reach `istiod` | `kubectl -n istio-system logs deploy/istiod`; `istioctl proxy-status` lists proxies and whether they're synced. |
-| `RBAC: access denied` on every request | An `AuthorizationPolicy` matched and denied | `istioctl analyze -n shop` first — the usual cause is a `principals` value naming a ServiceAccount that doesn't exist, which denies everything and looks healthy in `kubectl get pods` ([§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist)). |
+| `RBAC: access denied` on every request | An `AuthorizationPolicy` matched and denied | `istioctl analyze -n shop` first — the usual cause is a `principals` value naming a ServiceAccount that doesn't exist, which denies everything and looks healthy in `kubectl get pods` ([§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist)). **Know the baseline before you read the output:** between §9 and Phase 7 the analyzer reports five expected findings for `frontend` and `pricing`, which do not exist yet, and exits non-zero. Six findings means yours ([§9.8](#98-commit-and-a-word-on-what-you-cannot-verify-yet)). |
 | `curl` from another namespace → `Connection reset by peer` | STRICT mTLS, and the caller has no sidecar | Working as designed. Enroll the caller's namespace, or confirm you meant to be outside the mesh. |
 | A Job never completes, pod sits at `1/2` | Sidecar outlives the job container | Add `sidecar.istio.io/inject: "false"` to the **pod template** ([§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones)). |
-| Kiali graph is empty | No traffic, or `istio_requests_total` missing | Send requests first. Still empty? Query `istio_requests_total` in Prometheus — if it's absent, the PodMonitor isn't scraping the merged endpoint. |
+| `helm install kiali-server` → `namespaces "istio-system" not found` | Kiali installed before [§9.2](#92-install-the-control-plane) created the namespace | It lives in [§9.7](#97-kiali-the-mesh-you-can-see), after the control plane and after the [§9.6](#96-the-metrics-problem-you-just-created) monitor swap. Do not `kubectl create namespace istio-system` to get past it — the chart then installs against no control plane and draws an empty graph indistinguishable from a broken one. |
+| Kiali graph is empty | No traffic, `istio_requests_total` missing, or the workloads have no sidecars | Send requests first. Still empty? `kubectl -n shop get pods` — `1/1` means the pods predate the namespace label and were never restarted ([§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones)). `2/2` but still empty? Query `istio_requests_total` in Prometheus — if it's absent, the PodMonitor isn't scraping the merged endpoint. |
 | Backstage template fails at the last step, `action not found` | Scaffolder GitHub module not registered | `backend.add(import('@backstage/plugin-scaffolder-backend-module-github'))` in `packages/backend/src/index.ts`, then rebuild the image ([§14.3](#143-scaffold-the-portal)). |
 | Scaffolder PR fails with 403 | Fine-grained PAT missing `Pull requests: RW` | Contents alone is not enough to open a PR. Re-scope the token, update the value in OpenBao, wait for ESO to resync, restart the pod. |
 | Scaffolded service builds but never deploys | Chart file missing or malformed | `helm template deploy/charts/order-platform` and look for it. The chart reads `services/*.yaml` — a file that isn't valid YAML renders as nothing, with no error ([§14.6](#146-paved-path-1--a-new-service)). |
@@ -8450,6 +12176,8 @@ kind delete cluster --name devops
 kubectl config use-context kind-devops
 
 # Nexus
+docker restart nexus                      # clears the auth rate-limit lockout (429), in-memory
+docker exec nexus tail -20 /nexus-data/log/request.log   # 429 vs 401 — the client will not tell you
 docker start nexus
 docker exec nexus cat /nexus-data/admin.password
 docker login nexus:8082 -u ci
@@ -8465,6 +12193,13 @@ $BAO kv put shop/order-api signing_key=...        # a full overwrite of the path
 # under shop-admin; so do secrets enable, auth enable and policy write.
 BAO_ROOT="kubectl -n openbao exec -i openbao-0 -- env BAO_TOKEN=root BAO_ADDR=http://127.0.0.1:8200 bao"
 $BAO_ROOT policy read shop-read
+$BAO_ROOT auth list                       # check this FIRST after any OpenBao restart
+
+# OpenBao — rebuild everything a dev-mode restart lost (§7.5a). The Job's pod
+# template is immutable, so it is delete-then-apply, not apply.
+kubectl delete -f deploy/platform/openbao-bootstrap.yaml
+kubectl apply  -f deploy/platform/openbao-bootstrap.yaml
+kubectl -n openbao logs job/openbao-bootstrap -f
 
 # External Secrets
 kubectl get clustersecretstore

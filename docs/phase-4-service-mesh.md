@@ -58,7 +58,7 @@ So the honest pitch: the mesh gives you **identity-based mTLS on every HTTP hop 
 > (`cluster.local/ns/istio-system/sa/istio-ingressgateway`) — that is the principal the
 > authorization policies in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist)
 > key on. Routing into the mesh is written as `Gateway` + `VirtualService`, the same objects and the
-> same language as the canary in [§9.8](#98-canary-two-versions-of-pricing-behind-one-service),
+> same language as the canary in [§9.9](#99-canary-two-versions-of-pricing-behind-one-service),
 > rather than split between an Ingress controller's annotations and Istio's config.
 >
 > Argo CD, Grafana, Kiali, Backstage and Nexus are not in the mesh and keep their own Ingresses.
@@ -144,12 +144,20 @@ Sidecars are injected at pod **creation**, so existing pods need a restart:
 
 ```bash
 kubectl -n floci rollout restart deployment/floci
+kubectl -n shop  rollout restart deployment/order-api deployment/order-worker
 
-# order-api / order-worker don't exist yet — they'll be born with sidecars in §11.
 kubectl -n floci get pods          # READY should be 2/2
+kubectl -n shop  get pods          # READY should be 2/2
 ```
 
 `2/2` is the whole verification: your container plus `istio-proxy`.
+
+> **`shop` is restarted here, not left to the next Argo CD sync.** Argo CD reconciles *manifests*, and
+> the chart's manifests did not change — adding a label to the namespace does not make the Deployment
+> drift, so nothing triggers a rollout and the pods keep running without sidecars indefinitely. The
+> restart is the injection. Skip it and [§9.6](#96-the-metrics-problem-you-just-created)'s broken
+> scrape never happens, [§9.7](#97-kiali-the-mesh-you-can-see)'s graph is empty, and the mesh looks
+> installed while carrying no traffic.
 
 One thing in the `floci` namespace must **not** be injected — the bootstrap Job from [§6.3](phase-1-the-application.md#63-bootstrap-the-s3-bucket-and-dynamodb-table). That's why its pod template already carries the opt-out:
 
@@ -195,15 +203,26 @@ Before you apply it, build the edge, because STRICT is what makes the edge's sha
 That is `istio-ingressgateway`, and it needs two objects — a `Gateway` declaring which ports and
 hostnames the proxy accepts, and a `VirtualService` per hostname declaring where it goes.
 
-**`deploy/platform/istio/edge-gateway.yaml`** (comments stripped here; the file carries them)
+**`deploy/platform/istio/edge-gateway.yaml`**
 
 ```yaml
+# The mesh's own entry point, which is what Istio documents for north-south
+# traffic. A Gateway describes the port and hostnames the edge proxy accepts;
+# the VirtualServices below describe where those hostnames go. Routing lives in
+# the same objects and the same language as the canary in §9.8, rather than
+# being split between an Ingress controller's annotations and Istio's config.
+#
+# ingress-nginx still owns hostPort 80/443 on the kind node and forwards these
+# two hostnames here (see edge-ingress.yaml). That is the same shape as the
+# production topology Istio documents: an external load balancer in front of
+# istio-ingressgateway.
 apiVersion: networking.istio.io/v1
 kind: Gateway
 metadata:
   name: edge
   namespace: istio-system
 spec:
+  # Matches the pod labels the istio/gateway chart applies.
   selector:
     istio: ingressgateway
   servers:
@@ -211,9 +230,16 @@ spec:
         number: 80
         name: http
         protocol: HTTP
+      # Wildcard, so a service the paved path (§14.6) adds needs only a
+      # VirtualService — no edit to this file and no edit to the nginx Ingress
+      # in front of it. A hostname with no VirtualService gets a 404 from the
+      # gateway, which is the correct answer for a route nobody declared.
       hosts:
         - "*.localtest.me"
 ---
+# A VirtualService binds a hostname to the Gateway and routes it to a Service.
+# `gateways` names the Gateway in namespace/name form because the Gateway lives
+# in istio-system and these route to workloads in shop.
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
@@ -263,9 +289,25 @@ is the correct answer for a route nobody declared.
 Then the hop in front of it. nginx owns `hostPort` 80/443 on the kind node and hands the meshed
 hostnames to the gateway's Service:
 
-**`deploy/platform/istio/edge-ingress.yaml`** (comments stripped here; the file carries them)
+**`deploy/platform/istio/edge-ingress.yaml`**
 
 ```yaml
+# ingress-nginx owns hostPort 80/443 on the kind control-plane node and is the
+# edge for everything that is not in the mesh — Argo CD, Grafana, Kiali,
+# Backstage, Nexus. It keeps that job. This Ingress hands the two meshed
+# hostnames straight to istio-ingressgateway and does nothing else with them:
+# no rewriting, no per-service annotations, no knowledge of what is behind it.
+#
+# That split is the point. Each proxy does the job its own documentation
+# describes — nginx routes a hostname to a Service, Istio owns everything from
+# the mesh boundary inward — and neither is asked to understand the other. It is
+# also the shape of the production topology Istio documents, with nginx standing
+# in for the cloud load balancer that would forward to the gateway there.
+#
+# Nothing here needs `service-upstream` or `upstream-vhost`. istio-system has no
+# STRICT PeerAuthentication, so the gateway accepts this plaintext hop exactly as
+# it would from a cloud load balancer; mTLS begins at the gateway, which is
+# in the mesh and calls shop workloads with a real workload identity.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -274,6 +316,10 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
+    # A wildcard host, so a scaffolded service reaches the mesh without anyone
+    # editing this file. The platform's own UIs — Argo CD, Grafana, Kiali,
+    # Backstage — keep their exact-host Ingresses, and an exact host always wins
+    # over a wildcard, so they never come through here.
     - host: "*.localtest.me"
       http:
         paths:
@@ -306,15 +352,39 @@ kubectl apply -f deploy/platform/istio/peer-authentication.yaml
 ```
 
 The two `Ingress` resources written in [§10.1](phase-1-the-application.md#101-one-chart-two-workloads)
-are now dead, and they will fight this one: two Ingresses claiming the same host and path is a
-conflict the nginx admission webhook rejects outright. Delete them from the chart — the whole
-`{{- if .Values.orderApi.ingress.enabled }}` block at the end of `order-api.yaml`, and the matching
-block in `frontend.yaml` — along with the now-unused `ingress:` keys in `values.yaml`. Routing for
-these two services lives in the VirtualServices above from here on.
+are now dead, and leaving them is not harmless — **it breaks the site completely.** Delete them from
+the chart: the whole `{{- if .Values.orderApi.ingress.enabled }}` block at the end of
+`order-api.yaml`, the matching block in `frontend.yaml`, and the now-unused `ingress:` keys under
+`orderApi` and `frontend` in `values.yaml`. Routing for these two services lives in the
+VirtualServices above from here on.
+
+This is a chart change, so it goes through git — Argo CD owns this release
+([§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery)) and will recreate anything you delete
+with `kubectl`:
 
 ```bash
-kubectl -n shop delete ingress order-api frontend --ignore-not-found
+git add deploy/charts/order-platform
+git commit -m "fix(mesh): drop the dead ingresses; routing lives in the VirtualService"
+git push
+
+kubectl -n argocd annotate app order-platform argocd.argoproj.io/refresh=hard --overwrite
+kubectl -n shop get ingress          # No resources found — that is the check
 ```
+
+> [!warning] **Skip this and every request to `shop.localtest.me` returns `502 Bad Gateway`, with
+> nothing in the mesh reporting a fault.**
+> Not an admission conflict — the two Ingresses declare *different* hosts (`shop.localtest.me` and
+> `*.localtest.me`), so nginx admits both without complaint. The exact host then wins, exactly as the
+> callout above says it does, and nginx forwards straight to `order-api`'s Service **in plaintext,
+> from outside the mesh**. STRICT mTLS refuses it, nginx has no upstream response to return, and you
+> get a 502.
+>
+> Everything you would check looks correct: pods `2/2`, `istioctl analyze` clean apart from its
+> [expected baseline](#98-commit-and-a-word-on-what-you-cannot-verify-yet), the `Gateway` and
+> `VirtualService` applied, the gateway pod healthy. `kubectl -n shop get ingress` is the one command
+> that names it, and it is the last place anyone looks — the object is a leftover from Phase 1 that
+> nothing in Phase 4 draws your attention to. **The route you deleted is not the route that is
+> serving.**
 
 That is the trade the Gateway asks for, stated plainly: one more component to install, and routing
 that no longer lives in a second proxy's annotations.
@@ -374,6 +444,13 @@ spec:
               - "cluster.local/ns/shop/sa/order-api"
               - "cluster.local/ns/shop/sa/order-worker"
 ---
+# 3. The same deny-all, for shop. Without this, Istio's default applies: a
+# workload that no ALLOW policy selects accepts traffic from anything in the
+# mesh. Policies 4 and 5 below select order-api and pricing, so those two were
+# already covered -- but frontend and order-worker were selected by nothing,
+# and were therefore reachable from every workload in the cluster. Deny-by-
+# default is a property of the namespace, not of the workloads you remembered
+# to write a policy for.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -382,6 +459,11 @@ metadata:
 spec:
   {}
 ---
+# 4. The frontend is a browser-facing page. It is reachable from the mesh's
+# ingress gateway and from nowhere else -- it has no callers inside the mesh.
+# The principal is the gateway's own workload identity: traffic entering
+# through it is authenticated as istio-ingressgateway, not as whatever sits in
+# front of it.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -398,6 +480,14 @@ spec:
             principals:
               - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
 ---
+# 5. order-worker takes no inbound traffic at all. It consumes from Kafka and
+# writes to Floci; nothing calls it. The one exception is Prometheus scraping
+# its metrics port, which reaches the sidecar's merged endpoint rather than the
+# application, so it needs no allow rule here. An empty rules list would deny
+# everything including that, so the policy allows precisely one thing: nothing
+# inbound to the application ports.
+#
+# 6. order-api is reachable from the edge, and from the frontend -- nowhere else.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -413,6 +503,32 @@ spec:
         - source:
             principals:
               - "cluster.local/ns/istio-system/sa/istio-ingressgateway"
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/shop/sa/frontend"
+---
+# 4. pricing is the canary target (v1/v2, one Service). It is called
+# synchronously on the order path with no fallback on failure (see
+# services/order-api/order_api/main.py: `_price_order` raises HTTP 502 on any
+# grpc.RpcError, it never guesses a price) -- so its blast radius must be as
+# small as possible. order-api is the only workload with any business calling
+# it. Not order-worker, not frontend, not anything in floci.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-order-api-to-pricing
+  namespace: shop
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pricing
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/shop/sa/order-api"
 ```
 
 ```bash
@@ -456,7 +572,7 @@ STRICT because Prometheus is now talking to a port the sidecar deliberately expo
 
 Swap the monitors — off with one, on with the other:
 
-```bash
+```yaml
 # deploy/charts/order-platform/values.yaml
 serviceMonitor:
   enabled: false     # plaintext; refused by STRICT mTLS from here on
@@ -465,21 +581,74 @@ podMonitor:
   interval: 15s
 ```
 
+**Commit it. Do not run `helm upgrade`.** [§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery)
+handed this release to Argo CD, and that was the point of the phase:
+
 ```bash
-helm upgrade --install order-platform deploy/charts/order-platform \
-  --namespace shop --values deploy/env/local/values.yaml --wait
+git add deploy/charts/order-platform/values.yaml
+git commit -m "fix(observability): scrape the sidecar's merged endpoint under strict mtls"
+git push
+
+# `Synced` alone is not the check — compare the revision Argo applied to the one you pushed.
+kubectl -n argocd get application order-platform \
+  -o jsonpath='{.status.sync.status} {.status.sync.revision}{"\n"}'
+git rev-parse HEAD
 ```
+
+> [!warning] **Argo CD reports `Synced` against a revision it has not fetched yet.**
+> It polls, and until it does it is truthfully synced — to the *previous* commit. The two SHAs above
+> disagree, `kubectl -n shop get podmonitor order-platform -o yaml` still shows the old spec, and
+> nothing anywhere says "stale": the Application is `Synced`, `Healthy`, and `reconciledAt` is
+> seconds old. This is the same stale-cache behaviour as the `Synced`+`Degraded` case in Appendix B,
+> and it is worth meeting here, where the only cost is confusion. Force it:
+>
+> ```bash
+> kubectl -n argocd annotate app order-platform argocd.argoproj.io/refresh=hard --overwrite
+> ```
+>
+> **Do not skip to debugging the thing you just changed.** Every minute spent on a PodMonitor that
+> was never applied is spent on the wrong object.
+
+> [!warning] **`helm upgrade` cannot work here any more, and this is the first section where you will
+> try it.** Argo CD syncs this Application with `ServerSideApply=true`, so the API server records
+> `argocd-controller` as the field manager for the fields it sets. Helm 3.18+ also applies
+> server-side, and the API server refuses the collision rather than silently picking a winner:
+>
+> ```
+> Error: UPGRADE FAILED: conflict occurred while applying object shop/order-api
+> apps/v1, Kind=Deployment: Apply failed with 3 conflicts: conflicts with "argocd-controller":
+> - .spec.template.metadata.annotations.checksum/config
+> - .spec.template.spec.containers[name="order-api"].image
+> - .spec.template.spec.containers[name="order-api"].env[name="SERVICE_VERSION"].value
+> ```
+>
+> **That error is the system working.** Two controllers wanted the same fields and the API server said
+> so instead of letting them fight. You can force it — `--force-conflicts` on `kubectl`, or Helm's
+> `--take-ownership` — and it is the wrong move twice over: it steals the fields from Argo CD, and
+> `selfHeal: true` reverts your change on the next reconcile anyway, so you get a cluster that
+> disagrees with git and a change that vanishes minutes later with nothing logged against it.
+> **After §11 the deploy button is `git push`.** If you need it now rather than on the next poll,
+> `argocd app sync order-platform` — that is Argo CD applying git, not you applying your laptop.
 
 > **Why a `PodMonitor` and not another `ServiceMonitor`.** The merged endpoint lives on the **pod**,
 > on the sidecar's own port, and is not fronted by any Service — so a `ServiceMonitor`, which selects
 > Services, has nothing to select. That is the whole reason the kind changes.
 >
-> And it must be addressed by **number**. Istio's docs: *"forwards requests to the sidecar telemetry
-> port **15020 for merged metrics** or **15090 for Envoy-only metrics**"*. 15090 is the port carrying
-> the name `http-envoy-prom`; **15020 is unnamed in the pod spec**, so `port:` cannot reach it and
-> `portNumber: 15020` is required. Pick 15090 by name and you will get `istio_requests_total` — so
-> Kiali looks perfectly healthy — while your application's own `orders_received_total` never appears
-> again. A half-failure that looks like a success is worse than an outage.
+> And it cannot be addressed by port at all. Istio's docs: *"forwards requests to the sidecar
+> telemetry port **15020 for merged metrics** or **15090 for Envoy-only metrics**"* — but `port:` and
+> `portNumber:` on a `PodMonitor` are **filters over the container ports a pod declares**, not a dial.
+> **Nothing declares 15020.** istio-proxy declares 15090 (`http-envoy-prom`) and 15021 (`status`), so
+> `portNumber: 15020` compiles to a keep rule matching no container, and every target is dropped
+> during relabeling. `/targets` then shows **nothing at all** for the job — not a failed target, not
+> an error, an absence — which is indistinguishable from a monitor whose selectors are wrong. The
+> address is built from the `prometheus.io/*` annotations the injector rewrote onto the pod, which is
+> what the `relabelings` in
+> [§10.1](phase-1-the-application.md#101-one-chart-two-workloads)'s `podmonitor.yaml` do.
+>
+> And do not reach for 15090 to make the error go away: it is a real declared port, so the targets
+> come **up**, and you get `istio_requests_total` — Kiali looks perfectly healthy — while your
+> application's own `orders_received_total` never appears again. A half-failure that looks like a
+> success is worse than an outage.
 
 Now confirm you get **both halves** from one scrape:
 
@@ -504,14 +673,129 @@ scraping the application port rather than `15020`. If yours is empty but Istio's
 > condition [§13.5](phase-2-observability.md#135-an-alert-that-means-something) argues you should page
 > on.
 
-### 9.7 Commit, and a word on what you cannot verify yet
+### 9.7 Kiali: the mesh you can see
+
+Everything the last five sections built is invisible. mTLS either works or it doesn't; an
+`AuthorizationPolicy` either matches or it doesn't; and when it doesn't, the symptom is a 403 in a log
+somewhere. Kiali reads the Prometheus from [§13.2](phase-2-observability.md#132-install) plus Istio's
+configuration, and draws the answer.
+
+**This is the earliest point in the build where it can be installed, and the earliest where it would
+have anything to draw.** It needs two things that did not both exist until the previous section: the
+`istio-system` namespace from [§9.2](#92-install-the-control-plane) — Kiali installs into it, and
+Helm does not create a namespace for you — and `istio_requests_total` in Prometheus, which is what
+the monitor swap in [§9.6](#96-the-metrics-problem-you-just-created) started collecting. Run it any
+earlier and Helm stops with `namespaces "istio-system" not found`; create that namespace by hand to
+get past it and the chart installs cleanly against no control plane, drawing an empty graph
+indistinguishable from a broken one.
+
+```bash
+helm repo add kiali https://kiali.org/helm-charts
+helm repo update
+
+helm upgrade --install kiali-server kiali/kiali-server \
+  --namespace istio-system --version 2.30.0 \
+  --set auth.strategy=anonymous \
+  --set external_services.prometheus.url=http://monitoring-kube-prometheus-prometheus.monitoring:9090 \
+  --set external_services.grafana.enabled=true \
+  --set external_services.grafana.internal_url=http://monitoring-grafana.monitoring \
+  --set external_services.grafana.external_url=http://grafana.localtest.me \
+  --wait
+```
+
+> **`auth.strategy=anonymous` means anyone who can reach the URL is an admin.** Kiali can *change* Istio configuration from the UI, so on a real cluster this is a privilege-escalation path with a web interface. It is acceptable here because the only route to it is `localhost` on your laptop. The production settings are `openid` or `header`; the default is `token`, which makes you paste a ServiceAccount token at every login and is the right friction outside a lab.
+
+Give it an Ingress, consistent with everything else:
+
+**`deploy/platform/kiali-ingress.yaml`**
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kiali
+  namespace: istio-system
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: kiali.localtest.me
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kiali
+                port: { number: 20001 }
+```
+
+```bash
+kubectl apply -f deploy/platform/kiali-ingress.yaml
+```
+
+Open <http://kiali.localtest.me>. Generate traffic first — an idle mesh draws an empty graph, which looks identical to a broken install:
+
+```bash
+for i in $(seq 1 50); do
+  curl -sS -o /dev/null -X POST http://shop.localtest.me/orders \
+    -H 'content-type: application/json' \
+    -d '{"customer":"ada","sku":"WIDGET-1","quantity":1,"amount_cents":100}'
+done
+```
+
+Then, in **Graph**, select the `shop` and `floci` namespaces and turn on the **Security** display option. What you are looking for, in order:
+
+| What you see | What it means |
+|---|---|
+| A padlock on the `order-api → floci` edge | mTLS is actually in use on that hop — not just configured, *observed*. |
+| `istio-ingressgateway → order-api` present | The edge is meshed and reporting. It is the **gateway**, not `ingress-nginx`, that appears here — nginx is deliberately outside the mesh ([§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones)), so it never draws an edge and its absence is not a fault. |
+| No edge between `order-api` and `order-worker` | Correct, and worth staring at. They are joined by Kafka, which is outside the mesh, so the mesh cannot draw that relationship. **A service graph is not an architecture diagram** — it shows synchronous calls the proxies saw, and it is blind to your entire async path. |
+| Red edges into `floci` | The `deny-all` in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) is doing its job to something. Click the edge → **Traffic** to see which principal was refused. |
+
+The other tab worth your time is **Istio Config**, which validates every `PeerAuthentication`, `AuthorizationPolicy` and `DestinationRule` in the cluster and flags the ones that reference workloads or service accounts that don't exist. That is the exact failure mode [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) warned about — a policy whose `principals` have a typo denies everything and looks, from `kubectl get pods`, like a perfectly healthy cluster.
+
+```bash
+git add deploy/platform/kiali-ingress.yaml
+git commit -m "feat(observability): kiali"
+```
+
+> **Kiali is a read-mostly tool, and that's the discipline.** It will happily let you edit Istio config through the UI. Don't: every object it manages is in git, and a change made in the console is a change Argo CD will revert on its next sync — or worse, won't, because you edited something Argo doesn't track. Use it to see and to validate; make changes in the repo.
+
+### 9.8 Commit, and a word on what you cannot verify yet
 
 ```bash
 git add deploy/platform/istio deploy/platform/floci-bootstrap.yaml
 git commit -m "feat(platform): istio with strict mtls and default-deny authz"
 ```
 
-`order-api` and `order-worker` don't exist yet, so §9.4's proof covers Floci only. The rest of the mesh — the edge path through the gateway, the authorization policies keyed on those two service accounts — becomes verifiable in [§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery), when Argo CD deploys the chart into the now-enrolled `shop` namespace. If a page load returns `RBAC: access denied` at that point, the policy in §9.5 is what to read first, and `istioctl analyze -n shop` is what to run.
+§9.4's proof covered Floci. `order-api` and `order-worker` have been running since [§10](phase-1-the-application.md#10-packaging-the-app-with-helm) and are reconciled by Argo CD as of [§11](phase-3-delivery.md#11-argo-cd-pull-based-delivery), but they picked up their sidecars only when [§9.3](#93-enroll-namespaces--and-decide-deliberately-which-ones) labelled `shop` and the pods restarted — so the edge path through the gateway and the authorization policies keyed on those two service accounts are verifiable now, on this deployment. If a page load returns `RBAC: access denied`, the policy in [§9.5](#95-authorization-deny-by-default-then-allow-the-paths-that-exist) is what to read first, and `istioctl analyze -n shop` is what to run.
+
+**Run it now, so you know what its noise looks like before you need its signal.** At this point in
+the build it exits **non-zero** with five findings, and every one of them is correct and expected:
+
+```
+$ istioctl analyze -n shop
+Error   [IST0101] (VirtualService shop/frontend) Referenced host not found: "frontend.shop.svc.cluster.local"
+Error   [IST0101] (VirtualService shop/pricing) Referenced host not found: "pricing.shop.svc.cluster.local"
+Warning [IST0127] (AuthorizationPolicy shop/allow-ingress-to-frontend) No matching workloads ... app.kubernetes.io/name=frontend
+Warning [IST0127] (AuthorizationPolicy shop/allow-order-api-to-pricing) No matching workloads ... app.kubernetes.io/name=pricing
+Warning [IST0174] (DestinationRule shop/pricing) The host pricing.shop.svc.cluster.local ... does not match any services in the mesh
+Error: Analyzers found issues when analyzing namespace: shop.
+```
+
+`frontend` and `pricing` are built in [Phase 7](phase-7-polyglot-monorepo.md). You have written the
+policy and the routing for services that do not exist yet — deliberately, because §9.5's `deny-all`
+has to be complete before anything is enrolled, not retrofitted after. **These five clear themselves
+when Phase 7 deploys those two workloads.** Note what is *absent*: nothing is reported against
+`order-api` or `order-worker`, which do exist. That is the signal.
+
+> [!warning] **A diagnostic with a known-noisy baseline is a diagnostic you will learn to ignore.**
+> §9.5 says `istioctl analyze` is what catches a `principals` typo that `kubectl get pods` cannot —
+> and that is true, but only if you know what five findings look like when nothing is wrong. Count
+> them. Six means something you did. The same applies to Kiali's **Istio Config** tab
+> ([§9.7](#97-kiali-the-mesh-you-can-see)), which validates the same objects and will show the same
+> five in red. This is the ordinary condition of every linter pointed at a system built in stages,
+> and the discipline — record the baseline, alert on the delta — is worth more than the finding.
 
 When it is running, do not accept a `200` from the browser as proof that the edge is meshed — a `200`
 only tells you bytes moved, and the first two hops are plaintext by design. Ask the destination
@@ -534,7 +818,7 @@ The working state is `app.localtest.me` returning 200, `shop.localtest.me/health
 the platform UIs still answering on their own exact hostnames — Argo CD 200, Grafana 302, Kiali 302,
 Backstage 200, none of them through the gateway.
 
-### 9.8 Canary: two versions of `pricing` behind one Service
+### 9.9 Canary: two versions of `pricing` behind one Service
 
 Everything above secures traffic. This section *steers* it — and it is the half of a service mesh that
 most people install one for.
@@ -619,9 +903,26 @@ Confirm with `kubectl -n shop get svc pricing -o jsonpath='{.spec.ports[*].name}
 
 #### `DestinationRule` — subsets, and the pool policy
 
-**`deploy/platform/istio/pricing-traffic.yaml`** (the file itself carries all of the arithmetic below as inline comments; stripped here so the prose can do the work)
+**`deploy/platform/istio/pricing-traffic.yaml`**
 
 ```yaml
+# Canary routing and resilience for shop.v1.Pricing (services/pricing), consumed
+# by order-api's PricingClient over gRPC with a 2s client-side deadline
+# (order_api/main.py: `self._stub.PriceOrder(request, timeout=self._timeout_seconds)`).
+# order-api never falls back to a local price on failure — it returns HTTP 502 —
+# so every value below is chosen against that 2s budget, worked out explicitly
+# in the comments rather than left as Istio defaults.
+#
+# gRPC-over-HTTP/2 note: Istio does NOT have a separate "grpc:" route stanza.
+# gRPC rides HTTP/2, so it is routed with the ordinary `http:` block below.
+# What makes Istio treat this Service's traffic as HTTP/2-aware in the first
+# place (rather than opaque TCP) is the Service port *name* -- `grpc` (see the
+# Service manifest: ports named `grpc` and `metrics`). Istio's port-name
+# protocol sniffing maps the `grpc` / `grpc-*` prefix to HTTP/2 with gRPC
+# semantics, which is what makes header-based routing, retries and
+# gRPC-status-aware outlier detection possible at all. Get the port name
+# wrong (e.g. call it `pricing` or `tcp-grpc`) and Istio falls back to plain
+# TCP passthrough -- this whole file would silently stop doing anything.
 apiVersion: networking.istio.io/v1
 kind: DestinationRule
 metadata:
@@ -637,17 +938,121 @@ spec:
       labels:
         version: v2
   trafficPolicy:
+    # Applies to both subsets (v1 and v2 each get their own Envoy cluster, but
+    # both inherit this trafficPolicy since neither subset overrides it).
     connectionPool:
+      # Modest limits for a 2-3 replica internal service taking gRPC calls from
+      # order-api (and order-worker). HTTP/2 multiplexes many requests over one
+      # connection, so we don't need -- and don't want -- a large connection count.
       tcp:
         maxConnections: 20
       http:
+        # Concurrent in-flight requests across the whole pool. 100 is generous
+        # headroom over expected order volume for a demo service while still
+        # bounding worst-case fan-out from a client bug.
         http2MaxRequests: 100
+        # 0 = unlimited requests per HTTP/2 connection. HTTP/2 is designed for
+        # long-lived multiplexed connections; forcing periodic reconnects (a
+        # nonzero cap) only adds handshake latency to a service already living
+        # inside a 2s client deadline, for no gRPC-specific benefit.
         maxRequestsPerConnection: 0
     outlierDetection:
+      # Eject a pod after 3 consecutive gateway/5xx errors. Justification for a
+      # 2-3 replica subset: with `consecutive5xxErrors` left at its default of
+      # 5, a single bad replica in a pool that small could account for a large
+      # share of total request volume before ejection ever kicks in -- the
+      # blast radius is too big to wait for 5. 3 is fast enough to react to a
+      # genuinely broken pod within a handful of requests, without being so
+      # low (e.g. 1-2) that ordinary transient errors trip it.
       consecutive5xxErrors: 3
+      # How often Envoy sweeps for ejection candidates.
       interval: 15s
+      # Minimum time a pod stays ejected once flagged. Kept at the 30s
+      # default: long enough that the ejected pod isn't immediately
+      # reconsidered on the next 15s sweep, short enough that a transient
+      # blip (e.g. a fault-injection drill, see pricing-fault-injection.yaml.disabled)
+      # self-heals without operator intervention.
       baseEjectionTime: 30s
+      # Cap ejections at 50%, not the 10% default. Rationale: with only 2-3
+      # replicas per subset, 10% of the pool rounds down to zero ejectable
+      # hosts -- outlier detection would be configured but functionally
+      # inert. 50% guarantees room to eject at least one bad replica out of
+      # two while always leaving at least one healthy replica standing, so a
+      # single failing pod can never take the whole subset out of rotation.
       maxEjectionPercent: 50
+---
+# 90/10 canary split between pricing-v1 and pricing-v2, with a request-level
+# timeout and retry policy sized against order-api's 2s client-side gRPC
+# deadline (order_api/main.py PricingClient, settings.pricing_timeout_seconds).
+#
+# The arithmetic, in order:
+#
+#   1. route `timeout: 1800ms` -- deliberately LESS than the client's 2000ms
+#      deadline, never more. A route timeout longer than 2s is pointless:
+#      order-api's own grpc timeout fires at 2s regardless of what Envoy is
+#      still doing, so anything Envoy does past that point is wasted work the
+#      caller has already given up on. Setting it a bit *under* 2s (200ms of
+#      slack) means Envoy is the one that gives up and returns a clean
+#      "upstream request timeout" to order-api's stub, rather than the two
+#      timers racing to fire at effectively the same instant, which would
+#      make the failure mode nondeterministic (sometimes a proxy-side error,
+#      sometimes a bare DEADLINE_EXCEEDED from the grpc lib itself).
+#
+#   2. retries: attempts=2, perTryTimeout=500ms -- worst case this is the
+#      initial try plus 2 retries = 3 attempts * 500ms = 1500ms of pure
+#      per-try time. Add Istio's exponential backoff between attempts
+#      (minimum ~25ms per gap, 2 gaps = ~50ms) and the worst-case total is
+#      ~1550ms. That leaves ~250ms of slack under the 1800ms route timeout,
+#      and ~450ms of slack under order-api's 2000ms client deadline. Retries
+#      that could exceed the caller's own deadline are worse than useless --
+#      they burn the time budget on attempts the caller will never see the
+#      result of -- so every number here is chosen to keep the full retry
+#      envelope inside both ceilings, not just the outer one.
+#
+#   3. retryOn -- gRPC-over-HTTP/2 conditions, deliberately narrow:
+#        - unavailable, cancelled: transient / connection-level failures
+#          (matches Istio's own cluster-wide default retry set) -- exactly
+#          the class of error a retry against a *different* pod is likely to
+#          fix.
+#        - connect-failure, refused-stream: HTTP/2-level conditions (TCP
+#          connect failure, stream reset before headers) -- the request
+#          never reached an application handler, so retrying is safe and
+#          cheap.
+#      Deliberately NOT retried:
+#        - deadline-exceeded: the request already burned its per-try time
+#          budget once; retrying just spends more of the same 2s budget on
+#          the same failure mode.
+#        - resource-exhausted / internal: these usually mean the instance is
+#          already overloaded or broken. Retrying hammers a struggling pod
+#          instead of giving it room to recover -- that's what
+#          outlierDetection above is for (eject it), not what retries are for.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: pricing
+  namespace: shop
+spec:
+  hosts:
+    - pricing.shop.svc.cluster.local
+  http:
+    - route:
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v1
+            port:
+              number: 50051
+          weight: 90
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v2
+            port:
+              number: 50051
+          weight: 10
+      timeout: 1800ms
+      retries:
+        attempts: 2
+        perTryTimeout: 500ms
+        retryOn: cancelled,unavailable,connect-failure,refused-stream
 ```
 
 A `DestinationRule` names subsets; it does not route to them. Routing is the `VirtualService`, below.
@@ -810,7 +1215,7 @@ interval, and because v2 discounts 10% at `quantity >= 3` the totals visibly cha
 between two identical builds proves the routing works; a canary between two *different behaviours*
 proves you would have noticed if the new one were wrong.
 
-### 9.9 Break it on purpose: fault injection
+### 9.10 Break it on purpose: fault injection
 
 A canary tells you the routing works. It tells you nothing about what happens when `pricing` is slow —
 and slow is the failure mode that matters, because it is the one that consumes the caller's budget
@@ -818,9 +1223,56 @@ rather than failing fast.
 
 Istio can inject the failure for you, with no change to any application:
 
-**`deploy/platform/istio/pricing-fault-injection.yaml.disabled`** (abridged — the route block is identical to `pricing-traffic.yaml`'s)
+**`deploy/platform/istio/pricing-fault-injection.yaml.disabled`**
 
 ```yaml
+# FAILURE DRILL -- NOT applied by Argo CD (the .disabled suffix excludes it
+# from the app's manifest glob). This is an operator tool, applied by hand.
+#
+# What it does: injects a 3s fixed delay into 50% of gRPC calls to pricing.
+# 3s is deliberately LONGER than order-api's 2s client-side gRPC deadline
+# (services/order-api/order_api/main.py PricingClient timeout) and longer
+# than pricing-traffic.yaml's own 1800ms route timeout, so neither of those
+# will save the call -- the point is to force a real, visible failure, not a
+# near-miss.
+#
+# How to apply:
+#   kubectl apply -f deploy/platform/istio/pricing-fault-injection.yaml.disabled
+#
+# What to watch while it's applied:
+#   - order-api: `pricing_calls_total{result="timeout"}` climbing (Prometheus
+#     metric emitted from _price_order's grpc.RpcError handler), and its logs
+#     showing `pricing call failed ... code=DEADLINE_EXCEEDED`.
+#   - order-api: HTTP 502s on POST /orders for the affected fraction of
+#     requests -- there is no fallback path, a failed pricing call IS a
+#     failed order (see the docstring on _price_order).
+#   - frontend: its error counter for order submission climbing in lockstep
+#     with the 50% fault percentage below.
+#   - Kiali / the mesh: pricing's traffic graph should show an elevated error
+#     rate on the subset(s) this fault applies to, and (after enough
+#     consecutive 5xx/gateway errors -- see pricing-traffic.yaml's
+#     outlierDetection: consecutive5xxErrors: 3) pods may start showing as
+#     ejected from the pool. Note that a client-side injected delay is
+#     observed by order-api's Envoy sidecar as a gateway timeout against the
+#     pricing cluster, so it counts toward that ejection threshold too.
+#
+# How to revert:
+#   kubectl delete -f deploy/platform/istio/pricing-fault-injection.yaml.disabled
+#   (this VirtualService is additive/separate from pricing-traffic.yaml's
+#   VirtualService for the same host -- Istio does not allow two
+#   VirtualServices to independently define routes for the same host, so
+#   applying this file means deleting or not simultaneously running
+#   pricing-traffic.yaml's VirtualService for `pricing`. In practice: delete
+#   this fault manifest to go back to the canary-only routing in
+#   pricing-traffic.yaml.)
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: pricing
+  namespace: shop
+spec:
+  hosts:
+    - pricing.shop.svc.cluster.local
   http:
     - fault:
         delay:
@@ -828,7 +1280,23 @@ Istio can inject the failure for you, with no change to any application:
             value: 50
           fixedDelay: 3s
       route:
-        # ... the same 90/10 destinations, timeout and retries as pricing-traffic.yaml
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v1
+            port:
+              number: 50051
+          weight: 90
+        - destination:
+            host: pricing.shop.svc.cluster.local
+            subset: v2
+            port:
+              number: 50051
+          weight: 10
+      timeout: 1800ms
+      retries:
+        attempts: 2
+        perTryTimeout: 500ms
+        retryOn: cancelled,unavailable,connect-failure,refused-stream
 ```
 
 **3 seconds is chosen to beat every timer in the chain.** It is longer than the 1800 ms route timeout
@@ -852,7 +1320,7 @@ What to watch, in the order it becomes visible:
 | `order-api` logs | `pricing call failed ... code=DEADLINE_EXCEEDED` |
 | `POST /orders` | HTTP **502** on the affected fraction — no fallback, a failed pricing call *is* a failed order |
 | the frontend | its error counter climbing in lockstep with the 50% fault rate |
-| [[kiali]] | elevated error rate on `pricing`, and pods being **ejected** from the pool |
+| Kiali | elevated error rate on `pricing`, and pods being **ejected** from the pool |
 
 That last row is the subtle one and the reason this drill is worth running. A client-side injected
 delay registers in `order-api`'s **own sidecar** as a gateway timeout against the `pricing` cluster
@@ -894,8 +1362,8 @@ nginx keeps ports 80/443 and the platform's own UIs, and knows nothing about any
 Your monitoring survived, because you fixed it when it broke.
 
 You have also written the routing, retry and outlier-detection policy for a canary
-([§9.8](#98-canary-two-versions-of-pricing-behind-one-service)) and the drill that breaks it
-([§9.9](#99-break-it-on-purpose-fault-injection)) — neither of which you can run until
+([§9.9](#99-canary-two-versions-of-pricing-behind-one-service)) and the drill that breaks it
+([§9.10](#910-break-it-on-purpose-fault-injection)) — neither of which you can run until
 [Phase 7](phase-7-polyglot-monorepo.md) builds the `pricing` service they steer. Come back for them.
 
 **Next: [Phase 5 — Making it someone else's platform](phase-5-developer-portal.md).**

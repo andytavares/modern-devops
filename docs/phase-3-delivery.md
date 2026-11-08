@@ -164,7 +164,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    repoURL: https://github.com/andytavares/modern-devops.git
     targetRevision: main
     path: deploy/argocd/apps
   destination:
@@ -191,7 +191,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    repoURL: https://github.com/andytavares/modern-devops.git
     targetRevision: main
     path: deploy/charts/order-platform
     helm:
@@ -212,7 +212,7 @@ spec:
       backoff: { duration: 10s, factor: 2, maxDuration: 3m }
 ```
 
-**`deploy/argocd/apps/platform.yaml`** — the infrastructure we applied by hand, now under GitOps:
+**`deploy/argocd/apps/platform.yaml`**
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -235,7 +235,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/<your-github-user>/modern-devops.git
+    repoURL: https://github.com/andytavares/modern-devops.git
     targetRevision: main
     path: deploy/platform
     directory:

@@ -20,7 +20,7 @@ Run them in this order — cheap and mechanical first, expensive and judgement-b
 ### 1. Structural (scripted)
 
 ```bash
-cd wiki
+cd modern-devops-wiki
 
 # Every [[wikilink]] resolves to a real page
 grep -roh '\[\[[^]]*\]\]' . | tr -d '[]' | sort -u > /tmp/links.txt
@@ -47,7 +47,7 @@ done
 Every URL in the wiki, resolved:
 
 ```bash
-grep -rhoE 'https?://[^ )>]+' wiki/ | sed 's/[.,]$//' | sort -u | while read -r u; do
+grep -rhoE 'https?://[^ )>]+' modern-devops-wiki/ | sed 's/[.,]$//' | sort -u | while read -r u; do
   code=$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 15 "$u")
   [ "$code" = "200" ] || echo "$code  $u"
 done
@@ -112,6 +112,6 @@ wiki-lint — <date>
   needs your call: …
 ```
 
-Then append one line to `wiki/log.md` recording the run and what was fixed.
+Then append one line to `modern-devops-wiki/log.md` recording the run and what was fixed.
 
 If everything passes, say so in one line. Do not manufacture findings to look useful.

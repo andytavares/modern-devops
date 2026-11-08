@@ -15,7 +15,8 @@ checks/                     # the tests that keep the docs honest (see rule 12)
   phase-N-*.md              # one file per phase; original §N.M numbering preserved
   appendices.md             # versions, troubleshooting, omissions, command reference
 raw/                        # IMMUTABLE. Sources dropped by the human: doc excerpts, transcripts, links.
-wiki/                       # CLAUDE-OWNED. Every file here is written and maintained by Claude.
+modern-devops-wiki/         # CLAUDE-OWNED. Every file here is written and maintained by Claude.
+                            #   The directory name is the Obsidian vault name.
   index.md                  # catalog of every page, grouped by role in the platform
   log.md                    # append-only record of every operation, newest last
   open-questions.md         # things we don't know yet, with what it would take to find out
@@ -32,7 +33,8 @@ wiki/                       # CLAUDE-OWNED. Every file here is written and maint
    during a wiki operation: The tutorial changes only
    when the human asks for a tutorial change. If the wiki contradicts the tutorial, that is a
    finding to report, not a thing to silently fix.
-3. **Always update `wiki/index.md` and `wiki/log.md`** after any operation that creates or changes a page.
+3. **Always update `modern-devops-wiki/index.md` and `modern-devops-wiki/log.md`** after any operation
+   that creates or changes a page.
 4. **Cross-reference with `[[wikilinks]]`.** A page with no inbound and no outbound links is a bug.
 5. **YAML frontmatter on every page**, matching the template in the page's own directory conventions.
 6. **Cite.** Claims that come from the tutorial cite `§N.M`. Claims that come from vendor docs cite the
@@ -48,13 +50,13 @@ wiki/                       # CLAUDE-OWNED. Every file here is written and maint
     `order-api` before gRPC exists; that is correct, and back-porting the end state would hand the
     reader code importing a service they have not built. A reader who follows phases 0-7 in order
     must end up holding this repo, with nothing failing on the first attempt. Defects found by
-    running it are recorded in `wiki/` and in Appendix B — the phase text states the correct step
-    and moves on. `checks/` enforces what it can: the single-file edition is assembled, every
+    running it are recorded in `modern-devops-wiki/` and in Appendix B — the phase text states the
+    correct step and moves on. `checks/` enforces what it can: the single-file edition is assembled, every
     listing must name a real path, and a listing that shows a whole file must show the current one.
 
 ## Documentation lookup order
 
-1. `wiki/` — do we already know this?
+1. `modern-devops-wiki/` — do we already know this?
 2. **Context7 MCP** (`resolve-library-id` → `query-docs`) — the canonical, current vendor docs.
 3. `WebFetch` on the official docs URL recorded in the tool's page.
 4. The tutorial, for how *this* platform uses it (which is not the same question as what the tool does).

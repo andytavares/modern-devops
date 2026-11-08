@@ -32,7 +32,7 @@ pants_ignore.add = [
   # Pants would otherwise fail the whole repo with a BuildFileSyntaxError.
   "/deploy/backstage/templates",
   "/portal",          # Backstage owns its own Yarn workspace; not ours to build
-  "/wiki",
+  "/modern-devops-wiki",
   "/raw",
   # Pants honours only the root .gitignore — `--pants-ignore-use-gitignore`
   # "does not yet support reading nested gitignore files" — so frontend/.gitignore

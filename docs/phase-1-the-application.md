@@ -317,6 +317,14 @@ Three decisions worth naming:
 - **`acks="all"` + idempotence.** The default is faster and will silently lose writes when a broker restarts. On a 3-broker cluster you want durability; on a benchmark you want speed. Know which one you configured.
 - **Partition key = order id.** Kafka only guarantees ordering *within a partition*. Keying by order id means all events for one order land on one partition, so a later "order cancelled" can never overtake "order created".
 
+Both directories are Python packages, so both need a marker file — empty, and required:
+
+```bash
+touch services/order-api/order_api/__init__.py services/order-api/tests/__init__.py
+```
+
+**`services/order-api/order_api/__init__.py`** and **`services/order-api/tests/__init__.py`** stay empty for the life of this build.
+
 **`services/order-api/tests/test_api.py`**
 
 ```python
@@ -854,6 +862,47 @@ lose data silently, so it gets tests that fail if anyone reintroduces the naive 
 **`services/order-worker/main_test.go`**
 
 ```go
+package main
+
+import (
+	"context"
+	"errors"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/twmb/franz-go/pkg/kgo"
+)
+
+func TestLoadConfigRequiresBrokers(t *testing.T) {
+	os.Clearenv()
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("expected an error when KAFKA_BROKERS is unset")
+	}
+}
+
+func TestLoadConfigDefaults(t *testing.T) {
+	os.Clearenv()
+	t.Setenv("KAFKA_BROKERS", "a:9092,b:9092")
+	t.Setenv("DDB_TABLE", "orders")
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.brokers) != 2 {
+		t.Fatalf("expected 2 brokers, got %d", len(cfg.brokers))
+	}
+	if cfg.topic != "orders" {
+		t.Fatalf("expected default topic 'orders', got %q", cfg.topic)
+	}
+	if cfg.group != "order-worker" {
+		t.Fatalf("expected default group 'order-worker', got %q", cfg.group)
+	}
+}
+
 var errWriteFailed = errors.New("dynamodb is having a day")
 
 // fakeDDB records every PutItem it is asked to make and fails the ones whose
@@ -899,7 +948,32 @@ func partitionOf(orderIDs ...string) kgo.FetchTopicPartition {
 	return p
 }
 
-// ...
+func equalOffsets(got, want []int64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestProcessPartitionMarksEveryRecordThatWasWritten(t *testing.T) {
+	ddb := &fakeDDB{}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("a", "b", "c"))
+
+	if !equalOffsets(m.marked, []int64{0, 1, 2}) {
+		t.Fatalf("expected offsets 0,1,2 to be marked, got %v", m.marked)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("expected no blocked partitions, got %v", blocked)
+	}
+}
 
 // This is the regression test for the commit semantics: a failed DynamoDB write
 // must stop the commit boundary dead. If someone reintroduces marking (and so
@@ -942,12 +1016,70 @@ func TestProcessPartitionStaysBlockedOnLaterBatches(t *testing.T) {
 		t.Fatalf("a blocked partition must not be written again, got puts %v", ddb.puts)
 	}
 }
+
+// A blocked partition is only cleared by a revoke, which happens outside this
+// function; clearing the entry lets the partition make progress again.
+func TestProcessPartitionResumesOnceUnblocked(t *testing.T) {
+	ddb := &fakeDDB{failOn: map[string]bool{"a": true}}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+	key := partitionKey{topic: "orders", partition: 3}
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("a"))
+	delete(blocked, key)
+
+	ddb.failOn = nil
+	processPartition(context.Background(), ddb, "orders", m, blocked, partitionOf("f"))
+
+	if !equalOffsets(m.marked, []int64{0}) {
+		t.Fatalf("expected offset 0 marked after unblocking, got %v", m.marked)
+	}
+}
+
+// A malformed record can never become valid, so handle skips it. It must still
+// be marked, or one bad message would pin the partition's commit forever.
+func TestProcessPartitionMarksMalformedRecords(t *testing.T) {
+	ddb := &fakeDDB{}
+	m := &fakeMarker{}
+	blocked := map[partitionKey]bool{}
+
+	p := partitionOf("a")
+	p.Records[0].Value = []byte("{not json")
+
+	processPartition(context.Background(), ddb, "orders", m, blocked, p)
+
+	if !equalOffsets(m.marked, []int64{0}) {
+		t.Fatalf("expected the malformed record to be marked, got %v", m.marked)
+	}
+	if len(ddb.puts) != 0 {
+		t.Fatalf("expected no write for a malformed record, got puts %v", ddb.puts)
+	}
+}
+
+func TestHandleWrapsPutItemError(t *testing.T) {
+	ddb := &fakeDDB{failOn: map[string]bool{"a": true}}
+	r := partitionOf("a").Records[0]
+
+	err := handle(context.Background(), ddb, "orders", r)
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, errWriteFailed) {
+		t.Fatalf("expected the underlying error to be wrapped, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "order_id=a") {
+		t.Fatalf("expected the error to name the order, got %q", err.Error())
+	}
+}
 ```
 
-The repo file carries three more: the happy path (`equalOffsets(m.marked, []int64{0, 1, 2})`), one
+Five tests, and the two in the middle are the ones that matter: a failed write must stop the commit
+boundary dead, and it must *stay* stopped on the next batch. The other three cover the happy path,
 that a malformed record is still marked — otherwise one bad message pins the partition's commit
-forever — and one that `handle` wraps the `PutItem` error with the `order_id`. The imports and the
-`equalOffsets` helper are there too.
+forever — and that `handle` wraps the `PutItem` error with the `order_id`.
+
+This listing replaces the one above rather than appending to it: the import block grows, and Go
+rejects both an undefined identifier and an unused import, so the file only compiles as a whole.
 
 > **At-least-once vs exactly-once.** An offset is marked, and so committed, only *after* the DynamoDB write returns success. A crash in between replays the record. Because `PutItem` with the same `order_id` overwrites rather than duplicates, replay is a no-op — the write is idempotent, so at-least-once delivery gives us effectively-once *results*. Exactly-once across Kafka and DynamoDB would need transactional coordination the two systems don't share. **The general lesson: don't buy exactly-once delivery; make your writes idempotent and buy at-least-once, which is cheap.**
 
@@ -1361,6 +1493,12 @@ echo "policy and role created"
 '
 ```
 
+> **This is in-memory state, and it does not survive a restart.** Dev-mode OpenBao keeps the mount,
+> the secrets, the auth methods, the policies and the roles in RAM. When that pod restarts — and it
+> will — all of it is gone, and the first thing you see is External Secrets getting
+> `403 permission denied` from `/v1/auth/kubernetes/login`. Everything in §7.3 and §7.4 is packaged as
+> a re-runnable Job in [§7.5a](#75a-give-humans-an-auth-method-too); that Job is the recovery.
+
 > **Least privilege, concretely.** The `shop-read` policy grants `read` and nothing else — ESO cannot write, delete, or list secret *values*. The role is bound to one ServiceAccount in one namespace, so a compromised pod in another namespace cannot assume it. `ttl=1h` means a stolen token expires within the hour. Those three constraints — capability, identity binding, lifetime — are the whole of secrets access control. Every vault does it the same way.
 
 ### 7.5 Install External Secrets Operator
@@ -1496,38 +1634,83 @@ That 403 is the point of the section. The operator can rotate every credential o
 
 > **`bao kv patch` needs a separate `patch` capability, and it is deliberately not granted.** Every `kv put` in this tutorial is a full overwrite of the version: `kv put shop/backstage github_token=...` on a path that also holds `postgres_password` destroys the other keys. Write every key of a path in one command, and read the path first if you are unsure what is on it.
 
-The same three steps are packaged as a re-runnable Job, because dev-mode OpenBao loses everything on restart and you will need them again:
+Everything you have typed since [§7.3](#73-put-secrets-in-openbao) — the mount, the secrets on it,
+both auth methods, three policies, a role and a user — lives in memory in a dev-mode OpenBao and is
+gone the moment that pod restarts. It **will** restart. So all of it is packaged as one re-runnable
+Job:
 
-**`deploy/platform/openbao-operator-auth.yaml`**
+**`deploy/platform/openbao-bootstrap.yaml`**
 
 ```yaml
-# The human path into OpenBao.
+# Everything OpenBao forgets when its pod restarts, in one re-runnable Job.
 #
-# The machine path already exists: ESO authenticates with its ServiceAccount
-# through the kubernetes auth method and gets the read-only `shop-read` policy.
-# Humans have had nothing, so every operator write has been made with the root
-# token. The root policy is meant for initial setup and emergencies only and
-# should be revoked once a real auth method exists
-# (https://openbao.org/docs/concepts/tokens). This Job builds that auth method:
-# `userpass`, a scoped `shop-admin` policy, and an `operator` user bound to it.
+# This cluster runs OpenBao in dev mode: storage is in-memory, so a restart
+# takes the KV mount, the secrets in it, both auth methods, every policy and
+# every role with it. What survives is only what lives in the Kubernetes API —
+# the ClusterRoleBinding below, and the stale Secrets ESO last synced.
 #
-# Bootstrapping an auth method is itself a root operation — there is no way to
-# create the first non-root path without a root token. That token is supplied at
-# run time out of a Secret rather than committed here:
+# The symptom is not "OpenBao is empty". It is ESO failing to log in at all:
+#
+#   unable to log in with Kubernetes auth: Code: 403. Errors: * permission denied
+#
+# — because a login against an auth method that no longer exists is refused the
+# same way a login with the wrong role is. The ClusterSecretStore goes
+# InvalidProviderConfig and every ExternalSecret stops refreshing.
+#
+# Three sections' worth of setup, in build order:
+#   §7.3  the `shop` KV v2 mount and the secrets the platform consumes
+#   §7.4  the machine path — kubernetes auth, `shop-read`, the `eso` role
+#   §7.5a the human path — userpass, `shop-admin`, the `operator` user
+#
+# Bootstrapping is a root operation: mounting an engine writes `sys/mounts`,
+# enabling an auth method writes `sys/auth`, and writing a policy writes
+# `sys/policies/acl/*`. None of those are granted by any scoped policy, and an
+# identity that could write policies could grant itself anything. So the root
+# token is supplied at run time out of a Secret rather than committed here:
 #
 #   kubectl -n openbao create secret generic openbao-bootstrap \
 #     --from-literal=root-token=root \
 #     --from-literal=operator-password=<choose one> \
+#     --from-literal=nexus-password=ci-password-change-me \
 #     --dry-run=client -o yaml | kubectl apply -f -
 #
+# `nexus-password` must be the password the `ci` user actually has in Nexus
+# (§5.4), not the one the tutorial printed. Nexus owns that credential; this
+# Secret is a second copy of it, and two copies drift. Change it in Nexus and
+# this key becomes a time bomb: everything keeps working off the value already
+# in OpenBao until the next restart re-seeds the stale one, and the symptom is
+# a CI push failing `authentication required` hours later. Rotate both, or
+# neither.
+#
 # A Job's pod template is immutable once created, so re-running this is
-# `kubectl delete -f` then `kubectl apply -f`. The script itself is idempotent:
-# enabling an already-enabled auth method and rewriting an existing policy or
-# user are all no-ops.
+# `kubectl delete -f` then `kubectl apply -f`. The script is idempotent in the
+# way that matters: enabling an enabled mount or auth method and rewriting a
+# policy, role or user are all no-ops, and **existing secret values are left
+# alone**. Re-running it must never rotate a key that live pods are using.
+---
+# OpenBao verifies a presented ServiceAccount JWT by calling the Kubernetes
+# TokenReview API, which requires `system:auth-delegator` on its own
+# ServiceAccount. §7.4 creates this with `kubectl create clusterrolebinding`;
+# it is declared here too so that one `kubectl apply -f` restores the whole
+# machine path. It is cluster-scoped and survives an OpenBao restart, so on a
+# restart recovery this half is already in place and re-applying is a no-op.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openbao-token-review
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: openbao
+    namespace: openbao
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: openbao-operator-auth
+  name: openbao-bootstrap
   namespace: openbao
 spec:
   backoffLimit: 6
@@ -1551,6 +1734,9 @@ spec:
             - name: OPERATOR_PASSWORD
               valueFrom:
                 secretKeyRef: { name: openbao-bootstrap, key: operator-password }
+            - name: NEXUS_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: openbao-bootstrap, key: nexus-password }
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -1559,6 +1745,70 @@ spec:
               echo "waiting for openbao..."
               until bao status >/dev/null 2>&1; do sleep 2; done
 
+              # --- §7.3 the mount, and the secrets on it -------------------
+              # KV v2: versioning and soft-delete. v1 is a flat overwrite with
+              # no history, which is the wrong default for application config.
+              echo "enabling kv v2 at shop/ (idempotent)"
+              bao secrets enable -path=shop -version=2 kv 2>/dev/null || true
+
+              # Only ever create what is missing. `kv put` is a full overwrite
+              # of the version, and a re-run that rotated the signing key would
+              # leave every running order-api pod holding the previous one.
+              if bao kv get -field=signing_key shop/order-api >/dev/null 2>&1; then
+                echo "shop/order-api exists, leaving it alone"
+              else
+                echo "seeding shop/order-api with a new signing key"
+                # No openssl in this image; od+tr over /dev/urandom is the
+                # busybox-safe way to get 32 hex-encoded random bytes.
+                bao kv put shop/order-api \
+                  signing_key="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+              fi
+
+              if bao kv get -field=password shop/nexus >/dev/null 2>&1; then
+                echo "shop/nexus exists, leaving it alone"
+              else
+                echo "seeding shop/nexus"
+                bao kv put shop/nexus username=ci password="$NEXUS_PASSWORD"
+              fi
+
+              # --- §7.4 the machine path ----------------------------------
+              echo "enabling kubernetes auth (idempotent)"
+              bao auth enable kubernetes 2>/dev/null || true
+
+              # No token_reviewer_jwt and no kubernetes_ca_cert, deliberately.
+              # Omitting them is the documented configuration for an OpenBao
+              # inside the cluster it authenticates against: it then reads both
+              # from its own ServiceAccount mount on every request. Passing them
+              # freezes a snapshot of a token Kubernetes rotates hourly, and an
+              # hour later every TokenReview fails `permission denied` — the
+              # same 403 this Job exists to fix, with a much worse cause.
+              bao write auth/kubernetes/config \
+                kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+
+              # Read-only, and only on this mount. KV v2 stores data under
+              # <mount>/data/<path>; forgetting the /data/ segment is the
+              # second most common mistake with v2.
+              echo "writing shop-read policy"
+              bao policy write shop-read - <<'POLICY'
+              path "shop/data/*" {
+                capabilities = ["read"]
+              }
+              path "shop/metadata/*" {
+                capabilities = ["read", "list"]
+              }
+              POLICY
+
+              # Capability, identity binding, lifetime — the whole of secrets
+              # access control. One ServiceAccount, in one namespace, for an
+              # hour.
+              echo "binding the eso role to external-secrets"
+              bao write auth/kubernetes/role/eso \
+                bound_service_account_names=external-secrets \
+                bound_service_account_namespaces=external-secrets \
+                policies=shop-read \
+                ttl=1h
+
+              # --- §7.5a the human path -----------------------------------
               echo "enabling userpass (idempotent)"
               bao auth enable userpass 2>/dev/null || true
 
@@ -1586,18 +1836,37 @@ spec:
 
               echo "--- result ---"
               bao auth list
-              bao policy read shop-admin
+              bao secrets list
+              bao kv list shop/
+              bao read auth/kubernetes/role/eso
 ```
 
 ```bash
 kubectl -n openbao create secret generic openbao-bootstrap \
   --from-literal=root-token=root \
   --from-literal=operator-password=change-me \
+  --from-literal=nexus-password=ci-password-change-me \
   --dry-run=client -o yaml | kubectl apply -f -
 
-kubectl apply -f deploy/platform/openbao-operator-auth.yaml
-kubectl -n openbao logs job/openbao-operator-auth -f
+kubectl apply -f deploy/platform/openbao-bootstrap.yaml
+kubectl -n openbao logs job/openbao-bootstrap -f
 ```
+
+> **What a restart actually looks like, and why the error does not mention OpenBao.** In-memory
+> storage means a restarted OpenBao comes back with no `shop` mount, no `kubernetes` auth method, no
+> policies and no roles. What you see is External Secrets failing to log in:
+>
+> ```
+> unable to log in with Kubernetes auth: Error making API request.
+> URL: PUT http://openbao.openbao.svc.cluster.local:8200/v1/auth/kubernetes/login
+> Code: 403. Errors: * permission denied
+> ```
+>
+> **403 on a login is the same answer for "wrong role" and for "that auth method does not exist"**,
+> which sends people to debug their ServiceAccount binding when the mount is simply not there. Check
+> `bao auth list` before anything else. Recovery is `kubectl delete -f` then `kubectl apply -f` on
+> this Job — a Job's pod template is immutable, so it must be deleted and recreated, and the script is
+> written so a re-run never overwrites a secret value that is already present.
 
 > **The root token is not revoked here, and cannot be.** This cluster runs OpenBao in dev mode, where the root token is a fixed value passed at startup and recreated every time the pod restarts — revoking it accomplishes nothing. In a real cluster the last step of this section is `bao token revoke <root-token>`, after which a new root token exists only if you run `bao operator generate-root` with a quorum of unseal-key holders. That quorum requirement is the whole design: root is an event several people have to agree to, not a string in someone's shell history.
 
@@ -2138,6 +2407,9 @@ metadata:
   labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 4 }}
 spec:
   replicas: {{ .Values.orderWorker.replicas }}
+  # Kubernetes keeps 10 superseded ReplicaSets per Deployment by default. Three
+  # is enough history to roll back through and keeps `kubectl get rs` readable.
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: order-worker
@@ -2151,16 +2423,28 @@ spec:
     metadata:
       labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 8 }}
       annotations:
-        checksum/config: {{ toJson .Values | sha256sum }}
+        # Hashes this service's rendered ConfigMap, which is what reaches the
+        # container through envFrom and therefore never changes the pod template
+        # on its own. Scoping the hash to one file is what keeps an image-tag
+        # rewrite elsewhere in the values tree from rolling this Deployment and
+        # triggering a consumer-group rebalance for no reason.
+        # https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-order-worker.yaml") . | sha256sum }}
         prometheus.io/scrape: "true"
         prometheus.io/path: "/metrics"
         prometheus.io/port: {{ .Values.orderWorker.metricsPort | quote }}
     spec:
-      # Same reason as order-api: no Docker-link env vars in this pod.
+      # Kubernetes injects a Docker-link env var per Service in this namespace:
+      # ORDER_API_PORT, ORDER_WORKER_PORT, PRICING_PORT, FRONTEND_PORT — each
+      # set to "tcp://<clusterIP>:<port>". Any app reading a variable of that
+      # name as its own config gets a URL where it expected an integer:
+      #   ValueError: invalid literal for int() with base 10: 'tcp://10.96...'
+      # Env vars outrank every other config source, so the app cannot win.
+      # Service links are a Docker-links relic nothing here uses.
       enableServiceLinks: false
       serviceAccountName: order-worker
       imagePullSecrets:
-        - name: {{ .Values.global.imagePullSecret }}
+        - name: {{ include "op.imagePullSecret" . }}
       # Give the worker time to finish the in-flight batch and commit offsets
       # after SIGTERM before Kubernetes SIGKILLs it.
       terminationGracePeriodSeconds: 45
@@ -2172,15 +2456,13 @@ spec:
           image: {{ include "op.image" (dict "root" $ "img" .Values.orderWorker.image) }}
           imagePullPolicy: IfNotPresent
           ports:
-            # http-metrics, not metrics. Istio reads the protocol off the port
-            # name, and a name it does not recognise is treated as plain TCP.
             - { name: http-metrics, containerPort: {{ .Values.orderWorker.metricsPort }} }
+          envFrom:
+            - configMapRef: { name: order-worker-config }
           env:
-            {{- include "op.commonEnv" . | nindent 12 }}
-            - name: DDB_TABLE
-              value: {{ .Values.aws.ddbTable | quote }}
-            - name: KAFKA_GROUP
-              value: {{ .Values.orderWorker.consumerGroup | quote }}
+            {{- include "op.awsCredentialEnv" . | nindent 12 }}
+            # Image identity, not configuration: it tracks the tag, so it belongs
+            # in the pod template rather than in the ConfigMap.
             - name: SERVICE_VERSION
               value: {{ .Values.orderWorker.image.tag | quote }}
           startupProbe:
@@ -2210,6 +2492,7 @@ spec:
     app.kubernetes.io/name: order-worker
   ports:
     - { name: http-metrics, port: 9090, targetPort: http-metrics }
+{{- include "op.pdb" (dict "name" "order-worker" "root" $ "replicas" .Values.orderWorker.replicas "selector" (dict "app.kubernetes.io/name" "order-worker")) }}
 {{- end }}
 ```
 
@@ -2225,6 +2508,109 @@ spec:
 >
 > This bites at [Phase 4](phase-4-service-mesh.md), not here — which is exactly why it goes in now.
 > Renaming a port later means editing the Service, the probes and every monitor that selects by name.
+
+**Two monitors ship, and exactly one is ever on.** Both start `false`, because
+`monitoring.coreos.com` does not exist until [§13.2](phase-2-observability.md#132-install) installs
+kube-prometheus-stack — and Argo CD does not skip a resource whose CRD is missing, it fails the whole
+Application sync, which would strand every workload in `shop`.
+[§13.3](phase-2-observability.md#133-confirm-your-app-is-being-scraped) turns on the `ServiceMonitor`;
+[§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created) turns it off and the
+`PodMonitor` on, and the reason it has to is the most useful failure in this tutorial. Turning both on
+double-scrapes every target and doubles your counters.
+
+**`deploy/charts/order-platform/templates/configmap-order-api.yaml`**
+
+```yaml
+{{- if .Values.orderApi.enabled }}
+{{/*
+One ConfigMap per service, each in its own template file, so that the
+checksum/config annotation on a Deployment can hash exactly the file that holds
+that service's configuration and nothing else. A single shared config file would
+put every service's values back into every service's hash.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-api-config
+  labels: {{- include "op.labels" (dict "name" "order-api" "root" $) | nindent 4 }}
+data:
+  {{- include "op.commonConfig" . | nindent 2 }}
+  S3_BUCKET: {{ .Values.aws.s3Bucket | quote }}
+  # PEX unpacks its dependency closure here; see the /tmp volumeMount note on the
+  # Deployment.
+  PEX_ROOT: "/tmp/pex"
+{{- end }}
+```
+
+**`deploy/charts/order-platform/templates/configmap-order-worker.yaml`**
+
+```yaml
+{{- if .Values.orderWorker.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-worker-config
+  labels: {{- include "op.labels" (dict "name" "order-worker" "root" $) | nindent 4 }}
+data:
+  {{- include "op.commonConfig" . | nindent 2 }}
+  DDB_TABLE: {{ .Values.aws.ddbTable | quote }}
+  KAFKA_GROUP: {{ .Values.orderWorker.consumerGroup | quote }}
+{{- end }}
+```
+
+> **Non-secret configuration is a ConfigMap, and the Deployment hashes it.** That `checksum/config`
+> annotation above is what makes a config change roll the pods — Kubernetes does not restart
+> anything when a ConfigMap's contents change, and a process that read its environment at startup
+> never notices.
+
+**`deploy/charts/order-platform/.helmignore`**
+
+```
+BUILD
+```
+
+**`deploy/charts/order-platform/templates/servicemonitor.yaml`**
+
+```yaml
+{{- if .Values.serviceMonitor.enabled }}
+# The pre-mesh scrape path. Prometheus talks straight to each Service's metrics
+# port over plaintext, which is the obvious thing and works fine — right up
+# until STRICT mTLS (§9.4) starts refusing it, at which point every one of these
+# targets goes down and *nothing logs an error*.
+#
+# §9.6 is that failure. The fix is podmonitor.yaml, which scrapes the sidecar's
+# merged endpoint instead. Exactly one of these two should be enabled:
+#   before Istio -> serviceMonitor.enabled: true
+#   after Istio  -> podMonitor.enabled: true
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: order-platform
+  labels:
+    # kube-prometheus-stack's Prometheus selects monitors by this label in the
+    # default configuration we install in §13.
+    release: monitoring
+spec:
+  namespaceSelector:
+    matchNames: ["shop"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: order-platform
+  endpoints:
+    # One entry per port name in use, because a ServiceMonitor selects by port
+    # *name* and silently skips a name that does not exist on a given Service.
+    # order-api serves the app and its metrics on `http`; order-worker and
+    # pricing expose `http-metrics` separately. The `http-` prefix is not
+    # decoration — Istio reads the protocol off the port name, and a name it
+    # does not recognise is treated as plain TCP.
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+    - port: http-metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}
+```
 
 **`deploy/charts/order-platform/templates/podmonitor.yaml`**
 
@@ -2245,24 +2631,48 @@ spec:
     matchLabels:
       app.kubernetes.io/part-of: order-platform
   podMetricsEndpoints:
-    # istio-proxy's MERGED endpoint on 15020: our application metrics (scraped
-    # over loopback inside the pod, per the prometheus.io/* annotations above)
-    # plus Envoy's and Istio's. One scrape, all of it, and it survives STRICT.
+    # istio-proxy's MERGED endpoint on 15020: our application metrics (which the
+    # sidecar scrapes over loopback, from the port and path recorded in
+    # ISTIO_PROMETHEUS_ANNOTATIONS at injection time) plus Envoy's and Istio's.
+    # One scrape, all of it, and it survives STRICT mTLS.
     #
-    # It must be 15020 and it must be addressed by number. Istio: "forwards
-    # requests to the sidecar telemetry port 15020 for merged metrics or 15090
-    # for Envoy-only metrics". 15090 is the one carrying the port NAME
-    # `http-envoy-prom`; 15020 is unnamed in the pod spec, so `port:` cannot
-    # reach it and `portNumber:` is required. Selecting http-envoy-prom gets
-    # you istio_requests_total (Kiali works) but never the application's own
-    # metrics, which is a silent half-failure.
-    - portNumber: 15020
-      path: /stats/prometheus
+    # The address CANNOT be written as `portNumber: 15020`. A PodMonitor's
+    # `port`/`portNumber` are filters on the container ports a pod DECLARES, and
+    # 15020 is not declared by anything — istio-proxy declares 15090
+    # (`http-envoy-prom`, Envoy-only) and 15021 (`status`). Ask for 15020 by
+    # number and the operator emits a keep rule that matches no container, so
+    # every target is dropped during relabeling and the job goes silently empty:
+    # `/targets` shows nothing at all rather than a failure.
+    #
+    # Build the address from the annotations instead. With metrics merging on
+    # (the Istio default) the injector rewrites the pod's prometheus.io/* to
+    # point at the merged endpoint, so `prometheus.io/port` is already 15020.
+    # https://istio.io/latest/docs/ops/integrations/prometheus/
+    - path: /stats/prometheus
       interval: {{ .Values.podMonitor.interval }}
+      relabelings:
+        # One target per pod, not one per container: without this, every
+        # container in the pod produces a target and all of them get rewritten
+        # to the same address, tripling the scrape.
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_container_name]
+          regex: istio-proxy
+        - action: keep
+          sourceLabels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          regex: "true"
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_annotation_prometheus_io_port
+            - __meta_kubernetes_pod_ip
+          regex: (\d+);((([0-9]+?)(\.|$)){4})
+          replacement: $2:$1
+          targetLabel: __address__
 {{- end }}
 ```
 
-> **Why a PodMonitor and not a ServiceMonitor.** A `ServiceMonitor` selects *Services* and scrapes their endpoints by port name — which is exactly what we did before Istio, with one entry for order-api's `http` port and one for order-worker's `http-metrics`. Under STRICT mTLS ([§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created)) both of those scrapes get a connection reset, because Prometheus has no sidecar and no certificate. The merged endpoint lives on the *pod*, on the sidecar's own port, and is not fronted by a Service — so a `PodMonitor` is the only monitor kind that can reach it. `http-envoy-prom` is the port name Istio gives 15090 on every injected pod; `/stats/prometheus` there serves Envoy's metrics with the application's merged in.
+> **Why a PodMonitor and not a ServiceMonitor.** A `ServiceMonitor` selects *Services* and scrapes their endpoints by port name — which is exactly what the file above it does, with one entry for order-api's `http` port and one for order-worker's `http-metrics`. Under STRICT mTLS ([§9.6](phase-4-service-mesh.md#96-the-metrics-problem-you-just-created)) both of those scrapes get a connection reset, because Prometheus has no sidecar and no certificate. The merged endpoint lives on the *pod*, on 15020, and is not fronted by any Service — so a `PodMonitor` is the only monitor kind that can reach it.
+
+> **And it cannot be addressed by port, which is the part that costs an afternoon.** `port:` and `portNumber:` on a `PodMonitor` are **filters over the container ports a pod declares**, not a dial. Nothing declares 15020 — istio-proxy declares 15090 (`http-envoy-prom`, Envoy-only) and 15021 (`status`) — so `portNumber: 15020` generates a keep rule that matches no container and every target is dropped during relabeling. The job then shows **nothing at all** in `/targets`: not a failed target, not an error, an absence. The address has to be built from the `prometheus.io/*` annotations the sidecar injector rewrote, which is what the `relabelings` above do ([Istio](https://istio.io/latest/docs/ops/integrations/prometheus/)).
 
 > **The trap in this swap:** if a pod has no sidecar, it has no `http-envoy-prom` port, so the PodMonitor silently matches nothing and that workload vanishes from Prometheus with no error. A workload that leaves the mesh loses its metrics. Worth an alert of its own — `absent(up{job="order-platform"})` — which is precisely the kind of "the monitoring stopped" condition [§13.5](phase-2-observability.md#135-an-alert-that-means-something) argues you should page on.
 
@@ -2305,15 +2715,47 @@ Nothing has built your services yet. CI does that from [Phase 3](phase-3-deliver
 now you are the CI.
 
 ```bash
+set -e     # a failed build must not fall through to the push, or to the next service
+
 SHA="$(git rev-parse --short=12 HEAD)"
+NEXUS_IP=172.18.255.10      # the address §5.3 pinned with `docker run --ip`
 
 for svc in order-api order-worker; do
-  docker build -f "services/$svc/Dockerfile" -t "nexus:8082/shop/$svc:$SHA" "services/$svc"
+  docker build --add-host "nexus:$NEXUS_IP" \
+    -f "services/$svc/Dockerfile" -t "nexus:8082/shop/$svc:$SHA" "services/$svc"
   docker push "nexus:8082/shop/$svc:$SHA"
 done
 
 echo "$SHA"
 ```
+
+> **`--add-host` is what lets the build reach Nexus, and without it `order-api` cannot build.**
+> [§3.1](#31-order-api-python--fastapi) pinned the index to `http://nexus:8081/...` inside
+> `pyproject.toml` so that `uv.lock` records the registry — and warned that this "pins `nexus:8081`
+> into the project, which is only resolvable in this environment". A `docker build` is *not* this
+> environment. [§5.7](phase-0-foundations.md#57-make-nexus-resolve-from-your-laptop) mapped `nexus` to
+> `127.0.0.1` in your **laptop's** `/etc/hosts`, and inside the build container `127.0.0.1` is the
+> build container, so `uv sync` fails on every wheel with:
+>
+> ```
+> × Failed to download `certifi==2026.7.22`
+> ╰─▶ tcp connect error … Connection refused (os error 111)
+> ```
+>
+> `--add-host` points the name at the address Nexus actually holds on the `kind` network. Note that
+> `order-worker` builds fine **without** this, which is exactly what makes the failure confusing: its
+> Dockerfile resolves Go modules from the public proxy and never touches Nexus at all. One service
+> breaks, the other does not, and the difference is which registry each toolchain was told to use.
+>
+> This is also why `set -e` is on the first line. Without it a failed `docker build` falls straight
+> through to a `docker push` that has nothing to push, and then to the *next* service, which succeeds
+> — so the loop ends on a success message having built half of what you asked for. You find out at
+> [§10.5](#105-install-it), as `ImagePullBackOff` on an image that was never pushed and a Service with
+> no endpoints behind it.
+>
+> CI does not need any of this ([§12.5](phase-3-delivery.md#125-the-pipeline)): the Buildah pod runs
+> *inside* the cluster, where CoreDNS resolves `nexus` from the entry
+> [§5.10](phase-0-foundations.md#510-teach-pods-about-nexus-coredns) added.
 
 > **Use the commit SHA, not `latest`, even by hand.** It costs nothing here and it is the habit the
 > whole delivery story depends on later ([§10.3](#103-render-it-before-you-trust-it)). A tag that can

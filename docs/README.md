@@ -95,8 +95,8 @@ code review. Doing this earlier means installing a large dependency against prob
 It goes *before* Phase 6 because Phase 6 ends by deleting the cluster, and nothing sensibly follows
 that. It also gives Phase 6 something to break: `pricing` is the first synchronous call between two
 services in this platform, which is what makes
-[§9.8](phase-4-service-mesh.md#98-canary-two-versions-of-pricing-behind-one-service)'s canary and
-[§9.9](phase-4-service-mesh.md#99-break-it-on-purpose-fault-injection)'s fault-injection drill
+[§9.9](phase-4-service-mesh.md#99-canary-two-versions-of-pricing-behind-one-service)'s canary and
+[§9.10](phase-4-service-mesh.md#910-break-it-on-purpose-fault-injection)'s fault-injection drill
 runnable at all.
 
 > **Phase 7's sections are new material and exist only in this edition so far.** §17, §18 and §19 have

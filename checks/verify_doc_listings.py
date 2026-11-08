@@ -186,6 +186,80 @@ def drifted_complete_listings(repo):
     return out
 
 
+# `# ... the rest is the same as X` — an elision dressed as a comment. Only a
+# LEADING `...` counts; prose that merely contains an ellipsis does not.
+ELISION_LEAD = re.compile(r"^\s*(#|//|--)\s*(\.\.\.|…)\s*\S")
+
+def elided_listings(repo):
+    """Every listing must be copy-pasteable as a whole file. No snippets.
+
+    `drifted_final_listings` proves a listing is not out of date. It says
+    nothing about whether the listing is *enough*, and that is the difference
+    that keeps biting: §3.2 shipped a `main_test.go` block missing five imports,
+    and §9.10 shipped an 11-line abridgement of a 71-line manifest four lines
+    above a `kubectl apply -f` of that path.
+
+    A listing may show an earlier *stage* of a file — that is the progressive
+    build, and it still pastes. It may never show a *fragment*. An elision
+    marker is the unambiguous signature of one, so it is a hard failure
+    wherever it appears under a bolded path.
+    """
+    repo = Path(repo)
+    _, final = _scan(repo)
+    out = []
+    for (_track, path), (_order, doc, line_no, body) in sorted(final.items()):
+        for ln in body.splitlines():
+            if ELISION.match(ln) or ELISION_LEAD.match(ln):
+                out.append(
+                    f"{doc.relative_to(repo)}:{line_no} {path} is elided "
+                    f"({ln.strip()[:60]}) — show the whole file, never a snippet"
+                )
+                break
+    return out
+
+
+# Files the reader is never meant to type: generated, vendored, produced by a
+# tool the docs invoke, or belonging to the docs' own machinery.
+UNLISTED_OK = re.compile(
+    r"^(\.claude/|checks/(build_single_edition|test_docs_are_current)\.py$"
+    r"|deploy/backstage/templates/|locks/|portal/|frontend/node_modules/"
+    r"|3rdparty/python/linux\.json$|services/order-worker/go\.sum$"
+    r"|frontend/package-lock\.json$|.*/openapi\.json$)"
+)
+
+
+def unlisted_files(repo):
+    """A file the reader must have and is never shown is a wall, not a gap.
+
+    §19 shipped a `pricing` service whose settings, package markers, tests and
+    Dockerfile appeared in no listing, and §17 never listed a single `BUILD`
+    file. Both read as complete prose. The only way to see it is to ask which
+    tracked files the docs never name.
+    """
+    repo = Path(repo)
+    import subprocess
+
+    tracked = subprocess.run(
+        ["git", "-C", str(repo), "ls-files"], capture_output=True, text=True
+    ).stdout.split("\n")
+    docs = " ".join(
+        p.read_text() for p in sorted((repo / "docs").glob("*.md"))
+    )
+    out = []
+    for f in tracked:
+        f = f.strip()
+        if not f or f.startswith(("docs/", "modern-devops-wiki/", "raw/", ".git")):
+            continue
+        if f in ("CLAUDE.md", "README.md", "modern-devops-tutorial.md", ".gitignore"):
+            continue
+        if UNLISTED_OK.match(f):
+            continue
+        if f"`{f}`" in docs:
+            continue
+        out.append(f"{f} — tracked, required, and named in no listing")
+    return out
+
+
 def main():
     """Exit non-zero only on the two rules that are unambiguous.
 
@@ -197,16 +271,22 @@ def main():
     repo = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.cwd()
     missing = missing_paths(repo)
     incomplete = drifted_complete_listings(repo)
+    elided = elided_listings(repo)
+    unlisted = unlisted_files(repo)
     partial = drifted_final_listings(repo)
 
     for x in missing:
         print("  MISSING   " + x)
     for x in incomplete:
         print("  STALE     " + x)
+    for x in elided:
+        print("  FRAGMENT  " + x)
+    for x in unlisted:
+        print("  UNLISTED  " + x)
     for x in partial:
         print("  review    " + x)
 
-    hard = len(missing) + len(incomplete)
+    hard = len(missing) + len(incomplete) + len(elided) + len(unlisted)
     print(f"\nfailures: {hard}    for review (progressive snapshots): {len(partial)}")
     return 1 if hard else 0
 
